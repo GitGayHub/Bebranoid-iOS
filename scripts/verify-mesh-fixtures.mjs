@@ -360,24 +360,28 @@ function tryRunRealSwiftEngine() {
     return null;
   }
 
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bebranoid-mesh-"));
   const tmpBin = path.join(
-    os.tmpdir(),
-    `bebranoid-mesh-dump-${process.pid}${process.platform === "win32" ? ".exe" : ""}`
+    tmpDir,
+    `bebranoid-mesh-dump${process.platform === "win32" ? ".exe" : ""}`
   );
   const engineFile = path.join(iosRoot, "Bebranoid", "MeshBackground", "HarmonoidMeshEngine.swift");
   const fixturesFile = path.join(iosRoot, "Bebranoid", "MeshBackground", "HarmonoidMeshFixtures.swift");
   const dumpScriptFile = path.join(iosRoot, "scripts", "dump-mesh-swift.swift");
+  const mainSwiftFile = path.join(tmpDir, "main.swift");
+  fs.copyFileSync(dumpScriptFile, mainSwiftFile);
 
-  const compileRes = spawnSync("swiftc", [engineFile, fixturesFile, dumpScriptFile, "-o", tmpBin], {
+  const compileRes = spawnSync("swiftc", [engineFile, fixturesFile, mainSwiftFile, "-o", tmpBin], {
     encoding: "utf8",
   });
   if (compileRes.status !== 0) {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     throw new Error(`Failed to compile Swift HarmonoidMeshEngine CLI:\n${compileRes.stderr || compileRes.stdout}`);
   }
 
   const runRes = spawnSync(tmpBin, [], { encoding: "utf8" });
   try {
-    fs.unlinkSync(tmpBin);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch {}
 
   if (runRes.status !== 0) {

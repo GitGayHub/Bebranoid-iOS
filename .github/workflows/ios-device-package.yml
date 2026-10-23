@@ -29,6 +29,8 @@ jobs:
             brew install xcodegen
           fi
           xcodegen generate
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' Bebranoid.xcodeproj/project.pbxproj
+          xcodebuild -list -project Bebranoid.xcodeproj
 
       - name: Resolve SwiftPM Dependencies (TDLibFramework)
         run: |
