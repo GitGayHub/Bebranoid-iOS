@@ -320,7 +320,11 @@ public enum HarmonoidMeshEngine {
         var bSum = 0
         var n = 0
         var i = 0
-        while i + 2 < data.count {
+        while i + 3 < data.count {
+            if Int(data[i + 3]) < 32 {
+                i += 16
+                continue
+            }
             rSum += Int(data[i])
             gSum += Int(data[i + 1])
             bSum += Int(data[i + 2])

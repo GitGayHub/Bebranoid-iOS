@@ -480,7 +480,7 @@ public final class BebranoidAppState: ObservableObject {
         nextTrackAccent = HarmonoidMeshEngine.pickAccentFromPalette(seed)
     }
 
-    public static func deterministicSeedPalette(for key: String) -> [MeshRGB] {
+    nonisolated public static func deterministicSeedPalette(for key: String) -> [MeshRGB] {
         var hash: UInt64 = 1469598103934665603
         for byte in key.utf8 {
             hash ^= UInt64(byte)
