@@ -1,0 +1,105 @@
+name: iOS Compile & Unit Tests (Free macOS CI)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile-and-test:
+    name: Build & Test (iphonesimulator)
+    runs-on: macos-14
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select latest available Xcode
+        run: |
+          ls -la /Applications | grep Xcode || true
+          xcodebuild -version
+          swift --version
+          swiftc --version
+
+      - name: Verify Cross-Language Mesh & Parity Suite (JS ↔ Swift Runtime)
+        run: |
+          node --version
+          node scripts/verify-mesh-fixtures.mjs --require-swift
+          node scripts/verify-parity.mjs
+
+      - name: Generate Xcode Project via XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+          xcodebuild -list -project Bebranoid.xcodeproj
+
+      - name: Detect iOS Simulator Destination
+        id: sim
+        run: |
+          SIM_LINE=$(xcrun simctl list devices available | grep -E "iPhone (17|16|15).*Pro Max" | head -n 1 || true)
+          if [ -z "$SIM_LINE" ]; then
+            SIM_LINE=$(xcrun simctl list devices available | grep -E "iPhone" | head -n 1 || true)
+          fi
+          SIM_UDID=$(echo "$SIM_LINE" | grep -oE "[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}" | head -n 1)
+          SIM_NAME=$(echo "$SIM_LINE" | sed -E 's/^[[:space:]]*([^(]+)[[:space:]]*\([0-9A-F-]+\).*/\1/' | xargs)
+          echo "Selected simulator: $SIM_NAME ($SIM_UDID)"
+          echo "udid=$SIM_UDID" >> "$GITHUB_OUTPUT"
+          echo "name=$SIM_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve SwiftPM Dependencies (TDLibFramework)
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Bebranoid.xcodeproj \
+            -scheme Bebranoid \
+            -derivedDataPath build/DerivedData
+
+      - name: Build for Testing (iphonesimulator)
+        run: |
+          mkdir -p build/logs
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project Bebranoid.xcodeproj \
+            -scheme Bebranoid \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | tee build/logs/xcodebuild-compile.log
+
+      - name: Run Unit Tests (BebranoidTests)
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Bebranoid.xcodeproj \
+            -scheme Bebranoid \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | tee build/logs/xcodebuild-tests.log
+
+      - name: Upload Compile & Test Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bebranoid-Compile-Logs
+          path: |
+            build/logs/*.log
+            docs/mesh-parity-report.json
+            docs/MESH_PARITY_TABLE.md
+          retention-days: 14

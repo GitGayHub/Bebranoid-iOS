@@ -1,0 +1,99 @@
+name: iOS Device Unsigned IPA Package (Sideloadly)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-device-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  device-package:
+    name: Build Release iphoneos & Package Unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Xcode Project via XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Resolve SwiftPM Dependencies (TDLibFramework)
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Bebranoid.xcodeproj \
+            -scheme Bebranoid \
+            -derivedDataPath build/DerivedDataDevice
+
+      - name: Build Release for Generic iOS Device (iphoneos)
+        run: |
+          mkdir -p build/device-logs
+          set -o pipefail
+          xcodebuild build \
+            -project Bebranoid.xcodeproj \
+            -scheme Bebranoid \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedDataDevice \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee build/device-logs/xcodebuild-iphoneos.log
+
+      - name: Package Payload/Bebranoid.app into Unsigned IPA for Sideloadly
+        run: |
+          APP_PATH=$(find build/DerivedDataDevice/Build/Products/Release-iphoneos -name "Bebranoid.app" -maxdepth 2 | head -n 1)
+          echo "Found Release iphoneos app: $APP_PATH"
+
+          rm -rf build/ipa-stage
+          mkdir -p build/ipa-stage/Payload
+          cp -R "$APP_PATH" build/ipa-stage/Payload/Bebranoid.app
+
+          # Verify Info.plist and arm64 Mach-O binary
+          plutil -p build/ipa-stage/Payload/Bebranoid.app/Info.plist | head -n 30
+          lipo -info build/ipa-stage/Payload/Bebranoid.app/Bebranoid
+
+          cd build/ipa-stage
+          zip -qry ../Bebranoid-unsigned-sideloadly.ipa Payload
+          cd ../..
+
+          unzip -l build/Bebranoid-unsigned-sideloadly.ipa | head -n 25
+
+          cat <<EOF > build/SIDELOADLY_INSTRUCTIONS.txt
+          Bebranoid iOS — Инструкция по бесплатной установке на iPhone 15 Pro Max / iPhone 17 Pro Max через Sideloadly (Windows 11)
+          ========================================================================================================================
+          ВАЖНО: Файл Bebranoid-unsigned-sideloadly.ipa является НЕПОДПИСАННЫМ пакетом (Unsigned IPA).
+          Его нельзя установить на iPhone двойным кликом без программы Sideloadly или AltStore, которая подпишет его вашим бесплатным Apple ID.
+
+          Шаги установки на Windows 11:
+          1. Установите iTunes (не из Microsoft Store) и iCloud с официального сайта Apple.
+          2. Установите Sideloadly (https://sideloadly.io/).
+          3. Подключите iPhone по кабелю USB-C и нажмите «Доверять этому компьютеру».
+          4. Откройте Sideloadly, перетащите файл Bebranoid-unsigned-sideloadly.ipa в окно Sideloadly.
+          5. Введите свой обычный бесплатный Apple ID и нажмите Start.
+          6. На iPhone откройте: Настройки -> Основные -> VPN и управление устройством -> выберите ваш Apple ID -> нажмите «Доверять».
+          7. На iOS 16+ включите Режим разработчика: Настройки -> Конфиденциальность и безопасность -> Режим разработчика -> Вкл.
+          EOF
+
+      - name: Upload Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bebranoid-iOS-Unsigned-IPA
+          path: |
+            build/Bebranoid-unsigned-sideloadly.ipa
+            build/SIDELOADLY_INSTRUCTIONS.txt
+            build/device-logs/*.log
+          retention-days: 14

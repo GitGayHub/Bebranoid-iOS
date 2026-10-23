@@ -1,0 +1,179 @@
+name: iOS Simulator Preview & Screenshots (Free macOS CI)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulator-preview:
+    name: Simulator Boot, Launch & Screenshot Capture
+    runs-on: macos-14
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Xcode Project via XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Select Best Available iPhone Pro Max Simulator
+        id: sim
+        run: |
+          mkdir -p build/preview/screenshots
+          mkdir -p build/preview/mesh
+          mkdir -p build/preview/logs
+
+          SIM_LINE=""
+          for MODEL in "iPhone 17 Pro Max" "iPhone 16 Pro Max" "iPhone 15 Pro Max"; do
+            FOUND=$(xcrun simctl list devices available | grep -F "$MODEL (" | head -n 1 || true)
+            if [ -n "$FOUND" ]; then
+              SIM_LINE="$FOUND"
+              break
+            fi
+          done
+          if [ -z "$SIM_LINE" ]; then
+            SIM_LINE=$(xcrun simctl list devices available | grep -E "iPhone.*Pro Max" | head -n 1 || true)
+          fi
+          if [ -z "$SIM_LINE" ]; then
+            SIM_LINE=$(xcrun simctl list devices available | grep -E "iPhone" | head -n 1 || true)
+          fi
+
+          DEVICE_UDID=$(echo "$SIM_LINE" | grep -oE "[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}" | head -n 1)
+          DEVICE_NAME=$(echo "$SIM_LINE" | sed -E 's/^[[:space:]]*([^(]+)[[:space:]]*\([0-9A-F-]+\).*/\1/' | xargs)
+          XCODE_VER=$(xcodebuild -version | tr '\n' ' ')
+
+          echo "udid=$DEVICE_UDID" >> "$GITHUB_OUTPUT"
+          echo "name=$DEVICE_NAME" >> "$GITHUB_OUTPUT"
+
+          cat <<EOF > build/preview/simulator-device.json
+          {
+            "deviceName": "$DEVICE_NAME",
+            "deviceUDID": "$DEVICE_UDID",
+            "xcodeVersion": "$XCODE_VER",
+            "capturedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+
+      - name: Build Debug App for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Bebranoid.xcodeproj \
+            -scheme Bebranoid \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | tee build/preview/logs/build-simulator.log
+
+      - name: Boot Simulator, Install App & Capture 10 Screen Screenshots + Fixed Mesh Frames
+        run: |
+          DEVICE_UDID="${{ steps.sim.outputs.udid }}"
+          APP_PATH=$(find build/DerivedData/Build/Products/Debug-iphonesimulator -name "Bebranoid.app" -maxdepth 2 | head -n 1)
+          echo "Built Simulator App: $APP_PATH"
+
+          xcrun simctl boot "$DEVICE_UDID" || true
+          xcrun simctl bootstatus "$DEVICE_UDID" -b
+          xcrun simctl ui "$DEVICE_UDID" appearance dark || true
+          xcrun simctl status_bar "$DEVICE_UDID" override --time "9:41" --batteryState charged --batteryLevel 100 || true
+
+          xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
+
+          capture_screen() {
+            local SCREEN_ARG="$1"
+            local OUT_FILE="$2"
+            shift 2
+            echo "Launching Bebranoid for screen=$SCREEN_ARG $* -> $OUT_FILE"
+            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+            xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo "--screen=$SCREEN_ARG" "$@" >> build/preview/logs/launch-logs.txt 2>&1
+            sleep 2.2
+            xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
+          }
+
+          capture_screen "library"     "build/preview/screenshots/01-library.png"
+          capture_screen "tracks"      "build/preview/screenshots/02-tracks.png"
+          capture_screen "albums"      "build/preview/screenshots/03-albums.png"
+          capture_screen "artists"     "build/preview/screenshots/04-artists.png"
+          capture_screen "playlists"   "build/preview/screenshots/05-playlists.png"
+          capture_screen "player"      "build/preview/screenshots/06-player.png"
+          capture_screen "lyrics"      "build/preview/screenshots/07-lyrics.png"
+          capture_screen "queue"       "build/preview/screenshots/08-queue.png"
+          capture_screen "settings"    "build/preview/screenshots/09-settings.png"
+          capture_screen "mini-player" "build/preview/screenshots/10-mini-player.png"
+
+          # Capture 4 fixed animation time frames of HarmonoidMeshBackground (t = 0.0, 3.5, 7.0, 10.0s)
+          capture_screen "player" "build/preview/mesh/mesh-time-0.0s.png"  "--mesh-fixture=vivid" "--mesh-time=0.0"
+          capture_screen "player" "build/preview/mesh/mesh-time-3.5s.png"  "--mesh-fixture=vivid" "--mesh-time=3.5"
+          capture_screen "player" "build/preview/mesh/mesh-time-7.0s.png"  "--mesh-fixture=vivid" "--mesh-time=7.0"
+          capture_screen "player" "build/preview/mesh/mesh-time-10.0s.png" "--mesh-fixture=vivid" "--mesh-time=10.0"
+
+          # Capture 4 reference HarmonoidMeshBackground cover fixtures
+          capture_screen "player" "build/preview/mesh/mesh-01-vivid.png"    "--mesh-fixture=vivid"
+          capture_screen "player" "build/preview/mesh/mesh-02-pastel.png"   "--mesh-fixture=pastel"
+          capture_screen "player" "build/preview/mesh/mesh-03-dark-red.png" "--mesh-fixture=dark-red"
+          capture_screen "player" "build/preview/mesh/mesh-04-bw.png"       "--mesh-fixture=bw"
+
+          # Record short 4s MP4 video of live HarmonoidMeshBackground animation in Player
+          xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+          xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo --screen=player --mesh-fixture=vivid >> build/preview/logs/launch-logs.txt 2>&1
+          xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 build/preview/preview-animation.mp4 &
+          REC_PID=$!
+          sleep 4
+          kill -INT "$REC_PID" >/dev/null 2>&1 || true
+          wait "$REC_PID" >/dev/null 2>&1 || true
+
+          # Package Simulator .app bundle
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/Bebranoid-iOS-Simulator-App.zip
+
+          # Generate preview-manifest.json
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const shotsDir = "build/preview/screenshots";
+            const meshDir = "build/preview/mesh";
+            const shots = fs.existsSync(shotsDir) ? fs.readdirSync(shotsDir).sort() : [];
+            const meshShots = fs.existsSync(meshDir) ? fs.readdirSync(meshDir).sort() : [];
+            const dev = JSON.parse(fs.readFileSync("build/preview/simulator-device.json", "utf8"));
+            const manifest = {
+              commitSha: process.env.GITHUB_SHA,
+              branch: process.env.GITHUB_REF_NAME,
+              simulator: dev,
+              screenshots: shots.map(f => ({ file: f, sizeBytes: fs.statSync(path.join(shotsDir, f)).size })),
+              meshFrames: meshShots.map(f => ({ file: f, sizeBytes: fs.statSync(path.join(meshDir, f)).size })),
+              hasAnimationVideo: fs.existsSync("build/preview/preview-animation.mp4")
+            };
+            fs.writeFileSync("build/preview/preview-manifest.json", JSON.stringify(manifest, null, 2));
+          '
+
+      - name: Upload Bebranoid-iOS-Preview Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bebranoid-iOS-Preview
+          path: |
+            build/preview/**
+          retention-days: 14
+
+      - name: Upload Bebranoid-iOS-Simulator-App.zip Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bebranoid-iOS-Simulator-App
+          path: build/Bebranoid-iOS-Simulator-App.zip
+          retention-days: 14

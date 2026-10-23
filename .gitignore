@@ -1,0 +1,29 @@
+# Xcode & SwiftPM build artifacts
+build/
+DerivedData/
+.build/
+.swiftpm/
+*.ipa
+*.app
+*.dSYM.zip
+*.dSYM
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Local CI downloaded artifacts & secrets
+artifacts/
+tdlib/
+*.session
+cookies*.txt
+*.p12
+*.mobileprovision
+*.pem
+*.key
+.env
+.env.*
