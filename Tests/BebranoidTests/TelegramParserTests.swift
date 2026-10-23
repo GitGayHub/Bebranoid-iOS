@@ -8,7 +8,7 @@ import XCTest
 final class TelegramParserTests: XCTestCase {
     private let testMainChatId = "-1001111111111"
     private let testMainChatTitle = "Cloud Music Main"
-    private let testArchiveChatId = "-1002222222222"
+    private let testArchiveChatId = "-1001111111112"
     private let testArchiveChatTitle = "Cloud Music Archive"
 
     func testParseCaptionAndResolveAlbum() {

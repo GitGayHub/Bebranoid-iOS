@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-23T04:24:08.998Z",
-  "swiftRuntimeExecuted": false,
+  "generatedAt": "2026-10-23T04:43:19.256Z",
+  "swiftRuntimeExecuted": true,
   "fixtures": [
     {
       "id": "solid",
@@ -248,7 +248,7 @@
       ],
       "maxChannelDelta": 0,
       "maxFloatDelta": 0,
-      "verifiedAgainstSwiftRuntime": false
+      "verifiedAgainstSwiftRuntime": true
     },
     {
       "id": "bw",
@@ -496,7 +496,7 @@
       ],
       "maxChannelDelta": 0,
       "maxFloatDelta": 0,
-      "verifiedAgainstSwiftRuntime": false
+      "verifiedAgainstSwiftRuntime": true
     },
     {
       "id": "dark-red",
@@ -750,7 +750,7 @@
       ],
       "maxChannelDelta": 0,
       "maxFloatDelta": 0,
-      "verifiedAgainstSwiftRuntime": false
+      "verifiedAgainstSwiftRuntime": true
     },
     {
       "id": "vivid",
@@ -1016,7 +1016,7 @@
       ],
       "maxChannelDelta": 0,
       "maxFloatDelta": 0,
-      "verifiedAgainstSwiftRuntime": false
+      "verifiedAgainstSwiftRuntime": true
     },
     {
       "id": "pastel",
@@ -1270,7 +1270,7 @@
       ],
       "maxChannelDelta": 0,
       "maxFloatDelta": 0,
-      "verifiedAgainstSwiftRuntime": false
+      "verifiedAgainstSwiftRuntime": true
     },
     {
       "id": "transparent",
@@ -1511,7 +1511,7 @@
       ],
       "maxChannelDelta": 0,
       "maxFloatDelta": 0,
-      "verifiedAgainstSwiftRuntime": false
+      "verifiedAgainstSwiftRuntime": true
     },
     {
       "id": "neutral",
@@ -1765,7 +1765,7 @@
       ],
       "maxChannelDelta": 0,
       "maxFloatDelta": 0,
-      "verifiedAgainstSwiftRuntime": false
+      "verifiedAgainstSwiftRuntime": true
     }
   ]
 }

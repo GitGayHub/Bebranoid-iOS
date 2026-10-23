@@ -134,11 +134,17 @@ jobs:
           # Record short 4s MP4 video of live HarmonoidMeshBackground animation in Player
           xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
           xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo --screen=player --mesh-fixture=vivid >> build/preview/logs/launch-logs.txt 2>&1
-          xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 build/preview/preview-animation.mp4 &
+          set -m
+          xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 --force build/preview/preview-animation.mp4 &
           REC_PID=$!
           sleep 4
           kill -INT "$REC_PID" >/dev/null 2>&1 || true
+          sleep 2
+          kill -TERM "$REC_PID" >/dev/null 2>&1 || true
+          sleep 1
+          kill -KILL "$REC_PID" >/dev/null 2>&1 || true
           wait "$REC_PID" >/dev/null 2>&1 || true
+          set +m
 
           # Package Simulator .app bundle
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/Bebranoid-iOS-Simulator-App.zip
