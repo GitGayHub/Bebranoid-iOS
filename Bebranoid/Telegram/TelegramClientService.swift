@@ -264,10 +264,14 @@ public final class TelegramClientService: @unchecked Sendable {
         }
     }
 
-    public var isAuthorized: Bool {
+    private func withLock<T>(_ body: () -> T) -> T {
         lock.lock()
-        let step = currentAuthStep
-        lock.unlock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    public var isAuthorized: Bool {
+        let step = withLock { currentAuthStep }
         if step == .authorized {
             return true
         }
@@ -390,15 +394,11 @@ public final class TelegramClientService: @unchecked Sendable {
 
         do {
             _ = try await bridge.sendAsync(request, timeoutSeconds: 15.0)
-            lock.lock()
-            tdlibParametersConfigured = true
-            lock.unlock()
+            withLock { tdlibParametersConfigured = true }
         } catch let error as NSError {
             // Если TDLib уже инициализировал параметры в текущей сессии, продолжаем работу
             if error.localizedDescription.lowercased().contains("unexpected settdlibparameters") {
-                lock.lock()
-                tdlibParametersConfigured = true
-                lock.unlock()
+                withLock { tdlibParametersConfigured = true }
                 return
             }
             throw error
@@ -426,9 +426,7 @@ public final class TelegramClientService: @unchecked Sendable {
 
         try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
 
-        lock.lock()
-        pendingPhoneNumber = cleanPhone
-        lock.unlock()
+        withLock { pendingPhoneNumber = cleanPhone }
 
         let request: [String: Any] = [
             "@type": "setAuthenticationPhoneNumber",
@@ -446,10 +444,10 @@ public final class TelegramClientService: @unchecked Sendable {
         let authState = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 10.0)
         let stateType = (authState?["@type"] as? String) ?? "authorizationStateWaitCode"
 
-        lock.lock()
-        currentAuthStep = .awaitingCode
-        let hint = password2FAHint
-        lock.unlock()
+        let hint: String? = withLock {
+            currentAuthStep = .awaitingCode
+            return password2FAHint
+        }
 
         return (stateType, hint)
     }
@@ -495,30 +493,28 @@ public final class TelegramClientService: @unchecked Sendable {
 
         switch stateType {
         case "authorizationStateWaitPassword":
-            lock.lock()
-            currentAuthStep = .awaiting2FAPassword
-            password2FAHint = state["password_hint"] as? String
-            lock.unlock()
+            withLock {
+                currentAuthStep = .awaiting2FAPassword
+                password2FAHint = state["password_hint"] as? String
+            }
             return .awaiting2FAPassword
 
         case "authorizationStateReady":
             let me = try? await bridge.sendAsync(["@type": "getMe"], timeoutSeconds: 10.0)
             let resolvedPhone = (me?["phone_number"] as? String).map { $0.hasPrefix("+") ? $0 : "+\($0)" }
-            lock.lock()
-            currentAuthStep = .authorized
-            let fallback = pendingPhoneNumber
-            lock.unlock()
+            let fallback: String? = withLock {
+                currentAuthStep = .authorized
+                return pendingPhoneNumber
+            }
             finalizeAuthorizedState(fallbackPhone: resolvedPhone ?? fallback)
             return .authorized
 
         case "authorizationStateWaitCode":
-            lock.lock()
-            currentAuthStep = .awaitingCode
-            lock.unlock()
+            withLock { currentAuthStep = .awaitingCode }
             return .awaitingCode
 
         default:
-            return currentAuthStep
+            return withLock { currentAuthStep }
         }
     }
 
@@ -978,10 +974,10 @@ public final class TelegramClientService: @unchecked Sendable {
                     "synchronous": false
                 ], timeoutSeconds: 15.0)
 
-                // Мониторим прогресс скачивания файла TDLib с кооперативной проверкой вытеснения (`token.isPreempted()`)
+                // Мониторим прогресс скачивания файла TDLib с кооперативной проверкой вытеснения (`token.isPreempted`)
                 let startWait = Date()
                 while Date().timeIntervalSince(startWait) < 300.0 {
-                    if token.isPreempted() {
+                    if token.isPreempted {
                         self.bridge.sendFireAndForget([
                             "@type": "cancelDownloadFile",
                             "file_id": fileId,
@@ -1096,9 +1092,7 @@ public final class TelegramClientService: @unchecked Sendable {
             return 32
         case .nextTrackPrefetch:
             return 24
-        case .userInitiated:
-            return 16
-        case .backgroundSync:
+        case .backgroundBatch:
             return 4
         }
     }

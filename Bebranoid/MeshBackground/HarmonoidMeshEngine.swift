@@ -290,7 +290,7 @@ public enum HarmonoidMeshEngine {
 
         let mapped = buckets.values.sorted { a, b in
             if abs(b.score - a.score) > 1e-12 {
-                return b.score < a.score ? false : true
+                return a.score > b.score
             }
             return a.insertionOrder < b.insertionOrder
         }.prefix(maxColors).map { v in
@@ -363,7 +363,7 @@ public enum HarmonoidMeshEngine {
         }
         let list = palette.enumerated().sorted { a, b in
             if abs(b.element.score - a.element.score) > 1e-12 {
-                return a.element.score < b.element.score
+                return a.element.score > b.element.score
             }
             return a.offset < b.offset
         }.map { $0.element }
@@ -406,7 +406,7 @@ public enum HarmonoidMeshEngine {
         }
         let list = palette.enumerated().sorted { a, b in
             if abs(b.element.score - a.element.score) > 1e-12 {
-                return a.element.score < b.element.score
+                return a.element.score > b.element.score
             }
             return a.offset < b.offset
         }.map { $0.element }
