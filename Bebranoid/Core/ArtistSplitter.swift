@@ -66,7 +66,7 @@ public enum ArtistSplitter {
         func scoreVariant(_ text: String, count: Int) -> Double {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             let isAllLower = trimmed == trimmed.lowercased()
-            let isAllUpper = trimmed == trimmed.uppercased() && trimmed.count > 4
+            let isAllUpper = trimmed == trimmed.uppercased() && trimmed.count > 1
             var styleBonus = 0.0
             if !isAllLower && !isAllUpper {
                 styleBonus = 2.5

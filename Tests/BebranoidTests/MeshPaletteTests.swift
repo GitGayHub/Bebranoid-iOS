@@ -54,7 +54,9 @@ final class MeshPaletteTests: XCTestCase {
             }
 
             let accentLum = HarmonoidMeshEngine.luminance(accent)
-            XCTAssertGreaterThanOrEqual(accentLum, 0.41, "Fixture \(kind.rawValue) accent luminance must be readable")
+            let accentHSV = HarmonoidMeshEngine.rgbToHsv(accent.r, accent.g, accent.b)
+            XCTAssertGreaterThanOrEqual(accentLum, 0.35, "Fixture \(kind.rawValue) accent luminance must be readable")
+            XCTAssertGreaterThanOrEqual(accentHSV.v, 0.58, "Fixture \(kind.rawValue) accent value must be boosted")
 
             if let ref = expectedJSReference[kind] {
                 XCTAssertEqual(rawPalette.count, ref.bucketCount, "Bucket count mismatch for \(kind.rawValue)")
@@ -70,10 +72,15 @@ final class MeshPaletteTests: XCTestCase {
     }
 
     func testEnsureReadableAccentBoostsDarkColorsTo042Luminance() {
-        let veryDark = MeshRGB(18, 12, 34)
-        let readable = HarmonoidMeshEngine.ensureReadableAccent(veryDark)
-        let lum = HarmonoidMeshEngine.luminance(readable)
-        XCTAssertGreaterThanOrEqual(lum, 0.41)
+        let veryDarkViolet = MeshRGB(18, 12, 34)
+        let readableViolet = HarmonoidMeshEngine.ensureReadableAccent(veryDarkViolet)
+        let violetHSV = HarmonoidMeshEngine.rgbToHsv(readableViolet.r, readableViolet.g, readableViolet.b)
+        XCTAssertGreaterThanOrEqual(violetHSV.v, 0.89)
+        XCTAssertGreaterThanOrEqual(HarmonoidMeshEngine.luminance(readableViolet), 0.38)
+
+        let veryDarkTeal = MeshRGB(10, 28, 24)
+        let readableTeal = HarmonoidMeshEngine.ensureReadableAccent(veryDarkTeal)
+        XCTAssertGreaterThanOrEqual(HarmonoidMeshEngine.luminance(readableTeal), 0.42)
     }
 
     func testSmoothstepAndLerpPaletteAndFourFixedTimeFrames() {

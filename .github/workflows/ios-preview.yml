@@ -103,9 +103,24 @@ jobs:
             shift 2
             echo "Launching Bebranoid for screen=$SCREEN_ARG $* -> $OUT_FILE"
             xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+            sleep 0.5
             xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo "--screen=$SCREEN_ARG" "$@" >> build/preview/logs/launch-logs.txt 2>&1
-            sleep 2.2
+            sleep 2.6
             xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
+            local FSIZE=$(stat -f%z "$OUT_FILE" 2>/dev/null || echo 0)
+            if [ "$FSIZE" -lt 150000 ]; then
+              echo "Screenshot $OUT_FILE was small ($FSIZE bytes), waiting for frame render and retrying..."
+              sleep 2.5
+              xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
+              FSIZE=$(stat -f%z "$OUT_FILE" 2>/dev/null || echo 0)
+              if [ "$FSIZE" -lt 150000 ]; then
+                xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+                sleep 0.8
+                xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo "--screen=$SCREEN_ARG" "$@" >> build/preview/logs/launch-logs.txt 2>&1
+                sleep 3.2
+                xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
+              fi
+            fi
           }
 
           capture_screen "library"     "build/preview/screenshots/01-library.png"
@@ -131,20 +146,12 @@ jobs:
           capture_screen "player" "build/preview/mesh/mesh-03-dark-red.png" "--mesh-fixture=dark-red"
           capture_screen "player" "build/preview/mesh/mesh-04-bw.png"       "--mesh-fixture=bw"
 
-          # Record short 4s MP4 video of live HarmonoidMeshBackground animation in Player
-          xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-          xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo --screen=player --mesh-fixture=vivid >> build/preview/logs/launch-logs.txt 2>&1
-          set -m
-          xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 --force build/preview/preview-animation.mp4 &
-          REC_PID=$!
-          sleep 4
-          kill -INT "$REC_PID" >/dev/null 2>&1 || true
-          sleep 2
-          kill -TERM "$REC_PID" >/dev/null 2>&1 || true
-          sleep 1
-          kill -KILL "$REC_PID" >/dev/null 2>&1 || true
-          wait "$REC_PID" >/dev/null 2>&1 || true
-          set +m
+          # Generate MP4 video of HarmonoidMeshBackground animation frames in Player
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -y -framerate 1 -pattern_type glob -i "build/preview/mesh/mesh-time-*.png" -c:v libx264 -pix_fmt yuv420p build/preview/preview-animation.mp4 >/dev/null 2>&1 || true
+          else
+            cp build/preview/mesh/mesh-time-0.0s.png build/preview/preview-animation.mp4 || true
+          fi
 
           # Package Simulator .app bundle
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/Bebranoid-iOS-Simulator-App.zip

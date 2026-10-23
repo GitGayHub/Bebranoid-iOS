@@ -182,16 +182,25 @@ public enum LRCParser {
             }
 
             var finalizedWords: [LyricWordToken]?
+            var effectiveLineEndTime = nextTime
             if let rw = entry.rawWords, !rw.isEmpty {
                 var tokens: [LyricWordToken] = []
                 for wi in 0..<rw.count {
                     let wStart = rw[wi].time
-                    let wEnd: Double = (wi + 1 < rw.count)
-                        ? max(wStart + 0.08, rw[wi + 1].time)
-                        : max(wStart + 0.20, nextTime)
+                    let wEnd: Double
+                    if wi + 1 < rw.count {
+                        wEnd = max(wStart + 0.08, rw[wi + 1].time)
+                    } else if nextTime - wStart >= 3.5 {
+                        wEnd = wStart + 0.40
+                    } else {
+                        wEnd = max(wStart + 0.20, nextTime)
+                    }
                     tokens.append(LyricWordToken(text: rw[wi].text, time: wStart, endTime: wEnd))
                 }
                 finalizedWords = tokens
+                if let lastTokenEnd = tokens.last?.endTime {
+                    effectiveLineEndTime = lastTokenEnd
+                }
             }
 
             let lineIndex = builtLines.count
@@ -200,7 +209,7 @@ public enum LRCParser {
                 LyricLineItem(
                     id: lineIndex,
                     time: entry.time,
-                    endTime: nextTime,
+                    endTime: effectiveLineEndTime,
                     text: entry.text,
                     words: finalizedWords,
                     romanized: romanized
