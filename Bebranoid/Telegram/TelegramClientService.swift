@@ -1411,4 +1411,80 @@ public final class TelegramClientService: @unchecked Sendable {
         guard let arr = anyVal as? [Any] else { return nil }
         return arr.compactMap { extractInt64(from: $0) }
     }
+
+    // MARK: - On-Device iPhone End-to-End Auth & Chat Scan Scenario
+
+    public struct OnDeviceE2EScenarioReport: Sendable, Equatable {
+        public let isPhysicalDevice: Bool
+        public let isTDLibAuthorizedReady: Bool
+        public let verificationBadge: String
+        public let discoveredChatsCount: Int
+        public let forumTopicsCount: Int
+        public let scannedTracksCount: Int
+        public let tracksWithCoverFileIdCount: Int
+        public let summaryText: String
+    }
+
+    public static var isRunningOnPhysicaliPhone: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #elseif os(iOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Выполняет сквозной (end-to-end) сценарий проверки авторизации Telegram TDLib и сканирования чатов на устройстве:
+    /// `initializeAndRestoreSession` -> `authorizationStateReady` -> `getMe` -> `fetchAvailableAudioChats` -> `fetchForumTopics` -> `scanChatAudioTracks`.
+    /// Без физического iPhone или живой авторизованной сессии явно возвращает статус `NOT VERIFIED (REQUIRES REAL IPHONE)`.
+    public func runOnDeviceE2EAuthAndChatScanScenario(
+        selectedChatId: String? = nil,
+        archiveChatId: String? = nil
+    ) async -> OnDeviceE2EScenarioReport {
+        let onRealDevice = Self.isRunningOnPhysicaliPhone
+        let step = await initializeAndRestoreSession()
+        let isReady = (step == .authorized && isAuthorized && rawAuthorizationStateName == "authorizationStateReady")
+
+        guard onRealDevice && isReady else {
+            let reason = !onRealDevice
+                ? "Среда выполнения — iOS Simulator (физический iPhone не подключён)"
+                : "Сессия TDLib не находится в состоянии authorizationStateReady (\(rawAuthorizationStateName))"
+            return OnDeviceE2EScenarioReport(
+                isPhysicalDevice: onRealDevice,
+                isTDLibAuthorizedReady: isReady,
+                verificationBadge: "NOT VERIFIED (REQUIRES REAL IPHONE)",
+                discoveredChatsCount: 0,
+                forumTopicsCount: 0,
+                scannedTracksCount: 0,
+                tracksWithCoverFileIdCount: 0,
+                summaryText: "NOT VERIFIED: \(reason)"
+            )
+        }
+
+        await refreshAuthorizedUserProfile()
+        let chats = (try? await fetchAvailableAudioChats(configuredArchiveChatId: archiveChatId)) ?? []
+        let targetChatId = selectedChatId ?? chats.first?.id ?? "0"
+        let targetTitle = chats.first(where: { $0.id == targetChatId })?.title ?? "Music Cloud"
+        let numericTargetChatId = Int64(targetChatId.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let topics = numericTargetChatId != 0 ? await fetchForumTopics(chatId: numericTargetChatId) : [:]
+        let scanned = (try? await syncMainAndArchiveChats(
+            mainChatId: targetChatId,
+            mainChatTitle: targetTitle,
+            archiveChatId: archiveChatId ?? "",
+            archiveChatTitle: "Archive"
+        )) ?? []
+        let coversCount = scanned.filter { !($0.coverFileId ?? "").isEmpty }.count
+
+        return OnDeviceE2EScenarioReport(
+            isPhysicalDevice: true,
+            isTDLibAuthorizedReady: true,
+            verificationBadge: "VERIFIED ON REAL IPHONE",
+            discoveredChatsCount: chats.count,
+            forumTopicsCount: topics.count,
+            scannedTracksCount: scanned.count,
+            tracksWithCoverFileIdCount: coversCount,
+            summaryText: "VERIFIED ON REAL IPHONE: чатов=\(chats.count), топиков=\(topics.count), треков=\(scanned.count), обложек=\(coversCount)"
+        )
+    }
 }

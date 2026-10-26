@@ -316,7 +316,8 @@ public struct FullScreenPlayerView: View {
     }
 
     private var progressAndTechnicalFooter: some View {
-        let maxDur = max(1.0, appState.duration)
+        let effectiveDuration = appState.duration > 0 ? appState.duration : (track?.duration ?? 0.0)
+        let maxDur = max(1.0, effectiveDuration)
         let clampedPos = min(maxDur, max(0.0, displayedTime))
 
         return VStack(spacing: 8) {
@@ -373,7 +374,7 @@ public struct FullScreenPlayerView: View {
 
                 Spacer()
 
-                Text(Self.formatSeconds(appState.duration))
+                Text(Self.formatSeconds(effectiveDuration))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.62))
             }

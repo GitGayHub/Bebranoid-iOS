@@ -29,7 +29,17 @@ public struct QueueSheetView: View {
                                     Text("\(index + 1)")
                                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                                         .foregroundStyle(isCurrent ? appState.accentSwiftUIColor : .white.opacity(0.45))
-                                        .frame(width: 26, alignment: .leading)
+                                        .frame(width: 24, alignment: .leading)
+
+                                    ArtworkThumbnailView(
+                                        track: track,
+                                        localPath: appState.libraryState.customAlbumCovers[track.album] ?? track.coverPath,
+                                        remoteURL: track.remoteArtworkURL,
+                                        fallbackSeed: "\(track.album)|\(track.artist)",
+                                        cornerRadius: 10,
+                                        sizeTier: .listThumbnail
+                                    )
+                                    .frame(width: 44, height: 44)
 
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(track.title)
@@ -48,6 +58,10 @@ public struct QueueSheetView: View {
                                         Image(systemName: "waveform")
                                             .foregroundStyle(appState.accentSwiftUIColor)
                                     }
+
+                                    Text(FullScreenPlayerView.formatSeconds(track.duration))
+                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.55))
                                 }
                             }
                             .listRowBackground(Color.white.opacity(isCurrent ? 0.12 : 0.04))

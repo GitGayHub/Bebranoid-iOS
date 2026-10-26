@@ -182,6 +182,7 @@ public final class BebranoidAppState: ObservableObject {
 
     private func bindAudioEngine() {
         audioEngine.$isPlaying
+            .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] playing in
                 self?.isPlaying = playing
@@ -190,6 +191,7 @@ public final class BebranoidAppState: ObservableObject {
             .store(in: &cancellables)
 
         audioEngine.$currentTime
+            .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] time in
                 self?.currentTime = time
@@ -197,6 +199,7 @@ public final class BebranoidAppState: ObservableObject {
             .store(in: &cancellables)
 
         audioEngine.$duration
+            .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] dur in
                 self?.duration = dur
@@ -204,6 +207,7 @@ public final class BebranoidAppState: ObservableObject {
             .store(in: &cancellables)
 
         audioEngine.$crossfadeProgress
+            .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] prog in
                 self?.crossfadeProgress = prog

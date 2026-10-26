@@ -221,7 +221,7 @@ final class ArtworkServiceTests: XCTestCase {
 
     // MARK: - 4. Telegram TDLib Single-Source-of-Truth Auth Guard & Cover File ID Parsing
 
-    func testTelegramAuthorizationRequiresTDLibReadyStateNotKeychainMarker() {
+    func testTelegramAuthorizationRequiresTDLibReadyStateNotKeychainMarker() async {
         // Сохраняем маркер в Keychain и проверяем, что без TDLib authorizationStateReady
         // TelegramClientService.shared.isAuthorized остаётся FALSE (исправление бага)
         KeychainHelper.shared.saveString("legacy_saved_marker", for: .telegramSessionData)
@@ -233,6 +233,15 @@ final class ArtworkServiceTests: XCTestCase {
                 "TelegramClientService.isAuthorized обязан зависеть только от TDLib authorizationStateReady, а не от маркера в Keychain"
             )
         }
+
+        // Проверяем E2E сценарий авторизации и сканирования чатов на iPhone:
+        // В iOS Simulator (без физического устройства) обязан возвращать NOT VERIFIED (REQUIRES REAL IPHONE)
+        let e2eReport = await TelegramClientService.shared.runOnDeviceE2EAuthAndChatScanScenario()
+        #if targetEnvironment(simulator)
+        XCTAssertFalse(e2eReport.isPhysicalDevice)
+        XCTAssertEqual(e2eReport.verificationBadge, "NOT VERIFIED (REQUIRES REAL IPHONE)")
+        XCTAssertTrue(e2eReport.summaryText.hasPrefix("NOT VERIFIED:"))
+        #endif
     }
 
     func testParseTDLibMessageExtractsCoverFileId() throws {

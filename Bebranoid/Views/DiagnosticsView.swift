@@ -13,6 +13,8 @@ public struct DiagnosticsView: View {
     @ObservedObject var appState: BebranoidAppState
     @State private var cacheStats: (totalBytes: Int64, fileCount: Int) = (0, 0)
     @State private var failedDownloadsCount: Int = 0
+    @State private var onDeviceE2EReport: TelegramClientService.OnDeviceE2EScenarioReport?
+    @State private var isRunningE2EScenario: Bool = false
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
@@ -95,6 +97,35 @@ public struct DiagnosticsView: View {
                         value: chatScanProgressDescription,
                         isHealthy: !appState.isSyncingTelegramLibrary
                     )
+                    diagnosticRow(
+                        title: "iPhone On-Device Telegram E2E Scenario",
+                        value: onDeviceE2EReport?.summaryText ?? (TelegramClientService.isRunningOnPhysicaliPhone
+                            ? (appState.telegramClient.isAuthorized ? "READY FOR ON-DEVICE E2E" : "NOT VERIFIED (Awaiting TDLib Login on iPhone)")
+                            : "NOT VERIFIED (REQUIRES REAL IPHONE)"),
+                        isHealthy: onDeviceE2EReport?.isTDLibAuthorizedReady == true && TelegramClientService.isRunningOnPhysicaliPhone
+                    )
+                    Button {
+                        guard !isRunningE2EScenario else { return }
+                        isRunningE2EScenario = true
+                        Task {
+                            let report = await appState.telegramClient.runOnDeviceE2EAuthAndChatScanScenario(
+                                selectedChatId: appState.libraryState.selectedTelegramChatId,
+                                archiveChatId: appState.libraryState.selectedTelegramArchiveChatId
+                            )
+                            await MainActor.run {
+                                onDeviceE2EReport = report
+                                isRunningE2EScenario = false
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isRunningE2EScenario ? "hourglass" : "iphone.badge.play")
+                            Text(isRunningE2EScenario ? "Выполняется E2E сценарий..." : "Запустить E2E сценарий Telegram (iPhone)")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(Color(red: 0.45, green: 0.78, blue: 1.0))
+                    }
+                    .buttonStyle(.plain)
                 }
                 .listRowBackground(Color.white.opacity(0.06))
 

@@ -90,8 +90,77 @@ final class AudioEngineIntegrationTests: XCTestCase {
         try file.write(from: buffer)
     }
 
+    private func writePlayableFLAC(to url: URL, durationSeconds: Double = 3.0, sampleRate: Double = 44100.0) throws {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatFLAC,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 16
+        ]
+        let frameCount = AVAudioFrameCount(sampleRate * durationSeconds)
+        guard let pcmFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2),
+              let buffer = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: frameCount) else {
+            XCTFail("Не удалось создать буфер PCM для FLAC")
+            return
+        }
+        buffer.frameLength = frameCount
+        if let floatData = buffer.floatChannelData {
+            for ch in 0..<2 {
+                let ptr = floatData[ch]
+                let freq = ch == 0 ? 440.0 : 554.37
+                for i in 0..<Int(frameCount) {
+                    let t = Double(i) / sampleRate
+                    ptr[i] = Float(sin(2.0 * .pi * freq * t) * 0.4)
+                }
+            }
+        }
+        let file = try AVAudioFile(forWriting: url, settings: settings)
+        try file.write(from: buffer)
+    }
+
+    /// Генерирует настоящий воспроизводимый поток MPEG-1 Audio Layer III (44.1 кГц, 128 кбит/с, стерео,
+    /// `main_data_begin = 0` без битового резервуара, гармонический тон 344.53 Гц) из самодостаточных фреймов.
+    private func writePlayableMP3(to url: URL, durationSeconds: Double = 3.0) throws {
+        let selfContainedMP3FrameBase64 =
+            "//uSZAAP8XNhwILgUxAAAA0gAAABBc2HAguBTEAAADSAAAAE8D6yhgj/JOX/xD/5J/i3/i3/iI//+Kn+Kn//zP8p/iR/jD/X/X/T/CV/kX+PfV4H1ljBP+SEt/iE/yf/Fj/Fj/EX//8V/8V///n/5X/Ev/Gf+n+n+v+En/If8fetMQU1FMy4xMDEgKGJldGEgMykAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+        guard let singleFrame = Data(base64Encoded: selfContainedMP3FrameBase64), singleFrame.count == 418 else {
+            XCTFail("Не удалось декодировать эталонный MPEG-1 Layer III фрейм")
+            return
+        }
+        // Каждый фрейм MPEG-1 Layer III содержит 1152 сэмпла (1152 / 44100 ≈ 0.02612245 с)
+        let frameCount = max(10, Int(round(durationSeconds * 44100.0 / 1152.0)))
+        var mp3Data = Data(capacity: singleFrame.count * frameCount)
+        for _ in 0..<frameCount {
+            mp3Data.append(singleFrame)
+        }
+        try mp3Data.write(to: url, options: .atomic)
+    }
+
+    private func decodeAndComputeRMS(at url: URL, maxFrames: AVAudioFrameCount = 32_768) throws -> (framesDecoded: AVAudioFrameCount, rms: Float, sampleRate: Double, channels: AVAudioChannelCount) {
+        let audioFile = try AVAudioFile(forReading: url)
+        let format = audioFile.processingFormat
+        let framesToRead = min(maxFrames, AVAudioFrameCount(max(0, audioFile.length)))
+        guard framesToRead > 0,
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: framesToRead) else {
+            return (0, 0.0, format.sampleRate, format.channelCount)
+        }
+        try audioFile.read(into: pcmBuffer, frameCount: framesToRead)
+        guard pcmBuffer.frameLength > 0, let channelData = pcmBuffer.floatChannelData else {
+            return (pcmBuffer.frameLength, 0.0, format.sampleRate, format.channelCount)
+        }
+        let samplesCount = Int(pcmBuffer.frameLength)
+        var sumSquares: Double = 0.0
+        for i in 0..<samplesCount {
+            let s = Double(channelData[0][i])
+            sumSquares += s * s
+        }
+        let rms = Float(sqrt(sumSquares / Double(max(1, samplesCount))))
+        return (pcmBuffer.frameLength, rms, format.sampleRate, format.channelCount)
+    }
+
     // MARK: - 1. Multi-Format Inspection & Decoding (WAV, M4A ALAC, M4A AAC, FLAC, MP3)
 
+    @MainActor
     func testMultiFormatAudioInspectionAndDecoding() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("audio_formats_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -103,6 +172,9 @@ final class AudioEngineIntegrationTests: XCTestCase {
         let wavMeta = await AudioMetadataReader.inspectAudioFile(at: wavURL)
         XCTAssertEqual(wavMeta.duration, 3.0, accuracy: 0.15)
         XCTAssertTrue(wavMeta.formatInfo.lossless)
+        let wavDecoded = try decodeAndComputeRMS(at: wavURL)
+        XCTAssertGreaterThan(wavDecoded.framesDecoded, 10_000)
+        XCTAssertGreaterThan(wavDecoded.rms, 0.1)
 
         // 2) M4A (ALAC Lossless)
         let alacURL = tempDir.appendingPathComponent("test_lossless.m4a")
@@ -110,6 +182,9 @@ final class AudioEngineIntegrationTests: XCTestCase {
         let alacMeta = await AudioMetadataReader.inspectAudioFile(at: alacURL)
         XCTAssertEqual(alacMeta.duration, 3.0, accuracy: 0.25)
         XCTAssertTrue(alacMeta.formatInfo.lossless)
+        let alacDecoded = try decodeAndComputeRMS(at: alacURL)
+        XCTAssertGreaterThan(alacDecoded.framesDecoded, 10_000)
+        XCTAssertGreaterThan(alacDecoded.rms, 0.1)
 
         // 3) M4A (AAC)
         let aacURL = tempDir.appendingPathComponent("test_aac.m4a")
@@ -117,15 +192,53 @@ final class AudioEngineIntegrationTests: XCTestCase {
         let aacMeta = await AudioMetadataReader.inspectAudioFile(at: aacURL)
         XCTAssertEqual(aacMeta.duration, 3.0, accuracy: 0.25)
         XCTAssertFalse(aacMeta.formatInfo.lossless)
+        let aacDecoded = try decodeAndComputeRMS(at: aacURL)
+        XCTAssertGreaterThan(aacDecoded.framesDecoded, 10_000)
+        XCTAssertGreaterThan(aacDecoded.rms, 0.1)
 
-        // 4) FLAC & MP3 Format Badge Resolution
-        let flacFormat = AudioFormatInfo.fallbackFromFilename("01_HiRes.flac", fileSize: 32_000_000, duration: 200.0)
-        XCTAssertTrue(flacFormat.lossless)
-        XCTAssertEqual(flacFormat.codec, "FLAC")
+        // 4) FLAC (Real Lossless Audio Encoding, Binary STREAMINFO Inspection, PCM Decoding & DualStreamAudioEngine Load)
+        let flacURL = tempDir.appendingPathComponent("01_HiRes.flac")
+        try writePlayableFLAC(to: flacURL, durationSeconds: 3.0, sampleRate: 44100.0)
+        let flacMeta = await AudioMetadataReader.inspectAudioFile(at: flacURL)
+        XCTAssertTrue(flacMeta.formatInfo.lossless)
+        XCTAssertEqual(flacMeta.formatInfo.codec, "FLAC")
+        XCTAssertEqual(flacMeta.formatInfo.sampleRateHz, 44100)
+        XCTAssertEqual(flacMeta.duration, 3.0, accuracy: 0.25)
 
-        let mp3Format = AudioFormatInfo.fallbackFromFilename("02_Song.mp3", fileSize: 8_000_000, duration: 200.0)
-        XCTAssertFalse(mp3Format.lossless)
-        XCTAssertEqual(mp3Format.codec, "MP3")
+        let flacDecoded = try decodeAndComputeRMS(at: flacURL)
+        XCTAssertGreaterThan(flacDecoded.framesDecoded, 10_000)
+        XCTAssertGreaterThan(flacDecoded.rms, 0.15)
+        XCTAssertEqual(flacDecoded.sampleRate, 44100.0, accuracy: 1.0)
+        XCTAssertEqual(flacDecoded.channels, 2)
+
+        let engine = DualStreamAudioEngine()
+        let flacTrack = Track(id: "fmt:flac", title: "Real FLAC Decode", artist: "QA", album: "Lossless", duration: 3.0, filename: "01_HiRes.flac")
+        await engine.loadAndPlay(track: flacTrack, fileURL: flacURL, startAt: 0.0, autoPlay: false)
+        XCTAssertEqual(engine.duration, 3.0, accuracy: 0.25)
+        XCTAssertEqual(engine.currentFormatInfo?.codec, "FLAC")
+        XCTAssertEqual(engine.currentFormatInfo?.lossless, true)
+
+        // 5) MP3 (Real MPEG-1 Layer III Audio Stream Inspection, PCM Decoding & DualStreamAudioEngine Load)
+        let mp3URL = tempDir.appendingPathComponent("02_Song.mp3")
+        try writePlayableMP3(to: mp3URL, durationSeconds: 3.0)
+        let mp3Meta = await AudioMetadataReader.inspectAudioFile(at: mp3URL)
+        XCTAssertFalse(mp3Meta.formatInfo.lossless)
+        XCTAssertEqual(mp3Meta.formatInfo.codec, "MP3")
+        XCTAssertEqual(mp3Meta.formatInfo.sampleRateHz, 44100)
+        XCTAssertEqual(mp3Meta.duration, 3.0, accuracy: 0.25)
+
+        let mp3Decoded = try decodeAndComputeRMS(at: mp3URL)
+        XCTAssertGreaterThan(mp3Decoded.framesDecoded, 10_000)
+        XCTAssertGreaterThan(mp3Decoded.rms, 0.02)
+        XCTAssertEqual(mp3Decoded.sampleRate, 44100.0, accuracy: 1.0)
+        XCTAssertEqual(mp3Decoded.channels, 2)
+
+        let mp3Track = Track(id: "fmt:mp3", title: "Real MP3 Decode", artist: "QA", album: "MPEG", duration: 3.0, filename: "02_Song.mp3")
+        await engine.loadAndPlay(track: mp3Track, fileURL: mp3URL, startAt: 0.0, autoPlay: false)
+        XCTAssertEqual(engine.duration, 3.0, accuracy: 0.25)
+        XCTAssertEqual(engine.currentFormatInfo?.codec, "MP3")
+        XCTAssertEqual(engine.currentFormatInfo?.lossless, false)
+        engine.pause()
     }
 
     // MARK: - 2. DualStreamAudioEngine Load, Play, Pause, Seek, VolumeCurve & Audio FX
