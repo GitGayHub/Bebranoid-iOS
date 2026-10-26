@@ -12,6 +12,7 @@ import SwiftUI
 public struct DiagnosticsView: View {
     @ObservedObject var appState: BebranoidAppState
     @State private var cacheStats: (totalBytes: Int64, fileCount: Int) = (0, 0)
+    @State private var failedDownloadsCount: Int = 0
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
@@ -121,8 +122,8 @@ public struct DiagnosticsView: View {
                     )
                     diagnosticRow(
                         title: "Количество ошибок загрузки",
-                        value: "\(PriorityDownloadQueue.shared.failedDownloadsCount)",
-                        isHealthy: PriorityDownloadQueue.shared.failedDownloadsCount == 0
+                        value: "\(failedDownloadsCount)",
+                        isHealthy: failedDownloadsCount == 0
                     )
                 }
                 .listRowBackground(Color.white.opacity(0.06))
@@ -146,6 +147,9 @@ public struct DiagnosticsView: View {
         .navigationTitle("Диагностика (Debug QA)")
         .onAppear {
             cacheStats = appState.cacheIndex.calculateCacheStats()
+        }
+        .task {
+            failedDownloadsCount = await PriorityDownloadQueue.shared.failedDownloadsCount
         }
     }
 
