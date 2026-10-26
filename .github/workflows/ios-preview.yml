@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   simulator-preview:
-    name: Simulator Boot, Launch & Screenshot Capture
+    name: Simulator Boot, Launch, Screenshots & Real H.264 Video
     runs-on: macos-14
     timeout-minutes: 25
 
@@ -23,10 +23,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate Xcode Project via XcodeGen
+      - name: Ensure XcodeGen & FFmpeg Installed
         run: |
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
+          fi
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew install ffmpeg
           fi
           xcodegen generate
           sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' Bebranoid.xcodeproj/project.pbxproj
@@ -84,8 +87,9 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             | tee build/preview/logs/build-simulator.log
 
-      - name: Boot Simulator, Install App & Capture 10 Screen Screenshots + Fixed Mesh Frames
+      - name: Boot Simulator, Capture Unique Screenshots & Record Real H.264 MP4 Video
         run: |
+          set -e
           DEVICE_UDID="${{ steps.sim.outputs.udid }}"
           APP_PATH=$(find build/DerivedData/Build/Products/Debug-iphonesimulator -name "Bebranoid.app" -maxdepth 2 | head -n 1)
           echo "Built Simulator App: $APP_PATH"
@@ -123,6 +127,10 @@ jobs:
             fi
           }
 
+          # Start live Simulator video recording in background during screen transitions
+          xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 --force build/preview/simctl-raw.mp4 >/dev/null 2>&1 &
+          REC_PID=$!
+
           capture_screen "library"     "build/preview/screenshots/01-library.png"
           capture_screen "tracks"      "build/preview/screenshots/02-tracks.png"
           capture_screen "albums"      "build/preview/screenshots/03-albums.png"
@@ -133,6 +141,11 @@ jobs:
           capture_screen "queue"       "build/preview/screenshots/08-queue.png"
           capture_screen "settings"    "build/preview/screenshots/09-settings.png"
           capture_screen "mini-player" "build/preview/screenshots/10-mini-player.png"
+          capture_screen "diagnostics" "build/preview/screenshots/11-diagnostics.png"
+
+          # Stop simctl recordVideo cleanly with SIGINT so MP4 moov atom is finalized
+          kill -INT "$REC_PID" 2>/dev/null || true
+          wait "$REC_PID" 2>/dev/null || true
 
           # Capture 4 fixed animation time frames of HarmonoidMeshBackground (t = 0.0, 3.5, 7.0, 10.0s)
           capture_screen "player" "build/preview/mesh/mesh-time-0.0s.png"  "--mesh-fixture=vivid" "--mesh-time=0.0"
@@ -146,34 +159,117 @@ jobs:
           capture_screen "player" "build/preview/mesh/mesh-03-dark-red.png" "--mesh-fixture=dark-red"
           capture_screen "player" "build/preview/mesh/mesh-04-bw.png"       "--mesh-fixture=bw"
 
-          # Generate MP4 video of HarmonoidMeshBackground animation frames in Player
-          if command -v ffmpeg >/dev/null 2>&1; then
-            ffmpeg -y -framerate 1 -pattern_type glob -i "build/preview/mesh/mesh-time-*.png" -c:v libx264 -pix_fmt yuv420p build/preview/preview-animation.mp4 >/dev/null 2>&1 || true
+          # Build a guaranteed valid H.264 MP4 preview video (never copy a PNG!)
+          RAW_SIZE=$(stat -f%z "build/preview/simctl-raw.mp4" 2>/dev/null || echo 0)
+          if [ "$RAW_SIZE" -gt 100000 ] && ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "build/preview/simctl-raw.mp4" | grep -q "h264"; then
+            echo "Using live simctl H.264 recording ($RAW_SIZE bytes) and normalizing to yuv420p MP4..."
+            ffmpeg -y -i "build/preview/simctl-raw.mp4" \
+              -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" \
+              -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
+              "build/preview/preview-animation.mp4"
           else
-            cp build/preview/mesh/mesh-time-0.0s.png build/preview/preview-animation.mp4 || true
+            echo "Encoding real H.264 MP4 video from captured Simulator screen sequence & Mesh animation frames..."
+            mkdir -p build/preview/video-seq
+            cp build/preview/screenshots/01-library.png     build/preview/video-seq/frame_01.png
+            cp build/preview/screenshots/02-tracks.png      build/preview/video-seq/frame_02.png
+            cp build/preview/screenshots/03-albums.png      build/preview/video-seq/frame_03.png
+            cp build/preview/screenshots/04-artists.png     build/preview/video-seq/frame_04.png
+            cp build/preview/screenshots/05-playlists.png   build/preview/video-seq/frame_05.png
+            cp build/preview/screenshots/06-player.png      build/preview/video-seq/frame_06.png
+            cp build/preview/mesh/mesh-time-0.0s.png        build/preview/video-seq/frame_07.png
+            cp build/preview/mesh/mesh-time-3.5s.png        build/preview/video-seq/frame_08.png
+            cp build/preview/mesh/mesh-time-7.0s.png        build/preview/video-seq/frame_09.png
+            cp build/preview/mesh/mesh-time-10.0s.png       build/preview/video-seq/frame_10.png
+            cp build/preview/screenshots/07-lyrics.png      build/preview/video-seq/frame_11.png
+            cp build/preview/screenshots/08-queue.png       build/preview/video-seq/frame_12.png
+            cp build/preview/screenshots/10-mini-player.png build/preview/video-seq/frame_13.png
+            cp build/preview/screenshots/11-diagnostics.png build/preview/video-seq/frame_14.png
+
+            ffmpeg -y -framerate 1 -i "build/preview/video-seq/frame_%02d.png" \
+              -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" \
+              -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
+              "build/preview/preview-animation.mp4"
+            rm -rf build/preview/video-seq
           fi
+          rm -f build/preview/simctl-raw.mp4
 
           # Package Simulator .app bundle
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/Bebranoid-iOS-Simulator-App.zip
 
-          # Generate preview-manifest.json
+      - name: Verify Unique Screenshot Hashes & Valid H.264 MP4 Stream
+        run: |
           node -e '
             const fs = require("fs");
             const path = require("path");
+            const crypto = require("crypto");
+            const { execSync } = require("child_process");
+
             const shotsDir = "build/preview/screenshots";
             const meshDir = "build/preview/mesh";
-            const shots = fs.existsSync(shotsDir) ? fs.readdirSync(shotsDir).sort() : [];
-            const meshShots = fs.existsSync(meshDir) ? fs.readdirSync(meshDir).sort() : [];
+            const shots = fs.readdirSync(shotsDir).filter(f => f.endsWith(".png")).sort();
+            const meshShots = fs.readdirSync(meshDir).filter(f => f.endsWith(".png")).sort();
+
+            if (shots.length < 10) {
+              throw new Error("Expected at least 10 screenshots, found " + shots.length);
+            }
+
+            const seenHashes = new Map();
+            const shotMeta = [];
+            for (const f of shots) {
+              const p = path.join(shotsDir, f);
+              const buf = fs.readFileSync(p);
+              if (buf.length < 50000) {
+                throw new Error(`Screenshot ${f} is too small (${buf.length} bytes)`);
+              }
+              const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+              if (seenHashes.has(sha256)) {
+                throw new Error(`Duplicate screenshot hash detected: ${f} is identical to ${seenHashes.get(sha256)} (${sha256})`);
+              }
+              seenHashes.set(sha256, f);
+              shotMeta.push({ file: f, sizeBytes: buf.length, sha256 });
+            }
+
+            const meshMeta = meshShots.map(f => {
+              const p = path.join(meshDir, f);
+              const buf = fs.readFileSync(p);
+              return { file: f, sizeBytes: buf.length, sha256: crypto.createHash("sha256").update(buf).digest("hex") };
+            });
+
+            // Verify preview-animation.mp4 via ffprobe
+            const mp4Path = "build/preview/preview-animation.mp4";
+            if (!fs.existsSync(mp4Path)) {
+              throw new Error("preview-animation.mp4 does not exist");
+            }
+            const mp4Buf = fs.readFileSync(mp4Path);
+            // Ensure it does NOT start with PNG magic bytes (89 50 4E 47)
+            if (mp4Buf[0] === 0x89 && mp4Buf[1] === 0x50 && mp4Buf[2] === 0x4E && mp4Buf[3] === 0x47) {
+              throw new Error("preview-animation.mp4 is a PNG file disguised as MP4!");
+            }
+            const probeJson = JSON.parse(execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height,nb_frames -show_entries format=format_name,duration -of json "${mp4Path}"`).toString());
+            const stream = (probeJson.streams || [])[0] || {};
+            if (stream.codec_name !== "h264") {
+              throw new Error(`Expected H.264 video stream in preview-animation.mp4, got ${stream.codec_name}`);
+            }
+
             const dev = JSON.parse(fs.readFileSync("build/preview/simulator-device.json", "utf8"));
             const manifest = {
               commitSha: process.env.GITHUB_SHA,
               branch: process.env.GITHUB_REF_NAME,
               simulator: dev,
-              screenshots: shots.map(f => ({ file: f, sizeBytes: fs.statSync(path.join(shotsDir, f)).size })),
-              meshFrames: meshShots.map(f => ({ file: f, sizeBytes: fs.statSync(path.join(meshDir, f)).size })),
-              hasAnimationVideo: fs.existsSync("build/preview/preview-animation.mp4")
+              screenshots: shotMeta,
+              meshFrames: meshMeta,
+              hasAnimationVideo: true,
+              videoStream: {
+                codec: stream.codec_name,
+                width: stream.width,
+                height: stream.height,
+                frames: stream.nb_frames,
+                duration: (probeJson.format || {}).duration,
+                sizeBytes: mp4Buf.length
+              }
             };
             fs.writeFileSync("build/preview/preview-manifest.json", JSON.stringify(manifest, null, 2));
+            console.log("Verified " + shotMeta.length + " unique screenshots and valid H.264 MP4 preview video.");
           '
 
       - name: Upload Bebranoid-iOS-Preview Artifact

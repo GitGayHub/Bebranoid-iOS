@@ -35,11 +35,26 @@ public struct TelegramForumTopic: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
-public enum TelegramAuthStepState: String, Codable, Sendable {
+public enum TelegramAuthStepState: Equatable, Sendable {
     case unauthorized
-    case awaitingCode
-    case awaiting2FAPassword
+    case awaitingCode(phoneNumber: String)
+    case awaitingQRConfirmation(link: String)
+    case awaiting2FAPassword(hint: String?)
     case authorized
+}
+
+public enum TelegramConnectionState: String, Codable, Sendable {
+    case uninitialized = "Не инициализирован"
+    case waitingForNetwork = "Ожидание сети (Offline)"
+    case connecting = "Подключение к Telegram..."
+    case updating = "Обновление данных TDLib..."
+    case ready = "Подключено (Ready)"
+    case closed = "Сессия закрыта"
+}
+
+public extension Notification.Name {
+    static let telegramAuthStateDidChange = Notification.Name("Bebranoid.telegramAuthStateDidChange")
+    static let telegramConnectionStateDidChange = Notification.Name("Bebranoid.telegramConnectionStateDidChange")
 }
 
 /// Низкоуровневый мост к нативному `TDLibFramework` (`td_create_client_id`, `td_send`, `td_receive`, `td_execute`).
@@ -52,6 +67,10 @@ public final class TDLibJSONBridge: @unchecked Sendable {
         #else
         return false
         #endif
+    }
+
+    public var isNativeLibraryAvailable: Bool {
+        Self.isNativeTDLibAvailable
     }
 
     private let lock = NSLock()
@@ -208,7 +227,7 @@ public final class TDLibJSONBridge: @unchecked Sendable {
                     cont.resume(throwing: NSError(
                         domain: "TDLib",
                         code: code,
-                        userInfo: [NSLocalizedDescriptionKey: "TDLib (\(code)): \(msg)"]
+                        userInfo: [NSLocalizedDescriptionKey: TelegramClientService.translateTDLibError(msg)]
                     ))
                 } else {
                     cont.resume(returning: dict)
@@ -223,11 +242,12 @@ public final class TDLibJSONBridge: @unchecked Sendable {
 
 /// Автономный iOS-клиент Telegram на базе реального `TDLibFramework` (`SwiftGram/TDLibFramework`).
 /// Реализует:
-/// - Настоящую авторизацию TDLib (`setTdlibParameters`, `setAuthenticationPhoneNumber`, `checkAuthenticationCode`, `checkAuthenticationPassword`)
+/// - Настоящую авторизацию TDLib (`setTdlibParameters`, `setAuthenticationPhoneNumber`, `checkAuthenticationCode`, `checkAuthenticationPassword`, `requestQrCodeAuthentication`)
+/// - Единственный источник истины `isAuthorized`: только подтверждённое состояние TDLib `authorizationStateReady` (без ложноположительного маркера Keychain)
 /// - Безопасное хранение API ID / API Hash и 256-битного ключа шифрования БД TDLib в iOS Keychain
 /// - Загрузку реального списка чатов (`loadChats`, `getChats`, `getChat`, `getSupergroup`) и топиков форума (`getForumTopics`)
-/// - Сканирование аудиосообщений и аудио-документов (`searchChatMessages`) с парсингом `key=value` подписи и 3-уровневой дедупликацией архива
-/// - Скачивание аудиофайлов через TDLib (`downloadFile`, `getFile`, `cancelDownloadFile`) с приоритетами `PriorityDownloadQueue` и докачкой `.part`
+/// - Сканирование аудиосообщений и аудио-документов (`searchChatMessages`) с парсингом `key=value` подписи, `coverFileId` и 3-уровневой дедупликацией архива
+/// - Скачивание обложек (`downloadCoverFromTelegram`) и аудиофайлов через TDLib (`downloadFile`, `getFile`, `cancelDownloadFile`) с приоритетами `PriorityDownloadQueue` и докачкой `.part`
 /// - Защиту выбранного пользователем архивного чата от удаления (`deleteMessages` блокируется для read-only архива)
 public final class TelegramClientService: @unchecked Sendable {
     public static let shared = TelegramClientService()
@@ -236,10 +256,15 @@ public final class TelegramClientService: @unchecked Sendable {
     private let storage: StorageManager
     private let cacheIndex: CacheIndexManager
     private let bridge: TDLibJSONBridge
-    public let downloadQueue = PriorityDownloadQueue(concurrency: 2)
+    public let downloadQueue: PriorityDownloadQueue
     private let lock = NSLock()
 
     private var currentAuthStep: TelegramAuthStepState = .unauthorized
+    private var currentConnectionState: TelegramConnectionState = .uninitialized
+    private var currentRawAuthStateName: String = "uninitialized"
+    private var currentScanProgressText: String = "Ожидание"
+    private var lastErrorText: String? = nil
+    private var currentUserDisplayName: String? = nil
     private var password2FAHint: String?
     private var pendingPhoneNumber: String?
     private var tdlibParametersConfigured = false
@@ -252,12 +277,14 @@ public final class TelegramClientService: @unchecked Sendable {
         keychain: KeychainHelper = .shared,
         storage: StorageManager = .shared,
         cacheIndex: CacheIndexManager = .shared,
-        bridge: TDLibJSONBridge = .shared
+        bridge: TDLibJSONBridge = .shared,
+        downloadQueue: PriorityDownloadQueue = .shared
     ) {
         self.keychain = keychain
         self.storage = storage
         self.cacheIndex = cacheIndex
         self.bridge = bridge
+        self.downloadQueue = downloadQueue
 
         self.bridge.onUpdate = { [weak self] update in
             self?.handleTDLibUpdate(update)
@@ -270,17 +297,41 @@ public final class TelegramClientService: @unchecked Sendable {
         return body()
     }
 
+    // MARK: - Credentials & Auth State (TDLib Single Source of Truth)
+
+    /// Единственный источник достоверного статуса авторизации — текущее состояние TDLib (`authorizationStateReady`).
+    /// Сохранённый маркер в Keychain НЕ делает пользователя авторизованным до подтверждения от TDLib.
     public var isAuthorized: Bool {
-        let step = withLock { currentAuthStep }
-        if step == .authorized {
-            return true
-        }
-        guard let sessionStr = keychain.readString(for: .telegramSessionData) else { return false }
-        return !sessionStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        withLock { currentAuthStep == .authorized }
+    }
+
+    public var authStep: TelegramAuthStepState {
+        withLock { currentAuthStep }
+    }
+
+    public var connectionState: TelegramConnectionState {
+        withLock { currentConnectionState }
+    }
+
+    public var rawAuthorizationStateName: String {
+        withLock { currentRawAuthStateName }
+    }
+
+    public var scanProgressText: String {
+        withLock { currentScanProgressText }
+    }
+
+    public var lastErrorDescription: String? {
+        withLock { lastErrorText }
+    }
+
+    public var authorizedUserDisplayName: String? {
+        withLock { currentUserDisplayName }
     }
 
     public var authorizedPhoneNumber: String? {
-        keychain.readString(for: .telegramAuthorizedPhone)
+        guard isAuthorized else { return nil }
+        return keychain.readString(for: .telegramAuthorizedPhone)
     }
 
     public var configuredApiId: String {
@@ -291,9 +342,65 @@ public final class TelegramClientService: @unchecked Sendable {
         keychain.readString(for: .telegramApiHash) ?? ""
     }
 
+    public var hasConfiguredApiCredentials: Bool {
+        guard let idNum = Int32(configuredApiId.trimmingCharacters(in: .whitespacesAndNewlines)),
+              idNum > 0 else {
+            return false
+        }
+        return !configuredApiHash.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     public func saveApiCredentials(apiId: String, apiHash: String) {
         keychain.saveString(apiId.trimmingCharacters(in: .whitespacesAndNewlines), for: .telegramApiId)
         keychain.saveString(apiHash.trimmingCharacters(in: .whitespacesAndNewlines), for: .telegramApiHash)
+    }
+
+    /// Инициализирует TDLib при запуске приложения, открывает существующую локальную базу TDLib,
+    /// дожидается ответа `updateAuthorizationState` от TDLib и только после `authorizationStateReady` активирует авторизованное состояние.
+    @discardableResult
+    public func initializeAndRestoreSession() async -> TelegramAuthStepState {
+        guard hasConfiguredApiCredentials else {
+            setAuthStep(.unauthorized, rawState: "missingApiCredentials")
+            return .unauthorized
+        }
+
+        guard TDLibJSONBridge.isNativeTDLibAvailable else {
+            setAuthStep(.unauthorized, rawState: "tdlibBridgeUnavailable")
+            return .unauthorized
+        }
+
+        _ = bridge.ensureClientCreated()
+        try? await sendTdlibParametersIfPossible()
+
+        if let stateResp = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0) {
+            handleAuthorizationState(stateResp)
+        } else {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        if isAuthorized {
+            await refreshAuthorizedUserProfile()
+        }
+        return authStep
+    }
+
+    public func refreshAuthorizedUserProfile() async {
+        guard isAuthorized else { return }
+        guard let me = try? await bridge.sendAsync(["@type": "getMe"], timeoutSeconds: 6.0) else { return }
+        let firstName = (me["first_name"] as? String) ?? ""
+        let lastName = (me["last_name"] as? String) ?? ""
+        let phone = (me["phone_number"] as? String) ?? ""
+        if !phone.isEmpty {
+            let formattedPhone = phone.hasPrefix("+") ? phone : "+\(phone)"
+            keychain.saveString(formattedPhone, for: .telegramAuthorizedPhone)
+        }
+        let fullName = [firstName, lastName]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if !fullName.isEmpty {
+            withLock { currentUserDisplayName = fullName }
+        }
     }
 
     // MARK: - TDLib Initialization & Updates
@@ -302,40 +409,82 @@ public final class TelegramClientService: @unchecked Sendable {
         guard let type = update["@type"] as? String else { return }
 
         if type == "updateAuthorizationState",
-           let authState = update["authorization_state"] as? [String: Any],
-           let stateType = authState["@type"] as? String {
-            switch stateType {
-            case "authorizationStateWaitTdlibParameters":
-                Task {
-                    try? await self.sendTdlibParametersIfPossible()
-                }
-            case "authorizationStateWaitPhoneNumber":
-                lock.lock()
-                currentAuthStep = .unauthorized
-                lock.unlock()
-            case "authorizationStateWaitCode":
-                lock.lock()
-                currentAuthStep = .awaitingCode
-                lock.unlock()
-            case "authorizationStateWaitPassword":
-                lock.lock()
-                currentAuthStep = .awaiting2FAPassword
-                password2FAHint = authState["password_hint"] as? String
-                lock.unlock()
-            case "authorizationStateReady":
-                lock.lock()
-                currentAuthStep = .authorized
-                let phone = pendingPhoneNumber
-                lock.unlock()
-                finalizeAuthorizedState(fallbackPhone: phone)
-            case "authorizationStateClosed":
-                lock.lock()
-                currentAuthStep = .unauthorized
-                tdlibParametersConfigured = false
-                lock.unlock()
-            default:
-                break
+           let authState = update["authorization_state"] as? [String: Any] {
+            handleAuthorizationState(authState)
+        } else if type == "updateConnectionState",
+                  let connState = update["state"] as? [String: Any],
+                  let connType = connState["@type"] as? String {
+            handleConnectionState(connType)
+        }
+    }
+
+    private func handleConnectionState(_ connType: String) {
+        let mapped: TelegramConnectionState
+        switch connType {
+        case "connectionStateWaitingForNetwork":
+            mapped = .waitingForNetwork
+        case "connectionStateConnecting", "connectionStateConnectingToProxy":
+            mapped = .connecting
+        case "connectionStateUpdating":
+            mapped = .updating
+        case "connectionStateReady":
+            mapped = .ready
+        default:
+            mapped = .connecting
+        }
+        withLock { currentConnectionState = mapped }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .telegramConnectionStateDidChange, object: mapped)
+        }
+    }
+
+    private func handleAuthorizationState(_ authState: [String: Any]) {
+        guard let stateType = authState["@type"] as? String else { return }
+
+        switch stateType {
+        case "authorizationStateWaitTdlibParameters":
+            withLock { currentRawAuthStateName = stateType }
+            Task {
+                try? await self.sendTdlibParametersIfPossible()
             }
+        case "authorizationStateWaitPhoneNumber":
+            setAuthStep(.unauthorized, rawState: stateType)
+
+        case "authorizationStateWaitOtherDeviceConfirmation":
+            let link = (authState["link"] as? String) ?? ""
+            setAuthStep(.awaitingQRConfirmation(link: link), rawState: stateType)
+
+        case "authorizationStateWaitCode":
+            let phone = withLock { pendingPhoneNumber } ?? keychain.readString(for: .telegramAuthorizedPhone) ?? ""
+            setAuthStep(.awaitingCode(phoneNumber: phone), rawState: stateType)
+
+        case "authorizationStateWaitPassword":
+            let hint = authState["password_hint"] as? String
+            withLock { password2FAHint = hint }
+            setAuthStep(.awaiting2FAPassword(hint: hint), rawState: stateType)
+
+        case "authorizationStateReady":
+            let phone = withLock { pendingPhoneNumber }
+            finalizeAuthorizedState(fallbackPhone: phone)
+            setAuthStep(.authorized, rawState: stateType)
+            Task { await refreshAuthorizedUserProfile() }
+
+        case "authorizationStateClosed", "authorizationStateClosing", "authorizationStateLoggingOut":
+            withLock { tdlibParametersConfigured = false }
+            setAuthStep(.unauthorized, rawState: stateType)
+
+        default:
+            withLock { currentRawAuthStateName = stateType }
+        }
+    }
+
+    private func setAuthStep(_ newStep: TelegramAuthStepState, rawState: String) {
+        withLock {
+            currentAuthStep = newStep
+            currentRawAuthStateName = rawState
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .telegramAuthStateDidChange, object: newStep)
         }
     }
 
@@ -396,7 +545,6 @@ public final class TelegramClientService: @unchecked Sendable {
             _ = try await bridge.sendAsync(request, timeoutSeconds: 15.0)
             withLock { tdlibParametersConfigured = true }
         } catch let error as NSError {
-            // Если TDLib уже инициализировал параметры в текущей сессии, продолжаем работу
             if error.localizedDescription.lowercased().contains("unexpected settdlibparameters") {
                 withLock { tdlibParametersConfigured = true }
                 return
@@ -405,7 +553,16 @@ public final class TelegramClientService: @unchecked Sendable {
         }
     }
 
-    // MARK: - Real TDLib Auth Flow (Phone -> Code -> 2FA Password)
+    // MARK: - Real TDLib Auth Flow (Phone -> Code -> 2FA Password & QR Login)
+
+    public func startPhoneAuthentication(phoneNumber: String) async throws -> TelegramAuthStepState {
+        _ = try await sendAuthenticationCode(
+            phoneNumber: phoneNumber,
+            apiId: configuredApiId,
+            apiHash: configuredApiHash
+        )
+        return authStep
+    }
 
     public func sendAuthenticationCode(
         phoneNumber: String,
@@ -427,6 +584,7 @@ public final class TelegramClientService: @unchecked Sendable {
         try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
 
         withLock { pendingPhoneNumber = cleanPhone }
+        keychain.saveString(cleanPhone, for: .telegramAuthorizedPhone)
 
         let request: [String: Any] = [
             "@type": "setAuthenticationPhoneNumber",
@@ -440,16 +598,47 @@ public final class TelegramClientService: @unchecked Sendable {
             ]
         ]
 
-        _ = try await bridge.sendAsync(request, timeoutSeconds: 25.0)
-        let authState = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 10.0)
-        let stateType = (authState?["@type"] as? String) ?? "authorizationStateWaitCode"
-
-        let hint: String? = withLock {
-            currentAuthStep = .awaitingCode
-            return password2FAHint
+        do {
+            _ = try await bridge.sendAsync(request, timeoutSeconds: 25.0)
+        } catch {
+            let friendly = Self.translateTDLibError(error.localizedDescription)
+            withLock { lastErrorText = friendly }
+            throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
         }
 
+        let authState = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 10.0)
+        if let authState {
+            handleAuthorizationState(authState)
+        } else {
+            setAuthStep(.awaitingCode(phoneNumber: cleanPhone), rawState: "authorizationStateWaitCode")
+        }
+        let stateType = (authState?["@type"] as? String) ?? "authorizationStateWaitCode"
+        let hint = withLock { password2FAHint }
         return (stateType, hint)
+    }
+
+    /// Официальный Telegram QR-login flow (`requestQrCodeAuthentication` -> `authorizationStateWaitOtherDeviceConfirmation`)
+    public func requestQRCodeAuthentication() async throws -> TelegramAuthStepState {
+        try await ensureTdlibInitialized(apiId: configuredApiId, apiHash: configuredApiHash)
+        do {
+            let resp = try await bridge.sendAsync([
+                "@type": "requestQrCodeAuthentication",
+                "other_user_ids": [] as [Int]
+            ], timeoutSeconds: 15.0)
+            handleAuthorizationState(resp)
+            if let state = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0) {
+                handleAuthorizationState(state)
+            }
+            return authStep
+        } catch {
+            let friendly = Self.translateTDLibError(error.localizedDescription)
+            withLock { lastErrorText = friendly }
+            throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+        }
+    }
+
+    public func submitVerificationCode(_ code: String) async throws -> TelegramAuthStepState {
+        try await verifyAuthenticationCode(code: code)
     }
 
     public func verifyAuthenticationCode(code: String) async throws -> TelegramAuthStepState {
@@ -462,12 +651,22 @@ public final class TelegramClientService: @unchecked Sendable {
             )
         }
 
-        _ = try await bridge.sendAsync([
-            "@type": "checkAuthenticationCode",
-            "code": trimmed
-        ], timeoutSeconds: 25.0)
+        do {
+            _ = try await bridge.sendAsync([
+                "@type": "checkAuthenticationCode",
+                "code": trimmed
+            ], timeoutSeconds: 25.0)
+        } catch {
+            let friendly = Self.translateTDLibError(error.localizedDescription)
+            withLock { lastErrorText = friendly }
+            throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+        }
 
         return try await refreshAuthStepFromTDLib()
+    }
+
+    public func submitTwoFactorPassword(_ password: String) async throws -> TelegramAuthStepState {
+        try await verify2FAPassword(password: password)
     }
 
     public func verify2FAPassword(password: String) async throws -> TelegramAuthStepState {
@@ -479,60 +678,69 @@ public final class TelegramClientService: @unchecked Sendable {
             )
         }
 
-        _ = try await bridge.sendAsync([
-            "@type": "checkAuthenticationPassword",
-            "password": password
-        ], timeoutSeconds: 25.0)
+        do {
+            _ = try await bridge.sendAsync([
+                "@type": "checkAuthenticationPassword",
+                "password": password
+            ], timeoutSeconds: 25.0)
+        } catch {
+            let friendly = Self.translateTDLibError(error.localizedDescription)
+            withLock { lastErrorText = friendly }
+            throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+        }
 
         return try await refreshAuthStepFromTDLib()
     }
 
     private func refreshAuthStepFromTDLib() async throws -> TelegramAuthStepState {
         let state = try await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 10.0)
-        let stateType = (state["@type"] as? String) ?? ""
-
-        switch stateType {
-        case "authorizationStateWaitPassword":
-            withLock {
-                currentAuthStep = .awaiting2FAPassword
-                password2FAHint = state["password_hint"] as? String
-            }
-            return .awaiting2FAPassword
-
-        case "authorizationStateReady":
-            let me = try? await bridge.sendAsync(["@type": "getMe"], timeoutSeconds: 10.0)
-            let resolvedPhone = (me?["phone_number"] as? String).map { $0.hasPrefix("+") ? $0 : "+\($0)" }
-            let fallback: String? = withLock {
-                currentAuthStep = .authorized
-                return pendingPhoneNumber
-            }
-            finalizeAuthorizedState(fallbackPhone: resolvedPhone ?? fallback)
-            return .authorized
-
-        case "authorizationStateWaitCode":
-            withLock { currentAuthStep = .awaitingCode }
-            return .awaitingCode
-
-        default:
-            return withLock { currentAuthStep }
+        handleAuthorizationState(state)
+        if isAuthorized {
+            await refreshAuthorizedUserProfile()
         }
+        return authStep
     }
 
     public func logout() {
         bridge.sendFireAndForget(["@type": "logOut"])
         keychain.clearAllTelegramCredentials()
-        lock.lock()
-        currentAuthStep = .unauthorized
-        pendingPhoneNumber = nil
-        password2FAHint = nil
-        tdlibParametersConfigured = false
-        lock.unlock()
+        withLock {
+            pendingPhoneNumber = nil
+            password2FAHint = nil
+            currentUserDisplayName = nil
+            lastErrorText = nil
+            tdlibParametersConfigured = false
+        }
+        setAuthStep(.unauthorized, rawState: "authorizationStateClosed")
     }
 
     private func finalizeAuthorizedState(fallbackPhone: String?) {
-        let phone = fallbackPhone ?? authorizedPhoneNumber ?? "Telegram Account"
+        let phone = fallbackPhone ?? keychain.readString(for: .telegramAuthorizedPhone) ?? "Telegram Account"
         keychain.saveString("tdlib_authenticated_v1", for: .telegramSessionData)
         keychain.saveString(phone, for: .telegramAuthorizedPhone)
+    }
+
+    public static func translateTDLibError(_ rawMessage: String) -> String {
+        let upper = rawMessage.uppercased()
+        if upper.contains("PHONE_CODE_INVALID") {
+            return "Неверный код подтверждения Telegram. Проверьте введённые цифры и попробуйте снова."
+        }
+        if upper.contains("PHONE_CODE_EXPIRED") {
+            return "Срок действия кода подтверждения истёк. Запросите новый код."
+        }
+        if upper.contains("PASSWORD_HASH_INVALID") {
+            return "Неверный облачный пароль двухфакторной аутентификации (2FA)."
+        }
+        if upper.contains("PHONE_NUMBER_INVALID") {
+            return "Некорректный формат номера телефона. Укажите номер в международном формате (например, +380... или +7...)."
+        }
+        if upper.contains("API_ID_INVALID") || upper.contains("API_HASH_INVALID") {
+            return "Неверные API ID или API Hash. Проверьте ключи на https://my.telegram.org."
+        }
+        if upper.contains("FLOOD_WAIT") {
+            return "Слишком много попыток входа. Пожалуйста, подождите несколько минут перед повторной отправкой."
+        }
+        return rawMessage
     }
 
     // MARK: - Real Dialogs & Forum Topics (`getChats`, `getChat`, `getForumTopics`)
@@ -540,7 +748,6 @@ public final class TelegramClientService: @unchecked Sendable {
     public func fetchAvailableAudioChats(configuredArchiveChatId: String? = nil) async throws -> [TelegramChatSummary] {
         try await sendTdlibParametersIfPossible()
 
-        // Подгружаем список основных и архивных чатов в локальную БД TDLib
         _ = try? await bridge.sendAsync([
             "@type": "loadChats",
             "chat_list": ["@type": "chatListMain"],
@@ -630,10 +837,14 @@ public final class TelegramClientService: @unchecked Sendable {
         var map: [Int: String] = [:]
         for topic in topics {
             if let info = topic["info"] as? [String: Any],
-               let threadId = Self.extractInt(from: info["message_thread_id"]),
                let name = info["name"] as? String,
                !name.isEmpty {
-                map[threadId] = name
+                if let threadId = Self.extractInt(from: info["message_thread_id"]) {
+                    map[threadId] = name
+                }
+                if let topicId = Self.extractInt(from: info["forum_topic_id"]) {
+                    map[topicId] = name
+                }
             }
         }
         return map
@@ -657,6 +868,7 @@ public final class TelegramClientService: @unchecked Sendable {
             )
         }
 
+        withLock { currentScanProgressText = "Загрузка топиков \(chatTitle)..." }
         try await sendTdlibParametersIfPossible()
         let forumTopics = await fetchForumTopics(chatId: numericChatId)
 
@@ -689,13 +901,15 @@ public final class TelegramClientService: @unchecked Sendable {
             rawMessages.append(msg)
         }
 
-        return rawMessages.map {
+        let built = rawMessages.map {
             TelegramScanner.buildTrack(
                 from: $0,
                 isFromArchive: isArchiveChat,
                 ignoredChatTitles: ignoredChatTitles
             )
         }
+        withLock { currentScanProgressText = "Готово (\(built.count) треков из \(chatTitle))" }
+        return built
     }
 
     /// Полная синхронизация основного и (опционально) архивного read-only чата с 3-уровневой дедупликацией
@@ -748,6 +962,9 @@ public final class TelegramClientService: @unchecked Sendable {
         var fromMessageId: Int64 = 0
 
         while results.count < maxMessages {
+            withLock {
+                currentScanProgressText = "Сканирование \(chatTitle): \(results.count) тр."
+            }
             let resp = try await bridge.sendAsync([
                 "@type": "searchChatMessages",
                 "chat_id": chatId,
@@ -788,6 +1005,7 @@ public final class TelegramClientService: @unchecked Sendable {
         return results
     }
 
+    /// Разбирает JSON-объект `message` из TDLib (`messageAudio` или `messageDocument`) и извлекает `coverFileId` (`album_cover_thumbnail.file.remote.id`)
     public static func parseTDLibMessage(
         _ msgDict: [String: Any],
         chatId: String,
@@ -816,6 +1034,7 @@ public final class TelegramClientService: @unchecked Sendable {
             let title = audio["title"] as? String
             let fileSize = extractInt64(from: fileDict["size"]) ?? extractInt64(from: fileDict["expected_size"])
             let uniqueId = (fileDict["remote"] as? [String: Any])?["unique_id"] as? String
+            let coverFileId = extractRemoteThumbnailId(from: audio["album_cover_thumbnail"] as? [String: Any])
 
             return RawTelegramAudioMessage(
                 chatId: chatId,
@@ -831,6 +1050,7 @@ public final class TelegramClientService: @unchecked Sendable {
                 fileSize: fileSize,
                 durationSeconds: duration,
                 fileUniqueId: uniqueId,
+                coverFileId: coverFileId,
                 date: date
             )
         }
@@ -846,6 +1066,7 @@ public final class TelegramClientService: @unchecked Sendable {
 
             let fileSize = extractInt64(from: fileDict["size"]) ?? extractInt64(from: fileDict["expected_size"])
             let uniqueId = (fileDict["remote"] as? [String: Any])?["unique_id"] as? String
+            let coverFileId = extractRemoteThumbnailId(from: doc["thumbnail"] as? [String: Any])
 
             return RawTelegramAudioMessage(
                 chatId: chatId,
@@ -861,8 +1082,74 @@ public final class TelegramClientService: @unchecked Sendable {
                 fileSize: fileSize,
                 durationSeconds: 0,
                 fileUniqueId: uniqueId,
+                coverFileId: coverFileId,
                 date: date
             )
+        }
+
+        return nil
+    }
+
+    private static func extractRemoteThumbnailId(from thumbDict: [String: Any]?) -> String? {
+        guard let thumbDict else { return nil }
+        if let file = thumbDict["file"] as? [String: Any],
+           let remote = file["remote"] as? [String: Any],
+           let remoteId = remote["id"] as? String,
+           !remoteId.isEmpty {
+            return remoteId
+        }
+        return nil
+    }
+
+    // MARK: - Cover Thumbnail Download via TDLib (`downloadCoverFromTelegram`)
+
+    /// Скачивает миниатюру обложки трека из Telegram по `coverFileId` (`electron/main.js` строки 2906–2932)
+    /// и сохраняет её в `Covers/<safeFilename>.jpg`.
+    public func downloadCoverFromTelegram(coverFileId: String, filename: String) async -> String? {
+        let trimmedId = coverFileId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedId.isEmpty else { return nil }
+
+        let safeBase = storage.safeCacheFilename(for: filename)
+        let targetURL = storage.coversDirectory.appendingPathComponent("\(safeBase).jpg")
+        if FileManager.default.fileExists(atPath: targetURL.path),
+           let attrs = try? FileManager.default.attributesOfItem(atPath: targetURL.path),
+           let size = attrs[.size] as? Int64, size > 128 {
+            return targetURL.path
+        }
+
+        guard TDLibJSONBridge.isNativeTDLibAvailable, isAuthorized else { return nil }
+
+        guard let remoteResp = try? await bridge.sendAsync([
+            "@type": "getRemoteFile",
+            "remote_file_id": trimmedId,
+            "file_type": ["@type": "fileTypeThumbnail"]
+        ], timeoutSeconds: 8.0),
+        let fileId = Self.extractInt(from: remoteResp["id"]) else {
+            return nil
+        }
+
+        if let completedPath = Self.completedLocalPath(from: remoteResp) {
+            try? FileManager.default.removeItem(at: targetURL)
+            try? FileManager.default.copyItem(atPath: completedPath, toPath: targetURL.path)
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                return targetURL.path
+            }
+        }
+
+        if let dlResp = try? await bridge.sendAsync([
+            "@type": "downloadFile",
+            "file_id": fileId,
+            "priority": 16,
+            "offset": 0,
+            "limit": 0,
+            "synchronous": true
+        ], timeoutSeconds: 12.0),
+        let dlPath = Self.completedLocalPath(from: dlResp) {
+            try? FileManager.default.removeItem(at: targetURL)
+            try? FileManager.default.copyItem(atPath: dlPath, toPath: targetURL.path)
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                return targetURL.path
+            }
         }
 
         return nil
@@ -938,6 +1225,7 @@ public final class TelegramClientService: @unchecked Sendable {
 
             // 2. Трек Telegram — разрешаем актуальный `file_id` через TDLib `getMessage` и скачиваем через `downloadFile`
             if track.sourceKind == .telegram,
+               self.isAuthorized,
                let chatIdStr = track.chatId,
                let chatId64 = Int64(chatIdStr),
                let messageId = track.messageId {

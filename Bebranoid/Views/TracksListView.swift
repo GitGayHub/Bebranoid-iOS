@@ -164,10 +164,12 @@ public struct TrackRowView: View {
         } label: {
             HStack(spacing: 12) {
                 ArtworkThumbnailView(
+                    track: track,
                     localPath: appState.libraryState.customAlbumCovers[track.album] ?? track.coverPath,
                     remoteURL: track.remoteArtworkURL,
                     fallbackSeed: "\(track.album)|\(track.artist)",
-                    cornerRadius: 10
+                    cornerRadius: 10,
+                    sizeTier: .listThumbnail
                 )
                 .frame(width: 48, height: 48)
                 .overlay {

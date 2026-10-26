@@ -17,10 +17,12 @@ public struct MiniPlayerCardView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     ArtworkThumbnailView(
+                        track: track,
                         localPath: appState.libraryState.customAlbumCovers[track.album] ?? track.coverPath,
                         remoteURL: track.remoteArtworkURL,
                         fallbackSeed: "\(track.album)|\(track.artist)",
-                        cornerRadius: 10
+                        cornerRadius: 10,
+                        sizeTier: .listThumbnail
                     )
                     .frame(width: 44, height: 44)
 

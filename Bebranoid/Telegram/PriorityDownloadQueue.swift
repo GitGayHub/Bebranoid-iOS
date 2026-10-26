@@ -53,6 +53,7 @@ public final class DownloadPreemptionToken: @unchecked Sendable {
 
 /// Точный 1:1 порт `PriorityDownloadQueue` из `electron/download-queue.cjs`.
 public actor PriorityDownloadQueue {
+    public static let shared = PriorityDownloadQueue()
     public typealias DownloadWorker = @Sendable (DownloadPreemptionToken) async throws -> URL
 
     private struct QueuedJob {
@@ -75,6 +76,7 @@ public actor PriorityDownloadQueue {
     private var sequenceCounter: UInt64 = 0
     private var pendingJobs: [String: QueuedJob] = [:]
     private var activeJobs: [String: ActiveJob] = [:]
+    public private(set) var failedDownloadsCount: Int = 0
 
     public init(concurrency: Int = 2) {
         self.concurrency = max(1, concurrency)
@@ -86,6 +88,15 @@ public actor PriorityDownloadQueue {
 
     public var activeCount: Int {
         activeJobs.count
+    }
+
+    public func enqueue(
+        key: String,
+        trackId: String? = nil,
+        priority: DownloadPriorityLevel,
+        worker: @escaping DownloadWorker
+    ) async throws -> URL {
+        try await enqueue(key: key, priority: priority.rawValue, worker: worker)
     }
 
     /// Постановка задачи скачивания в очередь с указанным приоритетом (`enqueue(key, priority, fn)`)
@@ -208,6 +219,7 @@ public actor PriorityDownloadQueue {
                 pendingJobs[key] = requeued
             }
         } catch {
+            failedDownloadsCount += 1
             if let failed = activeJobs.removeValue(forKey: key) {
                 for cont in failed.continuations {
                     cont.resume(throwing: error)

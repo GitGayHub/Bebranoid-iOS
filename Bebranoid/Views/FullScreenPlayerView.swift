@@ -54,10 +54,12 @@ public struct FullScreenPlayerView: View {
                     // Большая квадратная обложка альбома
                     let coverSide = min(geo.size.width - 48, geo.size.height * 0.43)
                     ArtworkThumbnailView(
+                        track: track,
                         localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
                         remoteURL: track?.remoteArtworkURL,
                         fallbackSeed: "\(track?.album ?? "")|\(track?.artist ?? "")",
-                        cornerRadius: 28
+                        cornerRadius: 28,
+                        sizeTier: .fullPlayer
                     )
                     .frame(width: coverSide, height: coverSide)
                     .scaleEffect(appState.isPlaying ? 1.0 : 0.93)

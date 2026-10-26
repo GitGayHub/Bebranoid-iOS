@@ -117,6 +117,7 @@ public final class BebranoidAppState: ObservableObject {
     public let translationService = LyricsTranslationService.shared
     public let telegramClient = TelegramClientService.shared
     public let youtubeService = YouTubeService.shared
+    public let artworkService = ArtworkService.shared
     public let nowPlaying = NowPlayingSessionManager.shared
     public let haptics = HapticsManager.shared
 
@@ -126,6 +127,7 @@ public final class BebranoidAppState: ObservableObject {
         self.libraryState = PlaybackSessionStore.shared.loadLibraryState()
         bindAudioEngine()
         bindRemoteCommands()
+        bindArtworkAndTelegramNotifications()
         #if DEBUG
         if UITestingDemoSeeder.isDemoModeActive {
             UITestingDemoSeeder.applyIfNeeded(to: self)
@@ -133,6 +135,35 @@ public final class BebranoidAppState: ObservableObject {
         }
         #endif
         restorePreviousSession()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.telegramClient.initializeAndRestoreSession()
+            if self.telegramClient.isAuthorized {
+                await self.refreshTelegramChats()
+            }
+        }
+    }
+
+    private func bindArtworkAndTelegramNotifications() {
+        NotificationCenter.default.publisher(for: .artworkDidResolve)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let self, let current = self.currentTrack else { return }
+                let resolvedTrackId = note.userInfo?["trackId"] as? String
+                let resolvedAlbum = note.userInfo?["album"] as? String
+                if resolvedTrackId == current.id || (resolvedAlbum != nil && resolvedAlbum == current.album) {
+                    self.updatePalette(for: current)
+                    self.syncNowPlayingInfo()
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .telegramAuthStateDidChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
     }
 
     public var accentSwiftUIColor: Color {
@@ -445,36 +476,67 @@ public final class BebranoidAppState: ObservableObject {
             return
         }
 
-        let coverPath = libraryState.customAlbumCovers[track.album] ?? track.coverPath
-        #if canImport(UIKit)
-        if let path = coverPath,
-           let uiImage = UIImage(contentsOfFile: path),
-           let cgImage = uiImage.cgImage {
-            let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
-            currentPalette = analyzed.meshColors
-            accentRGB = analyzed.uiAccent
-            return
+        if let localURL = artworkService.resolveLocalCoverURLSync(
+            for: track,
+            customAlbumCovers: libraryState.customAlbumCovers,
+            siblingTracks: libraryState.tracks
+        ) {
+            if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
+                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
+                currentPalette = analyzed.meshColors
+                accentRGB = analyzed.uiAccent
+                return
+            }
+            #if canImport(UIKit)
+            if let uiImage = UIImage(contentsOfFile: localURL.path),
+               let cgImage = uiImage.cgImage {
+                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
+                currentPalette = analyzed.meshColors
+                accentRGB = analyzed.uiAccent
+                return
+            }
+            #endif
         }
-        #endif
 
-        // Детерминированная генерация богатой палитры из хеша обложки/альбома, если обложка ещё загружается
+        // Детерминированная генерация богатой палитры из хеша обложки/альбома, пока реальная обложка извлекается
         let seedPalette = Self.deterministicSeedPalette(for: "\(track.album)|\(track.artist)")
         currentPalette = HarmonoidMeshEngine.mapPaletteToMeshColors(seedPalette)
         accentRGB = HarmonoidMeshEngine.pickAccentFromPalette(seedPalette)
+
+        // Запускаем асинхронное разрешение реальной обложки (embedded / Telegram / YouTube)
+        let customCovers = libraryState.customAlbumCovers
+        let siblings = libraryState.tracks
+        Task { [artworkService] in
+            _ = await artworkService.resolveArtwork(
+                for: track,
+                customAlbumCovers: customCovers,
+                siblingTracks: siblings
+            )
+        }
     }
 
     private func prepareNextTrackPalette(for nextTrack: Track) {
-        let coverPath = libraryState.customAlbumCovers[nextTrack.album] ?? nextTrack.coverPath
-        #if canImport(UIKit)
-        if let path = coverPath,
-           let uiImage = UIImage(contentsOfFile: path),
-           let cgImage = uiImage.cgImage {
-            let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
-            nextTrackPalette = analyzed.meshColors
-            nextTrackAccent = analyzed.uiAccent
-            return
+        if let localURL = artworkService.resolveLocalCoverURLSync(
+            for: nextTrack,
+            customAlbumCovers: libraryState.customAlbumCovers,
+            siblingTracks: libraryState.tracks
+        ) {
+            if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
+                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
+                nextTrackPalette = analyzed.meshColors
+                nextTrackAccent = analyzed.uiAccent
+                return
+            }
+            #if canImport(UIKit)
+            if let uiImage = UIImage(contentsOfFile: localURL.path),
+               let cgImage = uiImage.cgImage {
+                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
+                nextTrackPalette = analyzed.meshColors
+                nextTrackAccent = analyzed.uiAccent
+                return
+            }
+            #endif
         }
-        #endif
         let seed = Self.deterministicSeedPalette(for: "\(nextTrack.album)|\(nextTrack.artist)")
         nextTrackPalette = HarmonoidMeshEngine.mapPaletteToMeshColors(seed)
         nextTrackAccent = HarmonoidMeshEngine.pickAccentFromPalette(seed)
@@ -718,7 +780,8 @@ public final class BebranoidAppState: ObservableObject {
             name: AppConfig.recent30PlaylistName,
             kind: .recentAuto,
             trackFilenames: recentTracks.map { $0.cacheKey },
-            tracksSnapshot: recentTracks
+            tracksSnapshot: recentTracks,
+            customCoverPath: recentTracks.first?.coverPath
         )
         return [recentAuto] + libraryState.playlists
     }
@@ -913,12 +976,22 @@ public final class BebranoidAppState: ObservableObject {
     }
 
     private func syncNowPlayingInfo() {
+        var coverData: Data? = nil
+        if let track = currentTrack,
+           let url = artworkService.resolveLocalCoverURLSync(
+               for: track,
+               customAlbumCovers: libraryState.customAlbumCovers,
+               siblingTracks: libraryState.tracks
+           ) {
+            coverData = try? Data(contentsOf: url)
+        }
         nowPlaying.updateNowPlaying(
             track: currentTrack,
             isPlaying: isPlaying,
             currentTime: currentTime,
             duration: duration,
-            playbackRate: audioEngine.effectivePlaybackRate
+            playbackRate: audioEngine.effectivePlaybackRate,
+            artworkData: coverData
         )
     }
 }

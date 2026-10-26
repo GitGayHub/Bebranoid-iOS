@@ -39,6 +39,7 @@ public struct RawTelegramAudioMessage: Sendable {
     public var fileSize: Int64?
     public var durationSeconds: Double
     public var fileUniqueId: String?
+    public var coverFileId: String?
     public var date: Date
 
     public init(
@@ -55,6 +56,7 @@ public struct RawTelegramAudioMessage: Sendable {
         fileSize: Int64? = nil,
         durationSeconds: Double = 0,
         fileUniqueId: String? = nil,
+        coverFileId: String? = nil,
         date: Date = Date()
     ) {
         self.chatId = chatId
@@ -70,6 +72,7 @@ public struct RawTelegramAudioMessage: Sendable {
         self.fileSize = fileSize
         self.durationSeconds = durationSeconds
         self.fileUniqueId = fileUniqueId
+        self.coverFileId = coverFileId
         self.date = date
     }
 }
@@ -256,6 +259,7 @@ public enum TelegramScanner {
             mimeType: msg.mimeType,
             fileSize: msg.fileSize,
             dateAdded: msg.date,
+            coverFileId: msg.coverFileId,
             isFromArchive: isFromArchive
         )
         track.formatInfo = format

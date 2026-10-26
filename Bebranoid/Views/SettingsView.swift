@@ -3,11 +3,12 @@ import UniformTypeIdentifiers
 
 /// Полный экран настроек Bebranoid iOS (`src/views/Settings.jsx` + `src/views/Auth.jsx`).
 /// Включает:
-/// - Настоящую авторизацию TDLib (API ID, API Hash, телефон, код, 2FA) и выбор основного/архивного чата Telegram
+/// - Настоящую авторизацию TDLib (API ID, API Hash, телефон, код, QR-вход, 2FA) и выбор основного/архивного чата Telegram
 /// - Импорт локальных аудиофайлов (`FLAC`, `ALAC`, `WAV`, `M4A`, `MP3`, `OPUS`) через системный файловый пикер
 /// - Настройки переходов (`Crossfade`), кривой громкости (`u^2.75`) и энергосбережения фона
 /// - Настройки движка текстов песен (`Beautiful Lyrics` vs `Classic Karaoke`) и размера шрифта
 /// - Статистику локального кеша и очистку
+/// - Диагностический экран (`DiagnosticsView`) в Debug-сборках
 public struct SettingsView: View {
     @ObservedObject var appState: BebranoidAppState
     @State private var isTelegramAuthPresented: Bool = false
@@ -31,10 +32,10 @@ public struct SettingsView: View {
                                 .foregroundStyle(Color(red: 0.24, green: 0.68, blue: 1.0))
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(appState.telegramClient.isAuthorized ? "Авторизован в Telegram" : "Не выполнен вход")
+                                Text(appState.telegramClient.isAuthorized ? "Авторизован в Telegram" : "Не выполнен вход (TDLib)")
                                     .font(.system(size: 15, weight: .bold))
                                     .foregroundStyle(.white)
-                                Text(appState.telegramClient.authorizedPhoneNumber ?? "Подключите аккаунт через нативный TDLib")
+                                Text(appState.telegramClient.authorizedPhoneNumber ?? "Статус: \(appState.telegramClient.connectionState.rawValue)")
                                     .font(.system(size: 12))
                                     .foregroundStyle(.white.opacity(0.65))
                             }
@@ -228,6 +229,19 @@ public struct SettingsView: View {
                         }
                     }
                     .listRowBackground(Color.white.opacity(0.06))
+
+                    #if DEBUG
+                    Section("Диагностика (Debug QA)") {
+                        NavigationLink {
+                            DiagnosticsView(appState: appState)
+                        } label: {
+                            Label("Открыть экран диагностики подсистем", systemImage: "waveform.path.ecg.rectangle")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(appState.accentSwiftUIColor)
+                        }
+                    }
+                    .listRowBackground(Color.white.opacity(0.06))
+                    #endif
                 }
                 .scrollContentBackground(.hidden)
             }
@@ -267,6 +281,7 @@ public struct SettingsView: View {
 }
 
 /// Экран пошаговой авторизации Telegram через нативный `TDLibFramework` (`src/views/Auth.jsx`).
+/// Единственный источник статуса авторизации — `authorizationStateReady` от TDLib.
 public struct TelegramAuthView: View {
     @ObservedObject var appState: BebranoidAppState
     @StateObject private var authVM = TelegramAuthViewModel()
@@ -283,11 +298,22 @@ public struct TelegramAuthView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(authVM.connectionState == .ready ? Color.green : Color.orange)
+                                .frame(width: 8, height: 8)
+                            Text("TDLib: \(authVM.connectionState.rawValue)")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                        }
+
                         switch authVM.step {
                         case .unauthorized:
                             phoneStepView
                         case .awaitingCode:
                             codeStepView
+                        case .awaitingQRConfirmation(let link):
+                            qrConfirmationStepView(link: link)
                         case .awaiting2FAPassword:
                             twoFactorStepView
                         case .authorized:
@@ -331,7 +357,7 @@ public struct TelegramAuthView: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white)
 
-            Text("Получите персональные api_id и api_hash на https://my.telegram.org — ключи сохраняются только в защищённом iOS Keychain.")
+            Text("Получите персональные api_id и api_hash на https://my.telegram.org — ключи сохраняются только в защищённом iOS Keychain. Авторизация подтверждается исключительно состоянием authorizationStateReady от TDLib.")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.68))
 
@@ -367,14 +393,26 @@ public struct TelegramAuthView: View {
             }
             .disabled(authVM.isLoading)
 
+            Button {
+                Task { await authVM.requestQRLogin() }
+            } label: {
+                Label("Войти по QR-коду (с другого устройства)", systemImage: "qrcode")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
+            }
+            .disabled(authVM.isLoading)
+
             Button("Сохранить API ID / API Hash в Keychain") {
                 authVM.saveCredentialsOnly()
             }
             .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(.white.opacity(0.85))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
-            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
         }
     }
 
@@ -400,6 +438,34 @@ public struct TelegramAuthView: View {
                     .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
             }
             .disabled(authVM.isLoading)
+        }
+    }
+
+    private func qrConfirmationStepView(link: String) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Подтверждение входа через QR / устройство Telegram", systemImage: "qrcode.viewfinder")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text("Откройте Telegram на другом авторизованном устройстве → Настройки → Устройства → Подключить устройство и подтвердите ссылку токена TDLib:")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.70))
+
+            Text(link)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(appState.accentSwiftUIColor)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+
+            Button("Вернуться к входу по номеру телефона") {
+                authVM.logout()
+            }
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
         }
     }
 
@@ -436,7 +502,7 @@ public struct TelegramAuthView: View {
 
     private var authorizedSummaryView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Сессия TDLib активна и защищена в Keychain", systemImage: "checkmark.shield.fill")
+            Label("Сессия TDLib активна (authorizationStateReady)", systemImage: "checkmark.shield.fill")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.green)
 
@@ -447,7 +513,7 @@ public struct TelegramAuthView: View {
             Button(role: .destructive) {
                 authVM.logout()
             } label: {
-                Text("Выйти из TDLib и очистить Keychain")
+                Text("Выйти из TDLib и очистить сессию")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)

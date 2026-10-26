@@ -96,9 +96,11 @@ private struct PlaylistGridCard: View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
                 ArtworkThumbnailView(
+                    track: playlist.tracksSnapshot.first,
                     localPath: playlist.customCoverPath ?? playlist.tracksSnapshot.first?.coverPath,
                     remoteURL: playlist.remoteArtworkURL ?? playlist.tracksSnapshot.first?.remoteArtworkURL,
                     fallbackSeed: playlist.name,
+                    sizeTier: .grid384,
                     cornerRadius: 18
                 )
                 .aspectRatio(1.0, contentMode: .fit)

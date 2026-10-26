@@ -32,7 +32,15 @@ public struct Album: Identifiable, Hashable, Sendable {
         if let customCoverPath, !customCoverPath.isEmpty {
             return customCoverPath
         }
-        return tracks.first(where: { $0.coverPath != nil })?.coverPath
+        if let explicit = tracks.first(where: { $0.coverPath != nil })?.coverPath {
+            return explicit
+        }
+        for track in tracks {
+            if let resolved = ArtworkService.shared.resolveLocalCoverURLSync(for: track) {
+                return resolved.url.path
+            }
+        }
+        return nil
     }
 
     public var remoteArtworkURL: String? {
@@ -67,7 +75,15 @@ public struct ArtistSummary: Identifiable, Hashable, Sendable {
     }
 
     public var representativeCoverPath: String? {
-        tracks.first(where: { $0.coverPath != nil })?.coverPath
+        if let explicit = tracks.first(where: { $0.coverPath != nil })?.coverPath {
+            return explicit
+        }
+        for track in tracks {
+            if let resolved = ArtworkService.shared.resolveLocalCoverURLSync(for: track) {
+                return resolved.url.path
+            }
+        }
+        return nil
     }
 
     public var representativeRemoteArtwork: String? {

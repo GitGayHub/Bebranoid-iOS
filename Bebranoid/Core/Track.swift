@@ -27,6 +27,7 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
     public var dateAdded: Date
     public var localPath: String?
     public var coverPath: String?
+    public var coverFileId: String?
     public var remoteArtworkURL: String?
     public var sourceKind: TrackSourceKind
     public var youtubeVideoId: String?
@@ -51,6 +52,7 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
         dateAdded: Date = Date(),
         localPath: String? = nil,
         coverPath: String? = nil,
+        coverFileId: String? = nil,
         remoteArtworkURL: String? = nil,
         sourceKind: TrackSourceKind = .telegram,
         youtubeVideoId: String? = nil,
@@ -74,6 +76,7 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
         self.dateAdded = dateAdded
         self.localPath = localPath
         self.coverPath = coverPath
+        self.coverFileId = coverFileId
         self.remoteArtworkURL = remoteArtworkURL
         self.sourceKind = sourceKind
         self.youtubeVideoId = youtubeVideoId
@@ -111,6 +114,7 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
         fileSize: Int64? = nil,
         dateAdded: Date = Date(),
         coverPath: String? = nil,
+        coverFileId: String? = nil,
         isFromArchive: Bool = false,
         configuredArchiveChatId: String? = nil
     ) -> Track {
@@ -132,6 +136,7 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
             fileSize: fileSize,
             dateAdded: dateAdded,
             coverPath: coverPath,
+            coverFileId: coverFileId,
             sourceKind: .telegram,
             isFromArchive: archive
         )

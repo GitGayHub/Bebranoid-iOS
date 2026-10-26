@@ -16,8 +16,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local CI downloaded artifacts & secrets
+# Local CI downloaded artifacts, local integration reports & secrets
 artifacts/
+local-reports/
 tdlib/
 *.session
 cookies*.txt
