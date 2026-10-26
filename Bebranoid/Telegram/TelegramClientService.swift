@@ -1037,7 +1037,8 @@ public final class TelegramClientService: @unchecked Sendable {
             let performer = audio["performer"] as? String
             let title = audio["title"] as? String
             let fileSize = extractInt64(from: fileDict["size"]) ?? extractInt64(from: fileDict["expected_size"])
-            let uniqueId = (fileDict["remote"] as? [String: Any])?["unique_id"] as? String
+            let remoteDict = fileDict["remote"] as? [String: Any]
+            let uniqueId = (remoteDict?["unique_id"] as? String) ?? (remoteDict?["id"] as? String)
             let coverFileId = extractRemoteThumbnailId(from: audio["album_cover_thumbnail"] as? [String: Any])
 
             return RawTelegramAudioMessage(
@@ -1069,7 +1070,8 @@ public final class TelegramClientService: @unchecked Sendable {
             guard isAudioDoc else { return nil }
 
             let fileSize = extractInt64(from: fileDict["size"]) ?? extractInt64(from: fileDict["expected_size"])
-            let uniqueId = (fileDict["remote"] as? [String: Any])?["unique_id"] as? String
+            let remoteDict = fileDict["remote"] as? [String: Any]
+            let uniqueId = (remoteDict?["unique_id"] as? String) ?? (remoteDict?["id"] as? String)
             let coverFileId = extractRemoteThumbnailId(from: doc["thumbnail"] as? [String: Any])
 
             return RawTelegramAudioMessage(

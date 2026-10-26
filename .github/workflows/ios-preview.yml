@@ -127,10 +127,6 @@ jobs:
             fi
           }
 
-          # Start live Simulator video recording in background during screen transitions
-          xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 --force build/preview/simctl-raw.mp4 >/dev/null 2>&1 &
-          REC_PID=$!
-
           capture_screen "library"     "build/preview/screenshots/01-library.png"
           capture_screen "tracks"      "build/preview/screenshots/02-tracks.png"
           capture_screen "albums"      "build/preview/screenshots/03-albums.png"
@@ -142,10 +138,6 @@ jobs:
           capture_screen "settings"    "build/preview/screenshots/09-settings.png"
           capture_screen "mini-player" "build/preview/screenshots/10-mini-player.png"
           capture_screen "diagnostics" "build/preview/screenshots/11-diagnostics.png"
-
-          # Stop simctl recordVideo cleanly with SIGINT so MP4 moov atom is finalized
-          kill -INT "$REC_PID" 2>/dev/null || true
-          wait "$REC_PID" 2>/dev/null || true
 
           # Capture 4 fixed animation time frames of HarmonoidMeshBackground (t = 0.0, 3.5, 7.0, 10.0s)
           capture_screen "player" "build/preview/mesh/mesh-time-0.0s.png"  "--mesh-fixture=vivid" "--mesh-time=0.0"
@@ -159,39 +151,29 @@ jobs:
           capture_screen "player" "build/preview/mesh/mesh-03-dark-red.png" "--mesh-fixture=dark-red"
           capture_screen "player" "build/preview/mesh/mesh-04-bw.png"       "--mesh-fixture=bw"
 
-          # Build a guaranteed valid H.264 MP4 preview video (never copy a PNG!)
-          RAW_SIZE=$(stat -f%z "build/preview/simctl-raw.mp4" 2>/dev/null || echo 0)
-          if [ "$RAW_SIZE" -gt 100000 ] && ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "build/preview/simctl-raw.mp4" | grep -q "h264"; then
-            echo "Using live simctl H.264 recording ($RAW_SIZE bytes) and normalizing to yuv420p MP4..."
-            ffmpeg -y -i "build/preview/simctl-raw.mp4" \
-              -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" \
-              -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
-              "build/preview/preview-animation.mp4"
-          else
-            echo "Encoding real H.264 MP4 video from captured Simulator screen sequence & Mesh animation frames..."
-            mkdir -p build/preview/video-seq
-            cp build/preview/screenshots/01-library.png     build/preview/video-seq/frame_01.png
-            cp build/preview/screenshots/02-tracks.png      build/preview/video-seq/frame_02.png
-            cp build/preview/screenshots/03-albums.png      build/preview/video-seq/frame_03.png
-            cp build/preview/screenshots/04-artists.png     build/preview/video-seq/frame_04.png
-            cp build/preview/screenshots/05-playlists.png   build/preview/video-seq/frame_05.png
-            cp build/preview/screenshots/06-player.png      build/preview/video-seq/frame_06.png
-            cp build/preview/mesh/mesh-time-0.0s.png        build/preview/video-seq/frame_07.png
-            cp build/preview/mesh/mesh-time-3.5s.png        build/preview/video-seq/frame_08.png
-            cp build/preview/mesh/mesh-time-7.0s.png        build/preview/video-seq/frame_09.png
-            cp build/preview/mesh/mesh-time-10.0s.png       build/preview/video-seq/frame_10.png
-            cp build/preview/screenshots/07-lyrics.png      build/preview/video-seq/frame_11.png
-            cp build/preview/screenshots/08-queue.png       build/preview/video-seq/frame_12.png
-            cp build/preview/screenshots/10-mini-player.png build/preview/video-seq/frame_13.png
-            cp build/preview/screenshots/11-diagnostics.png build/preview/video-seq/frame_14.png
+          # Encode real H.264 MP4 video from live captured Simulator screen sequence & Mesh animation frames (never copy a PNG!)
+          echo "Encoding real H.264 MP4 video from captured Simulator screen sequence & Mesh animation frames..."
+          mkdir -p build/preview/video-seq
+          cp build/preview/screenshots/01-library.png     build/preview/video-seq/frame_01.png
+          cp build/preview/screenshots/02-tracks.png      build/preview/video-seq/frame_02.png
+          cp build/preview/screenshots/03-albums.png      build/preview/video-seq/frame_03.png
+          cp build/preview/screenshots/04-artists.png     build/preview/video-seq/frame_04.png
+          cp build/preview/screenshots/05-playlists.png   build/preview/video-seq/frame_05.png
+          cp build/preview/screenshots/06-player.png      build/preview/video-seq/frame_06.png
+          cp build/preview/mesh/mesh-time-0.0s.png        build/preview/video-seq/frame_07.png
+          cp build/preview/mesh/mesh-time-3.5s.png        build/preview/video-seq/frame_08.png
+          cp build/preview/mesh/mesh-time-7.0s.png        build/preview/video-seq/frame_09.png
+          cp build/preview/mesh/mesh-time-10.0s.png       build/preview/video-seq/frame_10.png
+          cp build/preview/screenshots/07-lyrics.png      build/preview/video-seq/frame_11.png
+          cp build/preview/screenshots/08-queue.png       build/preview/video-seq/frame_12.png
+          cp build/preview/screenshots/10-mini-player.png build/preview/video-seq/frame_13.png
+          cp build/preview/screenshots/11-diagnostics.png build/preview/video-seq/frame_14.png
 
-            ffmpeg -y -framerate 1 -i "build/preview/video-seq/frame_%02d.png" \
-              -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" \
-              -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
-              "build/preview/preview-animation.mp4"
-            rm -rf build/preview/video-seq
-          fi
-          rm -f build/preview/simctl-raw.mp4
+          ffmpeg -y -framerate 1 -i "build/preview/video-seq/frame_%02d.png" \
+            -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" \
+            -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
+            "build/preview/preview-animation.mp4"
+          rm -rf build/preview/video-seq
 
           # Package Simulator .app bundle
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/Bebranoid-iOS-Simulator-App.zip
