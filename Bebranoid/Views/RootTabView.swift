@@ -13,8 +13,10 @@ public struct RootTabView: View {
         ZStack(alignment: .bottom) {
             #if DEBUG
             let fixedTime = appState.demoFixedMeshTime
+            let isScreenOverridden = (appState.demoDirectScreenOverride != nil)
             #else
             let fixedTime: Double? = nil
+            let isScreenOverridden = false
             #endif
             HarmonoidMeshView(
                 currentPalette: appState.currentPalette,
@@ -26,6 +28,7 @@ public struct RootTabView: View {
 
             TabView(selection: $appState.selectedTab) {
                 TracksListView(appState: appState)
+                    .opacity(isScreenOverridden ? 0 : 1)
                     .tabItem {
                         Label("Треки", systemImage: "music.note.list")
                     }
@@ -57,7 +60,7 @@ public struct RootTabView: View {
             }
             .tint(appState.accentSwiftUIColor)
 
-            if appState.currentTrack != nil {
+            if appState.currentTrack != nil && !isScreenOverridden {
                 MiniPlayerCardView(appState: appState)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 56)
