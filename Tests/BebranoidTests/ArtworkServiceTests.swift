@@ -274,12 +274,12 @@ final class ArtworkServiceTests: XCTestCase {
             forumTopics: [:]
         )
         XCTAssertNotNil(raw)
-        XCTAssertEqual(raw?.fileId, "REMOTE_AUDIO_FILE_ID_999")
+        XCTAssertEqual(raw?.fileUniqueId, "REMOTE_AUDIO_FILE_ID_999")
         XCTAssertEqual(raw?.coverFileId, "REMOTE_THUMB_COVER_ID_999")
 
         if let raw {
             let track = TelegramScanner.buildTrack(from: raw)
-            XCTAssertEqual(track?.coverFileId, "REMOTE_THUMB_COVER_ID_999")
+            XCTAssertEqual(track.coverFileId, "REMOTE_THUMB_COVER_ID_999")
         }
     }
 }

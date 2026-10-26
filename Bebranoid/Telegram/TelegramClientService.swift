@@ -317,6 +317,10 @@ public final class TelegramClientService: @unchecked Sendable {
         withLock { currentRawAuthStateName }
     }
 
+    public var rawTDLibAuthState: String {
+        rawAuthorizationStateName
+    }
+
     public var scanProgressText: String {
         withLock { currentScanProgressText }
     }
