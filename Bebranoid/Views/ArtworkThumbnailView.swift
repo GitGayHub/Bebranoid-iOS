@@ -58,64 +58,90 @@ public struct ArtworkThumbnailView: View {
         return nil
     }
 
+    private var taskIdentifier: String {
+        if let id = track?.id { return id }
+        if let lp = localPath { return lp }
+        if let ru = remoteURL { return ru }
+        return fallbackSeed
+    }
+
     public var body: some View {
         ZStack {
-            if let path = effectiveLocalPath,
-               let cgImage = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: path), tier: sizeTier) {
-                Image(decorative: cgImage, scale: 1.0, orientation: .up)
-                    .resizable()
-                    .scaledToFill()
-            } else if let remoteStr = remoteURL ?? track?.remoteArtworkURL,
-                      let url = URL(string: remoteStr) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    default:
-                        fallbackCover
-                    }
-                }
-            } else {
-                fallbackCover
-            }
-
+            artworkImageLayer
             if showFavoriteOverlay {
-                ZStack {
-                    Color.black.opacity(0.28)
-                    Image(systemName: "heart.fill")
-                        .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(Color(red: 1.0, green: 0.36, blue: 0.52))
-                        .shadow(color: .black.opacity(0.45), radius: 8, x: 0, y: 4)
-                }
+                favoriteOverlayLayer
             }
         }
-        .id("\(effectiveLocalPath ?? fallbackSeed)_\(refreshTrigger)")
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
-        )
-        .task(id: track?.id ?? localPath ?? remoteURL ?? fallbackSeed) {
-            guard effectiveLocalPath == nil, let track else { return }
-            if let resolved = await ArtworkService.shared.resolveArtwork(for: track),
-               let fileURL = resolved.fileURL {
-                resolvedLocalPath = fileURL.path
-            }
+        .overlay(borderOverlay)
+        .task(id: taskIdentifier) {
+            await resolveArtworkIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: .artworkDidResolve)) { note in
-            guard let info = note.userInfo else { return }
-            let noteTrackId = info["trackId"] as? String
-            let noteAlbum = info["albumName"] as? String
-            let notePath = info["path"] as? String
-            if (track != nil && noteTrackId == track?.id) ||
-               (track != nil && noteAlbum == track?.album && !(noteAlbum ?? "").isEmpty) {
-                if let notePath, !notePath.isEmpty {
-                    resolvedLocalPath = notePath
+            handleArtworkNotification(note)
+        }
+    }
+
+    @ViewBuilder
+    private var artworkImageLayer: some View {
+        let _ = refreshTrigger
+        if let path = effectiveLocalPath,
+           let cgImage = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: path), tier: sizeTier) {
+            Image(decorative: cgImage, scale: 1.0, orientation: .up)
+                .resizable()
+                .scaledToFill()
+        } else if let remoteStr = remoteURL ?? track?.remoteArtworkURL,
+                  let url = URL(string: remoteStr) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                default:
+                    fallbackCover
                 }
-                refreshTrigger &+= 1
             }
+        } else {
+            fallbackCover
+        }
+    }
+
+    private var favoriteOverlayLayer: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+            Image(systemName: "heart.fill")
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(Color(red: 1.0, green: 0.36, blue: 0.52))
+                .shadow(color: .black.opacity(0.45), radius: 8, x: 0, y: 4)
+        }
+    }
+
+    private var borderOverlay: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+    }
+
+    private func resolveArtworkIfNeeded() async {
+        guard effectiveLocalPath == nil, let track else { return }
+        if let resolved = await ArtworkService.shared.resolveArtwork(for: track),
+           let fileURL = resolved.fileURL {
+            resolvedLocalPath = fileURL.path
+        }
+    }
+
+    private func handleArtworkNotification(_ note: Notification) {
+        guard let info = note.userInfo, let currentTrack = track else { return }
+        let noteTrackId = info["trackId"] as? String
+        let noteAlbum = info["albumName"] as? String
+        let notePath = info["path"] as? String
+        let matchesTrack = (noteTrackId == currentTrack.id)
+        let matchesAlbum = (noteAlbum == currentTrack.album && !(noteAlbum ?? "").isEmpty)
+        if matchesTrack || matchesAlbum {
+            if let notePath, !notePath.isEmpty {
+                resolvedLocalPath = notePath
+            }
+            refreshTrigger &+= 1
         }
     }
 

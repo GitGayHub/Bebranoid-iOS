@@ -59,7 +59,7 @@ public struct DiagnosticsView: View {
         let status = appState.isPlaying ? "Playing" : "Paused/Idle"
         let fx = appState.audioFXMode.displayName
         let rate = String(format: "%.2fx", appState.audioEngine.effectivePlaybackRate)
-        let badge = appState.currentQualityBadge.title
+        let badge = appState.currentQualityBadge.label
         return "\(status) • \(badge) • FX: \(fx) (\(rate))"
     }
 
