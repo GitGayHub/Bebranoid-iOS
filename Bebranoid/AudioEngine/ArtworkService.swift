@@ -18,6 +18,8 @@ public enum ArtworkSourcePriority: Int, Codable, Sendable, Comparable {
     case youtubeCroppedThumbnail = 6
     case proceduralFallback = 7
 
+    public static let customAlbumCover: ArtworkSourcePriority = .customCover
+
     public static func < (lhs: ArtworkSourcePriority, rhs: ArtworkSourcePriority) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
@@ -28,6 +30,9 @@ public enum ArtworkSizeTier: String, Sendable {
     case albumGrid = "grid_384"
     case fullPlayer = "player_1024"
     case meshAnalysis = "mesh_64"
+
+    public static let grid384: ArtworkSizeTier = .albumGrid
+    public static let playerFull: ArtworkSizeTier = .fullPlayer
 
     public var maxPixelDimension: Int {
         switch self {
@@ -43,6 +48,8 @@ public struct ResolvedArtworkResult: Sendable {
     public let fileURL: URL?
     public let imageData: Data?
     public let source: ArtworkSourcePriority
+
+    public var localFileURL: URL? { fileURL }
 
     public init(fileURL: URL?, imageData: Data?, source: ArtworkSourcePriority) {
         self.fileURL = fileURL
@@ -310,6 +317,10 @@ public final class ArtworkService: @unchecked Sendable {
     }
 
     // MARK: - YouTube 16:9 / 4:3 Letterbox -> 1:1 Center-Square Crop (`electron/main.js` line 1866)
+
+    public func cropYouTubeThumbnailToSquare(imageData: Data) -> Data? {
+        Self.cropYouTubeThumbnailToSquare(imageData)
+    }
 
     /// Обрезает 16:9 (`1280×720`) или 4:3 с чёрными полосами (`480×360` `hqdefault.jpg`) миниатюру YouTube
     /// до центральной квадратной области `1:1` по формуле `side = min(height, floor(width * 9 / 16))` из `electron/main.js`.

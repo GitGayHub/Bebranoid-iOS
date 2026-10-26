@@ -152,12 +152,12 @@ private struct LibraryCloudOverviewScreen: View {
                                         ForEach(appState.computedAlbums) { album in
                                             VStack(alignment: .leading, spacing: 6) {
                                                 ArtworkThumbnailView(
-                                                    track: album.representativeTrack,
-                                                    localPath: album.preferredCoverPath,
-                                                    remoteURL: album.preferredRemoteArtworkURL,
+                                                    track: album.tracks.first,
+                                                    localPath: album.coverPath,
+                                                    remoteURL: album.remoteArtworkURL,
                                                     fallbackSeed: "\(album.name)|\(album.artist)",
                                                     cornerRadius: 16,
-                                                    sizeTier: .grid384
+                                                    sizeTier: .albumGrid
                                                 )
                                                 .frame(width: 132, height: 132)
 
@@ -264,7 +264,7 @@ private struct MiniPlayerExpandedDockScreen: View {
                                 remoteURL: track.remoteArtworkURL,
                                 fallbackSeed: "\(track.album)|\(track.artist)",
                                 cornerRadius: 16,
-                                sizeTier: .grid384
+                                sizeTier: .albumGrid
                             )
                             .frame(width: 76, height: 76)
 

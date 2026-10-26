@@ -476,11 +476,12 @@ public final class BebranoidAppState: ObservableObject {
             return
         }
 
-        if let localURL = artworkService.resolveLocalCoverURLSync(
+        if let resolvedHit = artworkService.resolveLocalCoverURLSync(
             for: track,
             customAlbumCovers: libraryState.customAlbumCovers,
             siblingTracks: libraryState.tracks
         ) {
+            let localURL = resolvedHit.url
             if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
                 let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
                 currentPalette = analyzed.meshColors
@@ -516,11 +517,12 @@ public final class BebranoidAppState: ObservableObject {
     }
 
     private func prepareNextTrackPalette(for nextTrack: Track) {
-        if let localURL = artworkService.resolveLocalCoverURLSync(
+        if let resolvedHit = artworkService.resolveLocalCoverURLSync(
             for: nextTrack,
             customAlbumCovers: libraryState.customAlbumCovers,
             siblingTracks: libraryState.tracks
         ) {
+            let localURL = resolvedHit.url
             if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
                 let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
                 nextTrackPalette = analyzed.meshColors
@@ -978,12 +980,12 @@ public final class BebranoidAppState: ObservableObject {
     private func syncNowPlayingInfo() {
         var coverData: Data? = nil
         if let track = currentTrack,
-           let url = artworkService.resolveLocalCoverURLSync(
+           let resolvedHit = artworkService.resolveLocalCoverURLSync(
                for: track,
                customAlbumCovers: libraryState.customAlbumCovers,
                siblingTracks: libraryState.tracks
            ) {
-            coverData = try? Data(contentsOf: url)
+            coverData = try? Data(contentsOf: resolvedHit.url)
         }
         nowPlaying.updateNowPlaying(
             track: currentTrack,

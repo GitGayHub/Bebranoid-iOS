@@ -100,8 +100,8 @@ public enum UITestingDemoSeeder {
                 mimeType: "audio/flac",
                 fileSize: 31_457_280,
                 dateAdded: now,
-                sourceKind: .telegram,
                 coverPath: coverMidnight,
+                sourceKind: .telegram,
                 formatInfo: AudioFormatInfo(
                     codec: "FLAC",
                     container: "FLAC",
@@ -125,8 +125,8 @@ public enum UITestingDemoSeeder {
                 mimeType: "audio/flac",
                 fileSize: 24_800_000,
                 dateAdded: now.addingTimeInterval(-3600),
-                sourceKind: .telegram,
                 coverPath: coverAurora,
+                sourceKind: .telegram,
                 formatInfo: AudioFormatInfo(
                     codec: "FLAC",
                     container: "FLAC",
@@ -150,9 +150,9 @@ public enum UITestingDemoSeeder {
                 mimeType: "audio/flac",
                 fileSize: 26_120_000,
                 dateAdded: now.addingTimeInterval(-7200),
+                coverPath: coverKino,
                 sourceKind: .telegram,
                 isFromArchive: true,
-                coverPath: coverKino,
                 formatInfo: AudioFormatInfo(
                     codec: "FLAC",
                     container: "FLAC",
@@ -174,8 +174,8 @@ public enum UITestingDemoSeeder {
                 mimeType: "audio/mp4",
                 fileSize: 10_485_760,
                 dateAdded: now.addingTimeInterval(-10800),
-                sourceKind: .youtube,
                 coverPath: coverYouTube,
+                sourceKind: .youtube,
                 youtubeVideoId: "dQw4w9WgXcQ",
                 youtubeUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
                 formatInfo: AudioFormatInfo(
@@ -201,8 +201,8 @@ public enum UITestingDemoSeeder {
                 mimeType: "audio/flac",
                 fileSize: 33_200_000,
                 dateAdded: now.addingTimeInterval(-14400),
-                sourceKind: .telegram,
                 coverPath: coverEmergence,
+                sourceKind: .telegram,
                 formatInfo: AudioFormatInfo(
                     codec: "FLAC",
                     container: "FLAC",
@@ -233,9 +233,9 @@ public enum UITestingDemoSeeder {
         for track in demoTracks {
             if let path = track.coverPath {
                 let url = URL(fileURLWithPath: path)
-                _ = ArtworkService.shared.loadPlatformImage(from: url, tier: .listThumbnail)
-                _ = ArtworkService.shared.loadPlatformImage(from: url, tier: .grid384)
-                _ = ArtworkService.shared.loadPlatformImage(from: url, tier: .playerFull)
+                _ = ArtworkService.shared.loadCGImage(from: url, tier: .listThumbnail)
+                _ = ArtworkService.shared.loadCGImage(from: url, tier: .albumGrid)
+                _ = ArtworkService.shared.loadCGImage(from: url, tier: .fullPlayer)
             }
         }
 
@@ -585,18 +585,18 @@ public enum UITestingDemoSeeder {
 
         var data = Data(capacity: 44 + dataChunkSize)
         data.append(contentsOf: "RIFF".utf8)
-        data.append(uint32LE(UInt32(riffChunkSize)))
+        data.append(contentsOf: uint32LE(UInt32(riffChunkSize)))
         data.append(contentsOf: "WAVE".utf8)
         data.append(contentsOf: "fmt ".utf8)
-        data.append(uint32LE(16))
-        data.append(uint16LE(1)) // PCM
-        data.append(uint16LE(UInt16(channels)))
-        data.append(uint32LE(UInt32(sampleRate)))
-        data.append(uint32LE(UInt32(byteRate)))
-        data.append(uint16LE(UInt16(blockAlign)))
-        data.append(uint16LE(UInt16(bytesPerSample * 8)))
+        data.append(contentsOf: uint32LE(16))
+        data.append(contentsOf: uint16LE(1)) // PCM
+        data.append(contentsOf: uint16LE(UInt16(channels)))
+        data.append(contentsOf: uint32LE(UInt32(sampleRate)))
+        data.append(contentsOf: uint32LE(UInt32(byteRate)))
+        data.append(contentsOf: uint16LE(UInt16(blockAlign)))
+        data.append(contentsOf: uint16LE(UInt16(bytesPerSample * 8)))
         data.append(contentsOf: "data".utf8)
-        data.append(uint32LE(UInt32(dataChunkSize)))
+        data.append(contentsOf: uint32LE(UInt32(dataChunkSize)))
 
         var pcmBytes = [UInt8](repeating: 0, count: dataChunkSize)
         for frame in 0..<totalFrames {

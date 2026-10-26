@@ -63,6 +63,10 @@ public final class CacheIndexManager: @unchecked Sendable {
         lock.unlock()
     }
 
+    public func registerCachedFile(for track: Track, fileURL: URL) {
+        markCached(for: track)
+    }
+
     public func isCached(_ track: Track) -> Bool {
         if track.sourceKind == .local, let path = track.localPath, fileManager.fileExists(atPath: path) {
             return true

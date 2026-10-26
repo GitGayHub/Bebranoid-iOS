@@ -100,8 +100,8 @@ private struct PlaylistGridCard: View {
                     localPath: playlist.customCoverPath ?? playlist.tracksSnapshot.first?.coverPath,
                     remoteURL: playlist.remoteArtworkURL ?? playlist.tracksSnapshot.first?.remoteArtworkURL,
                     fallbackSeed: playlist.name,
-                    sizeTier: .grid384,
-                    cornerRadius: 18
+                    cornerRadius: 18,
+                    sizeTier: .albumGrid
                 )
                 .aspectRatio(1.0, contentMode: .fit)
 

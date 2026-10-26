@@ -198,19 +198,19 @@ final class ArtworkServiceTests: XCTestCase {
             for: track,
             customAlbumCovers: ["Priority Album": customCoverURL.path]
         )
-        XCTAssertEqual(resolvedCustom.source, .customAlbumCover)
-        XCTAssertEqual(resolvedCustom.localFileURL?.path, customCoverURL.path)
+        XCTAssertEqual(resolvedCustom?.source, .customAlbumCover)
+        XCTAssertEqual(resolvedCustom?.localFileURL?.path, customCoverURL.path)
 
         // Без customAlbumCovers выбирается уровень 2 (localDiskCover)
         let resolvedDisk = await ArtworkService.shared.resolveArtwork(
             for: track,
             customAlbumCovers: [:]
         )
-        XCTAssertEqual(resolvedDisk.source, .localDiskCover)
-        XCTAssertEqual(resolvedDisk.localFileURL?.path, trackCoverURL.path)
+        XCTAssertEqual(resolvedDisk?.source, .localDiskCover)
+        XCTAssertEqual(resolvedDisk?.localFileURL?.path, trackCoverURL.path)
 
         // Проверяем извлечение палитры HarmonoidMeshEngine из реальной обложки
-        if let url = resolvedDisk.localFileURL,
+        if let url = resolvedDisk?.localFileURL,
            let cgImg = ArtworkService.shared.loadCGImage(from: url, tier: .meshAnalysis) {
             let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImg)
             XCTAssertEqual(analyzed.meshColors.count, 4)
