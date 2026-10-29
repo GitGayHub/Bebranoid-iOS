@@ -363,6 +363,7 @@ public final class TelegramClientService: @unchecked Sendable {
     /// дожидается ответа `updateAuthorizationState` от TDLib и только после `authorizationStateReady` активирует авторизованное состояние.
     @discardableResult
     public func initializeAndRestoreSession() async -> TelegramAuthStepState {
+        importBundledCredentialsIfPresent()
         guard hasConfiguredApiCredentials else {
             setAuthStep(.unauthorized, rawState: "missingApiCredentials")
             return .unauthorized

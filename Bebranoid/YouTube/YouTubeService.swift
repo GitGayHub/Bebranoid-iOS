@@ -41,6 +41,12 @@ public final class YouTubeService: @unchecked Sendable {
 
     private let session: URLSession
 
+    /// Клиент IOS 19.29.1 YouTube уже отклоняет (`400 Precondition check failed`) — нужна актуальная версия.
+    private static let iosClientVersion = "20.10.4"
+    private static let iosUserAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+    /// googlevideo отдаёт `403` на запрос без `Range`, поэтому аудио качается кусками.
+    private static let downloadChunkSize: Int64 = 2 * 1024 * 1024
+
     public init(session: URLSession = .shared) {
         self.session = session
     }
@@ -115,25 +121,17 @@ public final class YouTubeService: @unchecked Sendable {
     /// Загружает список видео плейлиста с поддержкой многостраничной пагинации Innertube `browse` (`continuation`)
     /// и дедупликацией до `AppConfig.maxPlaylistTrackLimit` (5000 треков).
     public func fetchPlaylistMetadata(playlistId: String) async throws -> ImportedYouTubePlaylistResult {
-        let playlistURLStr = "https://www.youtube.com/playlist?list=\(playlistId)&hl=ru"
-        guard let url = URL(string: playlistURLStr) else {
-            throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
+        // Основной путь — Innertube `/browse` (VL<playlistId>): HTML-страница в Европе отдаёт consent-экран,
+        // а видео теперь приходят в формате `lockupViewModel`, который старый regex не находил
+        // (отсюда ошибка «плейлист не найден», хотя он существует). HTML остаётся запасным вариантом.
+        var extracted: ImportedYouTubePlaylistResult
+        if let viaBrowse = try? await fetchPlaylistFirstPageViaBrowse(playlistId: playlistId),
+           !viaBrowse.tracks.isEmpty {
+            extracted = viaBrowse
+        } else {
+            extracted = try await fetchPlaylistFirstPageViaHTML(playlistId: playlistId)
         }
 
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 15.0
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-            forHTTPHeaderField: "User-Agent"
-        )
-
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let html = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Не удалось загрузить страницу плейлиста YouTube"])
-        }
-
-        var extracted = Self.parsePlaylistFromHTML(html: html, playlistId: playlistId)
         var seenVideoIds = Set(extracted.tracks.compactMap { $0.youtubeVideoId })
         var continuationToken = extracted.nextContinuationToken
         var pageCount = 1
@@ -176,39 +174,280 @@ public final class YouTubeService: @unchecked Sendable {
         return extracted
     }
 
+    private static let webUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+
     private func fetchContinuationPageRawJSON(continuationToken: String) async throws -> String {
+        try await fetchBrowseRawJSON(extra: ["continuation": continuationToken])
+    }
+
+    /// POST `/youtubei/v1/browse` (WEB-клиент) с cookie `SOCS`, снимающим европейский consent-экран.
+    private func fetchBrowseRawJSON(extra: [String: Any]) async throws -> String {
         guard let browseURL = URL(string: "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false") else {
             throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
         }
 
-        let payload: [String: Any] = [
-            "continuation": continuationToken,
+        var payload: [String: Any] = [
             "context": [
                 "client": [
                     "clientName": "WEB",
-                    "clientVersion": "2.20240725.01.00",
+                    "clientVersion": "2.20250101.00.00",
                     "hl": "ru",
                     "gl": "US"
                 ]
             ]
         ]
+        for (key, value) in extra {
+            payload[key] = value
+        }
 
         var request = URLRequest(url: browseURL)
         request.httpMethod = "POST"
-        request.timeoutInterval = 15.0
+        request.timeoutInterval = 20.0
+        request.httpShouldHandleCookies = false
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-            forHTTPHeaderField: "User-Agent"
-        )
+        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        request.setValue("SOCS=CAI; CONSENT=YES+1", forHTTPHeaderField: "Cookie")
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let (data, resp) = try await session.data(for: request)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
               let raw = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "YouTubeService", code: 502, userInfo: nil)
+            throw NSError(
+                domain: "YouTubeService",
+                code: 502,
+                userInfo: [NSLocalizedDescriptionKey: "YouTube вернул ошибку при загрузке плейлиста. Проверьте подключение к интернету."]
+            )
         }
         return raw
+    }
+
+    private func fetchPlaylistFirstPageViaBrowse(playlistId: String) async throws -> ImportedYouTubePlaylistResult {
+        let raw = try await fetchBrowseRawJSON(extra: ["browseId": "VL" + playlistId])
+        let title = Self.extractPlaylistTitle(fromRawJSON: raw) ?? "YouTube Плейлист"
+        var seen = Set<String>()
+        let page = Self.extractPlaylistItemsAndToken(
+            fromRawText: raw,
+            playlistTitle: title,
+            seenVideoIds: &seen,
+            remainingLimit: AppConfig.maxPlaylistTrackLimit
+        )
+        return ImportedYouTubePlaylistResult(
+            playlistId: playlistId,
+            title: title,
+            author: nil,
+            thumbnailURL: page.tracks.first?.remoteArtworkURL,
+            tracks: page.tracks,
+            canonicalURL: "https://www.youtube.com/playlist?list=\(playlistId)",
+            nextContinuationToken: page.nextToken
+        )
+    }
+
+    private func fetchPlaylistFirstPageViaHTML(playlistId: String) async throws -> ImportedYouTubePlaylistResult {
+        let playlistURLStr = "https://www.youtube.com/playlist?list=\(playlistId)&hl=ru"
+        guard let url = URL(string: playlistURLStr) else {
+            throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15.0
+        request.httpShouldHandleCookies = false
+        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("SOCS=CAI; CONSENT=YES+1", forHTTPHeaderField: "Cookie")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let html = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Не удалось загрузить страницу плейлиста YouTube"])
+        }
+        return Self.parsePlaylistFromHTML(html: html, playlistId: playlistId)
+    }
+
+    // MARK: - Structured JSON parsing (lockupViewModel + legacy playlistVideoRenderer)
+
+    struct PlaylistPage {
+        var tracks: [Track]
+        var continuationToken: String?
+    }
+
+    static func extractPlaylistTitle(fromRawJSON raw: String) -> String? {
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let metadata = json["metadata"] as? [String: Any],
+           let renderer = metadata["playlistMetadataRenderer"] as? [String: Any],
+           let title = renderer["title"] as? String, !title.isEmpty {
+            return title
+        }
+        if let header = json["header"] as? [String: Any],
+           let renderer = header["pageHeaderRenderer"] as? [String: Any],
+           let title = renderer["pageTitle"] as? String, !title.isEmpty {
+            return title
+        }
+        return nil
+    }
+
+    /// Разбирает одну страницу ответа `/browse`. Элементы плейлиста берутся из массива, содержащего
+    /// `lockupViewModel`/`playlistVideoRenderer`; токен продолжения — из того же массива (а не из меню сортировки).
+    static func parsePlaylistPage(json: Any, albumTitle: String) -> PlaylistPage {
+        var tracks: [Track] = []
+        var token: String?
+        scanForItemArrays(node: json, albumTitle: albumTitle, tracks: &tracks, token: &token)
+        return PlaylistPage(tracks: tracks, continuationToken: token)
+    }
+
+    private static func scanForItemArrays(node: Any, albumTitle: String, tracks: inout [Track], token: inout String?) {
+        if let array = node as? [Any] {
+            let isItemArray = array.contains { element in
+                guard let dict = element as? [String: Any] else { return false }
+                return dict["lockupViewModel"] != nil || dict["playlistVideoRenderer"] != nil
+            }
+
+            if isItemArray {
+                for element in array {
+                    guard let dict = element as? [String: Any] else { continue }
+                    if let lockup = dict["lockupViewModel"] as? [String: Any] {
+                        if let track = trackFromLockup(lockup, albumTitle: albumTitle) {
+                            tracks.append(track)
+                        }
+                    } else if let renderer = dict["playlistVideoRenderer"] as? [String: Any] {
+                        if let track = trackFromLegacyRenderer(renderer, albumTitle: albumTitle) {
+                            tracks.append(track)
+                        }
+                    } else if token == nil, let found = findContinuationToken(in: dict) {
+                        token = found
+                    }
+                }
+                return
+            }
+
+            for element in array {
+                scanForItemArrays(node: element, albumTitle: albumTitle, tracks: &tracks, token: &token)
+            }
+        } else if let dict = node as? [String: Any] {
+            for value in dict.values {
+                scanForItemArrays(node: value, albumTitle: albumTitle, tracks: &tracks, token: &token)
+            }
+        }
+    }
+
+    private static func trackFromLockup(_ lockup: [String: Any], albumTitle: String) -> Track? {
+        guard let videoId = lockup["contentId"] as? String,
+              YouTubeLinkParser.isValidVideoId(videoId) else {
+            return nil
+        }
+
+        let metadataModel = (lockup["metadata"] as? [String: Any])?["lockupMetadataViewModel"] as? [String: Any]
+        let rawTitle = ((metadataModel?["title"] as? [String: Any])?["content"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawTitle.isEmpty, !isUnavailableTitle(rawTitle) else { return nil }
+
+        var author = ""
+        if let contentMetadata = (metadataModel?["metadata"] as? [String: Any])?["contentMetadataViewModel"] as? [String: Any],
+           let rows = contentMetadata["metadataRows"] as? [[String: Any]],
+           let parts = rows.first?["metadataParts"] as? [[String: Any]],
+           let text = (parts.first?["text"] as? [String: Any])?["content"] as? String {
+            author = text
+        }
+
+        var duration: Double = 0
+        if let badge = firstValue(forKey: "thumbnailBadgeViewModel", in: lockup) as? [String: Any],
+           let text = badge["text"] as? String {
+            duration = parseClockDuration(text)
+        }
+
+        let split = splitArtistTitle(rawTitle: rawTitle, author: author)
+        return Track.makeYouTubeTrack(
+            videoId: videoId,
+            title: split.title,
+            artist: split.artist,
+            album: albumTitle,
+            duration: duration,
+            thumbnailURL: "https://i.ytimg.com/vi/\(videoId)/hqdefault.jpg"
+        )
+    }
+
+    private static func trackFromLegacyRenderer(_ renderer: [String: Any], albumTitle: String) -> Track? {
+        guard let videoId = renderer["videoId"] as? String,
+              YouTubeLinkParser.isValidVideoId(videoId) else {
+            return nil
+        }
+
+        let rawTitle = (((renderer["title"] as? [String: Any])?["runs"] as? [[String: Any]])?.first?["text"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawTitle.isEmpty, !isUnavailableTitle(rawTitle) else { return nil }
+
+        let author = (((renderer["shortBylineText"] as? [String: Any])?["runs"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
+        let duration = Double((renderer["lengthSeconds"] as? String) ?? "") ?? 0
+
+        let split = splitArtistTitle(rawTitle: rawTitle, author: author)
+        return Track.makeYouTubeTrack(
+            videoId: videoId,
+            title: split.title,
+            artist: split.artist,
+            album: albumTitle,
+            duration: duration,
+            thumbnailURL: "https://i.ytimg.com/vi/\(videoId)/hqdefault.jpg"
+        )
+    }
+
+    private static func isUnavailableTitle(_ title: String) -> Bool {
+        let lowered = title.lowercased()
+        return lowered == "deleted video" || lowered == "private video"
+            || lowered == "[deleted video]" || lowered == "[private video]"
+            || lowered == "удалённое видео" || lowered == "закрытое видео"
+    }
+
+    /// `Artist - Title` из названия ролика, иначе имя канала (без суффикса ` - Topic`).
+    static func splitArtistTitle(rawTitle: String, author: String) -> (artist: String, title: String) {
+        let parsed = StorageManager.parseArtistTitleFromFilename(rawTitle)
+        if parsed.artist != "Неизвестный исполнитель" {
+            return (parsed.artist, parsed.title)
+        }
+        var channel = author.trimmingCharacters(in: .whitespacesAndNewlines)
+        if channel.hasSuffix(" - Topic") {
+            channel = String(channel.dropLast(" - Topic".count))
+        }
+        return (channel.isEmpty ? "YouTube" : channel, rawTitle)
+    }
+
+    /// `3:55` → 235, `1:02:03` → 3723
+    static func parseClockDuration(_ text: String) -> Double {
+        let parts = text.split(separator: ":").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard !parts.isEmpty, parts.count <= 3 else { return 0 }
+        return parts.reduce(0) { $0 * 60 + $1 }
+    }
+
+    private static func findContinuationToken(in node: Any) -> String? {
+        if let dict = node as? [String: Any] {
+            if let command = dict["continuationCommand"] as? [String: Any],
+               let token = command["token"] as? String, !token.isEmpty {
+                return token
+            }
+            for value in dict.values {
+                if let token = findContinuationToken(in: value) { return token }
+            }
+        } else if let array = node as? [Any] {
+            for value in array {
+                if let token = findContinuationToken(in: value) { return token }
+            }
+        }
+        return nil
+    }
+
+    private static func firstValue(forKey key: String, in node: Any) -> Any? {
+        if let dict = node as? [String: Any] {
+            if let direct = dict[key] { return direct }
+            for value in dict.values {
+                if let found = firstValue(forKey: key, in: value) { return found }
+            }
+        } else if let array = node as? [Any] {
+            for value in array {
+                if let found = firstValue(forKey: key, in: value) { return found }
+            }
+        }
+        return nil
     }
 
     /// Извлекает название плейлиста, элементы `playlistVideoRenderer` и токен продолжения `continuationCommand.token` из `ytInitialData`
@@ -251,6 +490,21 @@ public final class YouTubeService: @unchecked Sendable {
         seenVideoIds: inout Set<String>,
         remainingLimit: Int
     ) -> (tracks: [Track], nextToken: String?) {
+        // JSON-ответ `/youtubei/v1/browse`: структурный разбор (новый `lockupViewModel` и старый `playlistVideoRenderer`)
+        if rawText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{"),
+           let data = rawText.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) {
+            let page = parsePlaylistPage(json: json, albumTitle: playlistTitle)
+            var uniqueTracks: [Track] = []
+            for track in page.tracks {
+                if uniqueTracks.count >= remainingLimit { break }
+                guard let vid = track.youtubeVideoId, !seenVideoIds.contains(vid) else { continue }
+                seenVideoIds.insert(vid)
+                uniqueTracks.append(track)
+            }
+            return (uniqueTracks, page.continuationToken)
+        }
+
         let itemPattern = #""playlistVideoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})".*?"title":\{"runs":\[\{"text":"((?:\\.|[^"\\])*)"\}"#
         let regex = try? NSRegularExpression(pattern: itemPattern, options: [])
         let nsText = rawText as NSString
@@ -293,7 +547,8 @@ public final class YouTubeService: @unchecked Sendable {
         return (tracks, nextToken)
     }
 
-    /// Скачивает нативный `m4a (AAC, itag 140)` аудиопоток YouTube с поддержкой докачки `.part` и кооперативного вытеснения
+    /// Скачивает нативный `m4a (AAC, itag 140)` аудиопоток YouTube кусками по `Range` с настоящей докачкой `.part`
+    /// и кооперативным вытеснением между кусками (googlevideo отвечает `403` на запрос без `Range`).
     public func downloadAudioStream(
         for track: Track,
         destinationURL: URL,
@@ -308,27 +563,63 @@ public final class YouTubeService: @unchecked Sendable {
         let streamURL = try await resolveAudioStreamURL(videoId: videoId)
         try preemptionToken.throwIfPreempted(key: track.cacheKey)
 
-        var request = URLRequest(url: streamURL)
-        request.timeoutInterval = 30.0
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(at: partialURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-        var existingOffset: Int64 = 0
-        if FileManager.default.fileExists(atPath: partialURL.path),
-           let attrs = try? FileManager.default.attributesOfItem(atPath: partialURL.path),
-           let size = attrs[.size] as? Int64, size > 0 {
-            existingOffset = size
-            request.setValue("bytes=\(existingOffset)-", forHTTPHeaderField: "Range")
+        var offset: Int64 = 0
+        if let attrs = try? fileManager.attributesOfItem(atPath: partialURL.path),
+           let size = attrs[.size] as? NSNumber {
+            offset = size.int64Value
+        } else {
+            fileManager.createFile(atPath: partialURL.path, contents: nil)
         }
 
-        let (tempDownloadedURL, response) = try await session.download(for: request)
-        try preemptionToken.throwIfPreempted(key: track.cacheKey, bytesSaved: existingOffset)
+        let handle = try FileHandle(forWritingTo: partialURL)
+        var total: Int64 = 0
 
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Ошибка скачивания аудиопотока YouTube"])
+        do {
+            while total == 0 || offset < total {
+                try preemptionToken.throwIfPreempted(key: track.cacheKey, bytesSaved: offset)
+
+                var request = URLRequest(url: streamURL)
+                request.timeoutInterval = 30.0
+                request.setValue("bytes=\(offset)-\(offset + Self.downloadChunkSize - 1)", forHTTPHeaderField: "Range")
+                request.setValue(Self.iosUserAgent, forHTTPHeaderField: "User-Agent")
+
+                let (data, response) = try await session.data(for: request)
+
+                if let http = response as? HTTPURLResponse, http.statusCode == 416 {
+                    // Запрошенный диапазон за пределами файла: `.part` уже полный
+                    break
+                }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 206 || http.statusCode == 200 else {
+                    throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Ошибка скачивания аудиопотока YouTube"])
+                }
+
+                if let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+                   let totalPart = contentRange.split(separator: "/").last,
+                   let parsedTotal = Int64(totalPart) {
+                    total = parsedTotal
+                } else if http.statusCode == 200 {
+                    // Сервер проигнорировал Range и отдал файл целиком: начинаем с нуля
+                    try handle.truncate(atOffset: 0)
+                    offset = 0
+                    total = Int64(data.count)
+                }
+
+                if data.isEmpty { break }
+                try handle.seek(toOffset: UInt64(offset))
+                try handle.write(contentsOf: data)
+                offset += Int64(data.count)
+            }
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
         }
 
-        try? FileManager.default.removeItem(at: destinationURL)
-        try FileManager.default.moveItem(at: tempDownloadedURL, to: destinationURL)
-        try? FileManager.default.removeItem(at: partialURL)
+        try? fileManager.removeItem(at: destinationURL)
+        try fileManager.moveItem(at: partialURL, to: destinationURL)
         return destinationURL
     }
 
@@ -340,13 +631,13 @@ public final class YouTubeService: @unchecked Sendable {
         let clientProfiles: [(name: String, version: String, userAgent: String, extra: [String: Any])] = [
             (
                 name: "IOS",
-                version: "19.29.1",
-                userAgent: "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)",
+                version: Self.iosClientVersion,
+                userAgent: Self.iosUserAgent,
                 extra: [
                     "deviceMake": "Apple",
                     "deviceModel": "iPhone16,2",
                     "osName": "iPhone",
-                    "osVersion": "17.5.1.21F90"
+                    "osVersion": "18.3.2.22D82"
                 ]
             ),
             (

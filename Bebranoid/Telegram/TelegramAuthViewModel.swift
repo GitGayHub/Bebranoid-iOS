@@ -31,6 +31,7 @@ public final class TelegramAuthViewModel: ObservableObject {
     ) {
         self.client = client
         self.keychain = keychain
+        client.importBundledCredentialsIfPresent()
         self.apiId = keychain.readString(for: .telegramApiId) ?? ""
         self.apiHash = keychain.readString(for: .telegramApiHash) ?? ""
         self.phoneNumber = keychain.readString(for: .telegramAuthorizedPhone) ?? ""
@@ -67,6 +68,11 @@ public final class TelegramAuthViewModel: ObservableObject {
         default:
             break
         }
+    }
+
+    /// `true`, если api_id/api_hash уже лежат в Keychain (импорт с ПК или ввод вручную) и вводить их не нужно.
+    public var hasStoredCredentials: Bool {
+        client.hasConfiguredApiCredentials
     }
 
     public func saveCredentialsOnly() {
