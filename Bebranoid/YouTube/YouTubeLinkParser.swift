@@ -70,30 +70,28 @@ public enum YouTubeLinkParser {
         }
 
         if isValidPlaylistId(trimmed) {
-            return trimmed.hasPrefix("VL") ? String(trimmed.dropFirst(2)) : trimmed
+            return trimmed
         }
 
         let urlCandidate = extractFirstURLCandidate(trimmed)
         if let comps = URLComponents(string: urlCandidate),
            let listParam = comps.queryItems?.first(where: { $0.name.lowercased() == "list" })?.value?.trimmingCharacters(in: .whitespacesAndNewlines),
            !listParam.isEmpty {
-            return listParam.hasPrefix("VL") ? String(listParam.dropFirst(2)) : listParam
+            return listParam
         }
 
         // Регулярный фолбэк для неполных ссылок без схемы или ссылок внутри текста
         let pattern = #"(?:[?&]|^)list=([A-Za-z0-9_-]+)"#
         if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
            let match = regex.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: (trimmed as NSString).length)) {
-            let rawId = (trimmed as NSString).substring(with: match.range(at: 1))
-            return rawId.hasPrefix("VL") ? String(rawId.dropFirst(2)) : rawId
+            return (trimmed as NSString).substring(with: match.range(at: 1))
         }
 
         // Фолбэк на поиск прямого ID плейлиста (PL..., OLAK5uy_...) внутри произвольной строки
         let embeddedIdPattern = #"\b((?:PL|OLAK5uy_|UU|FL|LL|RD|WL|VL)[A-Za-z0-9_-]{10,})\b"#
         if let regex = try? NSRegularExpression(pattern: embeddedIdPattern, options: []),
            let match = regex.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: (trimmed as NSString).length)) {
-            let rawId = (trimmed as NSString).substring(with: match.range(at: 1))
-            return rawId.hasPrefix("VL") ? String(rawId.dropFirst(2)) : rawId
+            return (trimmed as NSString).substring(with: match.range(at: 1))
         }
 
         return nil
