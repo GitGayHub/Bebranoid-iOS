@@ -16,7 +16,7 @@ concurrency:
 jobs:
   simulator-preview:
     name: Simulator Boot, Launch, Screenshots & Real H.264 Video
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 25
 
     steps:
