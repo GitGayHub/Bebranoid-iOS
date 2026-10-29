@@ -47,8 +47,16 @@ public final class YouTubeService: @unchecked Sendable {
     /// googlevideo отдаёт `403` на запрос без `Range`, поэтому аудио качается кусками.
     private static let downloadChunkSize: Int64 = 2 * 1024 * 1024
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    private static let cookieFreeSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        config.timeoutIntervalForRequest = 25.0
+        return URLSession(configuration: config)
+    }()
+
+    public init(session: URLSession? = nil) {
+        self.session = session ?? Self.cookieFreeSession
     }
 
     /// Импортирует плейлист или одиночное видео по ссылке/ID
@@ -600,9 +608,11 @@ public final class YouTubeService: @unchecked Sendable {
 
         var offset: Int64 = 0
         if let attrs = try? fileManager.attributesOfItem(atPath: partialURL.path),
-           let size = attrs[.size] as? NSNumber {
+           let size = attrs[.size] as? NSNumber,
+           size.int64Value > 0 {
             offset = size.int64Value
         } else {
+            try? fileManager.removeItem(at: partialURL)
             fileManager.createFile(atPath: partialURL.path, contents: nil)
         }
 
@@ -615,6 +625,7 @@ public final class YouTubeService: @unchecked Sendable {
 
                 var request = URLRequest(url: streamURL)
                 request.timeoutInterval = 30.0
+                request.httpShouldHandleCookies = false
                 request.setValue("bytes=\(offset)-\(offset + Self.downloadChunkSize - 1)", forHTTPHeaderField: "Range")
                 request.setValue(Self.iosUserAgent, forHTTPHeaderField: "User-Agent")
 
@@ -625,7 +636,8 @@ public final class YouTubeService: @unchecked Sendable {
                     break
                 }
                 guard let http = response as? HTTPURLResponse, http.statusCode == 206 || http.statusCode == 200 else {
-                    throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Ошибка скачивания аудиопотока YouTube"])
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? 502
+                    throw NSError(domain: "YouTubeService", code: code, userInfo: [NSLocalizedDescriptionKey: "Ошибка скачивания аудиопотока YouTube (HTTP \(code))"])
                 }
 
                 if let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
@@ -647,7 +659,15 @@ public final class YouTubeService: @unchecked Sendable {
             try handle.close()
         } catch {
             try? handle.close()
+            if offset == 0 {
+                try? fileManager.removeItem(at: partialURL)
+            }
             throw error
+        }
+
+        guard offset > 1024 else {
+            try? fileManager.removeItem(at: partialURL)
+            throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Получен пустой аудиопоток YouTube"])
         }
 
         try? fileManager.removeItem(at: destinationURL)
@@ -665,6 +685,17 @@ public final class YouTubeService: @unchecked Sendable {
                 name: "IOS",
                 version: Self.iosClientVersion,
                 userAgent: Self.iosUserAgent,
+                extra: [
+                    "deviceMake": "Apple",
+                    "deviceModel": "iPhone16,2",
+                    "osName": "iPhone",
+                    "osVersion": "18.3.2.22D82"
+                ]
+            ),
+            (
+                name: "IOS",
+                version: "20.03.02",
+                userAgent: "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
                 extra: [
                     "deviceMake": "Apple",
                     "deviceModel": "iPhone16,2",
@@ -709,6 +740,7 @@ public final class YouTubeService: @unchecked Sendable {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "POST"
             request.timeoutInterval = 15.0
+            request.httpShouldHandleCookies = false
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue(profile.userAgent, forHTTPHeaderField: "User-Agent")
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
@@ -759,9 +791,16 @@ public final class YouTubeService: @unchecked Sendable {
         let muxedFormats = (streamingData["formats"] as? [[String: Any]]) ?? []
         let allFormats = adaptiveFormats + muxedFormats
 
-        // 1. Предпочитаем нативный для iOS контейнер audio/mp4 (itag 140, AAC) с прямым URL
+        // 1a. Строго предпочитаем itag 140 (AAC-LC 128kbps audio/mp4) с прямым URL
+        if let itag140 = allFormats.first(where: {
+            ($0["itag"] as? Int) == 140 && ($0["url"] as? String) != nil
+        }), let urlStr = itag140["url"] as? String, let streamURL = URL(string: urlStr) {
+            return streamURL
+        }
+
+        // 1b. Любой другой нативный контейнер audio/mp4 с прямым URL
         if let m4aFormat = allFormats.first(where: {
-            (($0["itag"] as? Int) == 140 || (($0["mimeType"] as? String)?.contains("audio/mp4") == true))
+            (($0["mimeType"] as? String)?.contains("audio/mp4") == true)
                 && ($0["url"] as? String) != nil
         }), let urlStr = m4aFormat["url"] as? String, let streamURL = URL(string: urlStr) {
             return streamURL

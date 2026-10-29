@@ -71,6 +71,7 @@ targets:
           NSAllowsArbitraryLoads: true
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        UIDesignRequiresCompatibility: false
 
   BebranoidTests:
     type: bundle.unit-test

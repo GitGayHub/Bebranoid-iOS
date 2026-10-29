@@ -151,15 +151,6 @@ public final class ArtworkService: @unchecked Sendable {
             return (candidate, .localDiskCover)
         }
 
-        // Priority 2c: Covers/albums/<safeAlbumName>.jpg
-        if isNamedAlbum(track.album) {
-            let safeAlbum = storage.safeCacheFilename(for: track.album)
-            let albumCoverURL = albumsCoversDirectory.appendingPathComponent("\(safeAlbum).jpg")
-            if isValidImageFile(atPath: albumCoverURL.path) {
-                return (albumCoverURL, .localDiskCover)
-            }
-        }
-
         // Priority 3: Embedded cover inside local/cached audio file
         let audioURL = storage.cachedAudioFileURL(for: track)
         if fileManager.fileExists(atPath: audioURL.path),
@@ -176,8 +167,22 @@ public final class ArtworkService: @unchecked Sendable {
             }
         }
 
-        // Priority 5: Sibling track in the same named album
-        if isNamedAlbum(track.album) {
+        let hasIndividualRemoteCover = (track.sourceKind == .youtube)
+            || !(track.youtubeVideoId ?? "").isEmpty
+            || !(track.remoteArtworkURL ?? "").isEmpty
+            || !(track.coverFileId ?? "").isEmpty
+
+        // Priority 2c: Covers/albums/<safeAlbumName>.jpg (только если у трека нет собственной обложки YouTube / Telegram)
+        if !hasIndividualRemoteCover, isNamedAlbum(track.album) {
+            let safeAlbum = storage.safeCacheFilename(for: track.album)
+            let albumCoverURL = albumsCoversDirectory.appendingPathComponent("\(safeAlbum).jpg")
+            if isValidImageFile(atPath: albumCoverURL.path) {
+                return (albumCoverURL, .localDiskCover)
+            }
+        }
+
+        // Priority 5: Sibling track in the same named album (только для альбомов без индивидуальной удалённой обложки)
+        if !hasIndividualRemoteCover, isNamedAlbum(track.album) {
             if let sibling = siblingTracks.first(where: {
                 $0.album == track.album && $0.id != track.id && ($0.coverPath != nil)
             }), let sibPath = sibling.coverPath, isValidImageFile(atPath: sibPath) {
@@ -216,12 +221,10 @@ public final class ArtworkService: @unchecked Sendable {
                 _ = self.withLock { self.inFlightTasks.removeValue(forKey: dedupKey) }
             }
 
-            // Priority 4: Telegram coverFileId thumbnail via TDLib
-            if let coverFileId = track.coverFileId, !coverFileId.isEmpty {
-                if let downloadedPath = await TelegramClientService.shared.downloadCoverFromTelegram(
-                    coverFileId: coverFileId,
-                    filename: track.cacheKey
-                ), self.isValidImageFile(atPath: downloadedPath) {
+            // Priority 4: Telegram coverFileId / message thumbnail via TDLib
+            if track.sourceKind == .telegram || !(track.coverFileId ?? "").isEmpty {
+                if let downloadedPath = await TelegramClientService.shared.downloadCoverForTrack(track),
+                   self.isValidImageFile(atPath: downloadedPath) {
                     let url = URL(fileURLWithPath: downloadedPath)
                     let data = self.loadCachedData(from: url)
                     if let data, self.isNamedAlbum(track.album) {
@@ -233,30 +236,22 @@ public final class ArtworkService: @unchecked Sendable {
                 }
             }
 
-            // Priority 5 (remote sibling): Check sibling coverFileId or remoteArtworkURL
-            if self.isNamedAlbum(track.album) {
-                if let siblingWithCoverId = siblingTracks.first(where: {
-                    $0.album == track.album && ($0.coverFileId?.isEmpty == false)
-                }), let sibCoverId = siblingWithCoverId.coverFileId {
-                    if let downloadedPath = await TelegramClientService.shared.downloadCoverFromTelegram(
-                        coverFileId: sibCoverId,
-                        filename: track.cacheKey
-                    ), self.isValidImageFile(atPath: downloadedPath) {
-                        let url = URL(fileURLWithPath: downloadedPath)
-                        let data = self.loadCachedData(from: url)
-                        self.recordArtworkLoaded()
-                        self.notifyArtworkResolved(trackId: track.id, albumName: track.album, fileURL: url)
-                        return ResolvedArtworkResult(fileURL: url, imageData: data, source: .albumSiblingCover)
-                    }
-                }
-            }
-
             // Priority 6: YouTube thumbnail (maxresdefault -> hqdefault -> remoteArtworkURL) with 16:9 / 4:3 -> 1:1 center crop
-            if track.sourceKind == .youtube || (track.remoteArtworkURL?.isEmpty == false) {
+            if track.sourceKind == .youtube || !(track.youtubeVideoId ?? "").isEmpty || !(track.remoteArtworkURL ?? "").isEmpty {
                 if let ytResult = await self.downloadAndCropRemoteArtwork(for: track) {
                     self.recordArtworkLoaded()
                     self.notifyArtworkResolved(trackId: track.id, albumName: track.album, fileURL: ytResult.fileURL)
                     return ytResult
+                }
+            }
+
+            // Priority 5 (fallback): Обложка альбома, если у не-YouTube трека не удалось получить собственную обложку
+            if track.sourceKind != .youtube, self.isNamedAlbum(track.album) {
+                let safeAlbum = self.storage.safeCacheFilename(for: track.album)
+                let albumCoverURL = self.albumsCoversDirectory.appendingPathComponent("\(safeAlbum).jpg")
+                if self.isValidImageFile(atPath: albumCoverURL.path) {
+                    let data = self.loadCachedData(from: albumCoverURL)
+                    return ResolvedArtworkResult(fileURL: albumCoverURL, imageData: data, source: .albumSiblingCover)
                 }
             }
 
@@ -413,7 +408,7 @@ public final class ArtworkService: @unchecked Sendable {
         do {
             try imageData.write(to: targetURL, options: .atomic)
             dataCache.setObject(imageData as NSData, forKey: targetURL.path as NSString, cost: imageData.count)
-            if let albumName, isNamedAlbum(albumName) {
+            if let albumName, isNamedAlbum(albumName), !safeKey.lowercased().hasPrefix("youtube-") {
                 saveAlbumCoverIfMissing(imageData: imageData, albumName: albumName)
             }
             return targetURL

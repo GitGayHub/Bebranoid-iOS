@@ -26,45 +26,42 @@ public struct RootTabView: View {
                 fixedAnimationTime: fixedTime
             )
 
-            TabView(selection: $appState.selectedTab) {
-                TracksListView(appState: appState)
-                    .opacity(isScreenOverridden ? 0 : 1)
-                    .tabItem {
-                        Label("Треки", systemImage: "music.note.list")
-                    }
-                    .tag(0)
-
-                AlbumsGridView(appState: appState)
-                    .tabItem {
-                        Label("Альбомы", systemImage: "square.stack.fill")
-                    }
-                    .tag(1)
-
-                ArtistsGridView(appState: appState)
-                    .tabItem {
-                        Label("Артисты", systemImage: "music.mic")
-                    }
-                    .tag(2)
-
-                PlaylistsGridView(appState: appState)
-                    .tabItem {
-                        Label("Плейлисты", systemImage: "music.note.house.fill")
-                    }
-                    .tag(3)
-
-                SettingsView(appState: appState)
-                    .tabItem {
-                        Label("Настройки", systemImage: "gearshape.fill")
-                    }
-                    .tag(4)
-            }
-            .tint(appState.accentSwiftUIColor)
+            nativeTabContainer(isScreenOverridden: isScreenOverridden)
+                .tint(appState.accentSwiftUIColor)
 
             if appState.currentTrack != nil && !isScreenOverridden {
                 MiniPlayerCardView(appState: appState)
                     .padding(.horizontal, 12)
-                    .padding(.bottom, 56)
+                    .padding(.bottom, 66)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            if let banner = appState.statusBannerMessage, !banner.isEmpty, !isScreenOverridden {
+                VStack {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                        Text(banner)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(3)
+                        Spacer(minLength: 4)
+                        Button {
+                            appState.statusBannerMessage = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.white.opacity(0.75))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    Spacer()
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             #if DEBUG
@@ -99,6 +96,67 @@ public struct RootTabView: View {
         }
         .fullScreenCover(isPresented: $appState.isFullScreenPlayerPresented) {
             FullScreenPlayerView(appState: appState)
+        }
+    }
+
+    @ViewBuilder
+    private func nativeTabContainer(isScreenOverridden: Bool) -> some View {
+        if #available(iOS 18.0, *) {
+            TabView(selection: $appState.selectedTab) {
+                Tab("Треки", systemImage: "music.note.list", value: 0) {
+                    TracksListView(appState: appState)
+                        .opacity(isScreenOverridden ? 0 : 1)
+                }
+
+                Tab("Альбомы", systemImage: "square.stack.fill", value: 1) {
+                    AlbumsGridView(appState: appState)
+                }
+
+                Tab("Артисты", systemImage: "music.mic", value: 2) {
+                    ArtistsGridView(appState: appState)
+                }
+
+                Tab("Плейлисты", systemImage: "music.note.house.fill", value: 3) {
+                    PlaylistsGridView(appState: appState)
+                }
+
+                Tab("Настройки", systemImage: "gearshape.fill", value: 4) {
+                    SettingsView(appState: appState)
+                }
+            }
+        } else {
+            TabView(selection: $appState.selectedTab) {
+                TracksListView(appState: appState)
+                    .opacity(isScreenOverridden ? 0 : 1)
+                    .tabItem {
+                        Label("Треки", systemImage: "music.note.list")
+                    }
+                    .tag(0)
+
+                AlbumsGridView(appState: appState)
+                    .tabItem {
+                        Label("Альбомы", systemImage: "square.stack.fill")
+                    }
+                    .tag(1)
+
+                ArtistsGridView(appState: appState)
+                    .tabItem {
+                        Label("Артисты", systemImage: "music.mic")
+                    }
+                    .tag(2)
+
+                PlaylistsGridView(appState: appState)
+                    .tabItem {
+                        Label("Плейлисты", systemImage: "music.note.house.fill")
+                    }
+                    .tag(3)
+
+                SettingsView(appState: appState)
+                    .tabItem {
+                        Label("Настройки", systemImage: "gearshape.fill")
+                    }
+                    .tag(4)
+            }
         }
     }
 }

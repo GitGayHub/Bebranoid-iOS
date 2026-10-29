@@ -16,12 +16,21 @@ concurrency:
 jobs:
   device-package:
     name: Build Release iphoneos & Package Unsigned IPA
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 25
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Select Xcode 26 (iOS 26 Liquid Glass SDK)
+        run: |
+          ls -la /Applications | grep Xcode || true
+          if [ -d "/Applications/Xcode_26.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_26.app/Contents/Developer
+          fi
+          xcodebuild -version
+          xcodebuild -showsdks
 
       - name: Generate Xcode Project via XcodeGen
         run: |

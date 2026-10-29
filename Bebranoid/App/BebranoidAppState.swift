@@ -465,11 +465,15 @@ public final class BebranoidAppState: ObservableObject {
                 } else {
                     fileURL = try await telegramClient.ensureTrackDownloaded(track: track, priority: .activePlayback)
                 }
+                guard currentTrack?.id == track.id else { return }
                 await audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
+                updatePalette(for: track)
                 syncNowPlayingInfo()
                 prefetchUpcomingTrack()
             } catch {
-                statusBannerMessage = error.localizedDescription
+                if currentTrack?.id == track.id {
+                    statusBannerMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -893,7 +897,8 @@ public final class BebranoidAppState: ObservableObject {
 
     public func handleTelegramAuthorized() async {
         await telegramClient.refreshAuthorizedUserProfile()
-        await refreshTelegramChats(autoSyncIfNeeded: true)
+        let hasExistingTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
+        await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
     }
 
     public func refreshTelegramChats(autoSyncIfNeeded: Bool = false) async {
@@ -991,6 +996,10 @@ public final class BebranoidAppState: ObservableObject {
                 archiveChatId: libraryState.selectedTelegramArchiveChatId,
                 archiveChatTitle: libraryState.selectedTelegramArchiveChatTitle
             )
+            let existingTelegram = libraryState.tracks.filter { $0.sourceKind == .telegram }
+            if scannedTracks.isEmpty && !existingTelegram.isEmpty {
+                return
+            }
             let localAndYouTube = libraryState.tracks.filter { $0.sourceKind != .telegram }
             libraryState.tracks = scannedTracks + localAndYouTube
             saveLibraryState()

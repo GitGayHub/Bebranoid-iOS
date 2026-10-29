@@ -996,6 +996,7 @@ public final class TelegramClientService: @unchecked Sendable {
                 "offset_date": offsetDate,
                 "offset_message_id": offsetMessageId,
                 "offset_message_thread_id": offsetThreadId,
+                "offset_forum_topic_id": offsetThreadId,
                 "limit": 100
             ], timeoutSeconds: 12.0),
                   let topics = resp["topics"] as? [[String: Any]],
@@ -1353,6 +1354,82 @@ public final class TelegramClientService: @unchecked Sendable {
         return nil
     }
 
+    /// Скачивает обложку трека из Telegram: сначала пробует `getRemoteFile` по `coverFileId`,
+    /// а если `coverFileId` принадлежит другой сессии TDLib — загружает сообщение через `getMessages` с сервера
+    /// и скачивает актуальный `album_cover_thumbnail.file.id` / `document.thumbnail.file.id`.
+    public func downloadCoverForTrack(_ track: Track) async -> String? {
+        let safeBase = storage.safeCacheFilename(for: track.cacheKey)
+        let targetURL = storage.coversDirectory.appendingPathComponent("\(safeBase).jpg")
+        if FileManager.default.fileExists(atPath: targetURL.path),
+           let attrs = try? FileManager.default.attributesOfItem(atPath: targetURL.path),
+           let size = attrs[.size] as? Int64, size > 128 {
+            return targetURL.path
+        }
+
+        if let coverFileId = track.coverFileId, !coverFileId.isEmpty {
+            if let path = await downloadCoverFromTelegram(coverFileId: coverFileId, filename: track.cacheKey) {
+                return path
+            }
+        }
+
+        guard TDLibJSONBridge.isNativeTDLibAvailable,
+              isAuthorized,
+              let chatIdStr = track.chatId,
+              let chatId64 = Int64(chatIdStr),
+              let messageId = track.messageId else {
+            return nil
+        }
+
+        try? await sendTdlibParametersIfPossible()
+        guard let msg = try? await resolveTDLibMessageObject(chatId: chatId64, messageId: Int64(messageId), track: track),
+              let content = msg["content"] as? [String: Any],
+              let contentType = content["@type"] as? String else {
+            return nil
+        }
+
+        var thumbFileDict: [String: Any]?
+        if contentType == "messageAudio",
+           let audio = content["audio"] as? [String: Any],
+           let thumb = audio["album_cover_thumbnail"] as? [String: Any] {
+            thumbFileDict = thumb["file"] as? [String: Any]
+        } else if contentType == "messageDocument",
+                  let doc = content["document"] as? [String: Any],
+                  let thumb = doc["thumbnail"] as? [String: Any] {
+            thumbFileDict = thumb["file"] as? [String: Any]
+        }
+
+        guard let thumbFileDict,
+              let fileId = Self.extractInt(from: thumbFileDict["id"]) else {
+            return nil
+        }
+
+        if let completedPath = Self.completedLocalPath(from: thumbFileDict) {
+            try? FileManager.default.removeItem(at: targetURL)
+            try? FileManager.default.copyItem(atPath: completedPath, toPath: targetURL.path)
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                return targetURL.path
+            }
+        }
+
+        if let dlResp = try? await bridge.sendAsync([
+            "@type": "downloadFile",
+            "file_id": fileId,
+            "priority": 16,
+            "offset": 0,
+            "limit": 0,
+            "synchronous": true
+        ], timeoutSeconds: 15.0),
+        let dlPath = Self.completedLocalPath(from: dlResp) {
+            try? FileManager.default.removeItem(at: targetURL)
+            try? FileManager.default.copyItem(atPath: dlPath, toPath: targetURL.path)
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                return targetURL.path
+            }
+        }
+
+        return nil
+    }
+
     // MARK: - Deletion Protection (`electron/main.js` Archive Chat Protection)
 
     public func deleteCloudMessage(track: Track) async throws {
@@ -1421,14 +1498,14 @@ public final class TelegramClientService: @unchecked Sendable {
 
             try token.throwIfPreempted(key: key)
 
-            // 2. Трек Telegram — разрешаем актуальный `file_id` через TDLib `getMessage` и скачиваем через `downloadFile`
+            // 2. Трек Telegram — разрешаем актуальный `file_id` через TDLib (`getMessage` / `getMessages`) и скачиваем через `downloadFile`
             if track.sourceKind == .telegram,
                self.isAuthorized,
                let chatIdStr = track.chatId,
                let chatId64 = Int64(chatIdStr),
                let messageId = track.messageId {
                 try await self.sendTdlibParametersIfPossible()
-                let fileDict = try await self.resolveTDLibFileObject(chatId: chatId64, messageId: Int64(messageId))
+                let fileDict = try await self.resolveTDLibFileObject(chatId: chatId64, messageId: Int64(messageId), track: track)
                 guard let fileId = Self.extractInt(from: fileDict["id"]) else {
                     throw NSError(
                         domain: "TelegramClientService",
@@ -1443,19 +1520,12 @@ public final class TelegramClientService: @unchecked Sendable {
                     return targetURL
                 }
 
-                var resumeOffset: Int64 = 0
-                if FileManager.default.fileExists(atPath: partURL.path),
-                   let attrs = try? FileManager.default.attributesOfItem(atPath: partURL.path),
-                   let size = attrs[.size] as? Int64, size > 0 {
-                    resumeOffset = size
-                }
-
                 let tdPriority = Self.mapToTDLibPriority(priority)
                 _ = try await self.bridge.sendAsync([
                     "@type": "downloadFile",
                     "file_id": fileId,
                     "priority": tdPriority,
-                    "offset": resumeOffset,
+                    "offset": 0,
                     "limit": 0,
                     "synchronous": false
                 ], timeoutSeconds: 15.0)
@@ -1470,7 +1540,7 @@ public final class TelegramClientService: @unchecked Sendable {
                             "only_if_pending": false
                         ])
                         let latestFile = try? await self.bridge.sendAsync(["@type": "getFile", "file_id": fileId], timeoutSeconds: 5.0)
-                        let savedBytes = self.persistPartialProgressIfNeeded(fileDict: latestFile, partURL: partURL) ?? resumeOffset
+                        let savedBytes = self.persistPartialProgressIfNeeded(fileDict: latestFile, partURL: partURL) ?? 0
                         throw DownloadPreemptedError(key: key, bytesSaved: savedBytes)
                     }
 
@@ -1495,8 +1565,12 @@ public final class TelegramClientService: @unchecked Sendable {
                 )
             }
 
-            // 3. Локальный буфер `.part`, если файл уже подготовлен
-            if FileManager.default.fileExists(atPath: partURL.path) {
+            // 3. Локальный буфер `.part`, только если это непустой валидный файл (для офлайн-тестов и предзагруженных буферов)
+            if FileManager.default.fileExists(atPath: partURL.path),
+               let attrs = try? FileManager.default.attributesOfItem(atPath: partURL.path),
+               let size = attrs[.size] as? Int64,
+               size > 1024,
+               track.sourceKind != .youtube {
                 try? FileManager.default.removeItem(at: targetURL)
                 try FileManager.default.moveItem(at: partURL, to: targetURL)
                 self.cacheIndex.markCached(for: track)
@@ -1513,12 +1587,87 @@ public final class TelegramClientService: @unchecked Sendable {
 
     // MARK: - TDLib File Helpers
 
-    private func resolveTDLibFileObject(chatId: Int64, messageId: Int64) async throws -> [String: Any] {
-        let msg = try await bridge.sendAsync([
+    private func resolveTDLibMessageObject(chatId: Int64, messageId: Int64, track: Track? = nil) async throws -> [String: Any] {
+        // 1. Обязательно разрешаем чат, чтобы свежая сессия TDLib знала о супергруппе AndroSend
+        _ = await ensureChatResolved(chatId: chatId)
+
+        // 2. Пробуем быстрый локальный кеш TDLib (`getMessage`)
+        if let localMsg = try? await bridge.sendAsync([
             "@type": "getMessage",
             "chat_id": chatId,
             "message_id": messageId
-        ], timeoutSeconds: 15.0)
+        ], timeoutSeconds: 8.0),
+           localMsg["content"] != nil {
+            return localMsg
+        }
+
+        // 3. Запрашиваем сообщение напрямую с сервера Telegram через `getMessages` (`getMessage` в TDLib только офлайн!)
+        var candidateIds: [Int64] = [messageId]
+        if messageId > 0 && messageId < 1_048_576 {
+            candidateIds.append(messageId << 20)
+        }
+        if let serverResp = try? await bridge.sendAsync([
+            "@type": "getMessages",
+            "chat_id": chatId,
+            "message_ids": candidateIds
+        ], timeoutSeconds: 15.0),
+           let messages = serverResp["messages"] as? [Any] {
+            for item in messages {
+                if let msgDict = item as? [String: Any], msgDict["content"] != nil {
+                    return msgDict
+                }
+            }
+        }
+
+        // 4. Резервный поиск по названию/имени файла в чате, если ID сообщения изменился при пересылке
+        if let track {
+            let queries = [track.title, (track.filename as NSString).deletingPathExtension]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            for q in queries {
+                if let searchResp = try? await bridge.sendAsync([
+                    "@type": "searchChatMessages",
+                    "chat_id": chatId,
+                    "query": q,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 15,
+                    "filter": ["@type": "searchMessagesFilterEmpty"]
+                ], timeoutSeconds: 12.0),
+                   let foundMsgs = searchResp["messages"] as? [[String: Any]] {
+                    if let matched = foundMsgs.first(where: { msg in
+                        guard let content = msg["content"] as? [String: Any],
+                              let cType = content["@type"] as? String else { return false }
+                        if cType == "messageAudio",
+                           let audio = content["audio"] as? [String: Any] {
+                            let fn = (audio["file_name"] as? String) ?? ""
+                            let remote = ((audio["audio"] as? [String: Any])?["remote"] as? [String: Any])?["unique_id"] as? String
+                            if let uid = track.fileUniqueId, !uid.isEmpty, remote == uid { return true }
+                            if !fn.isEmpty && fn.caseInsensitiveCompare(track.filename) == .orderedSame { return true }
+                        }
+                        if cType == "messageDocument",
+                           let doc = content["document"] as? [String: Any] {
+                            let fn = (doc["file_name"] as? String) ?? ""
+                            let remote = ((doc["document"] as? [String: Any])?["remote"] as? [String: Any])?["unique_id"] as? String
+                            if let uid = track.fileUniqueId, !uid.isEmpty, remote == uid { return true }
+                            if !fn.isEmpty && fn.caseInsensitiveCompare(track.filename) == .orderedSame { return true }
+                        }
+                        return false
+                    }) ?? foundMsgs.first(where: {
+                        guard let cType = ($0["content"] as? [String: Any])?["@type"] as? String else { return false }
+                        return cType == "messageAudio" || cType == "messageDocument"
+                    }) {
+                        return matched
+                    }
+                }
+            }
+        }
+
+        throw NSError(domain: "TelegramClientService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Сообщение \(messageId) не найдено в чате \(chatId)"])
+    }
+
+    private func resolveTDLibFileObject(chatId: Int64, messageId: Int64, track: Track? = nil) async throws -> [String: Any] {
+        let msg = try await resolveTDLibMessageObject(chatId: chatId, messageId: messageId, track: track)
 
         guard let content = msg["content"] as? [String: Any],
               let contentType = content["@type"] as? String else {

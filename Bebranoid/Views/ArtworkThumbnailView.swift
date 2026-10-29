@@ -131,13 +131,11 @@ public struct ArtworkThumbnailView: View {
     }
 
     private func handleArtworkNotification(_ note: Notification) {
-        guard let info = note.userInfo, let currentTrack = track else { return }
+        guard let info = note.userInfo else { return }
         let noteTrackId = info["trackId"] as? String
-        let noteAlbum = info["albumName"] as? String
         let notePath = info["path"] as? String
-        let matchesTrack = (noteTrackId == currentTrack.id)
-        let matchesAlbum = (noteAlbum == currentTrack.album && !(noteAlbum ?? "").isEmpty)
-        if matchesTrack || matchesAlbum {
+        if let currentTrack = track {
+            guard noteTrackId == currentTrack.id else { return }
             if let notePath, !notePath.isEmpty {
                 resolvedLocalPath = notePath
             }
