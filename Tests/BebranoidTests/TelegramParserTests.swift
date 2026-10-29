@@ -232,8 +232,8 @@ final class TelegramParserTests: XCTestCase {
 
         let parsed = TelegramClientService.parseTDLibMessage(
             msgWithNestedTopicId,
-            chatId: AppConfig.defaultSeedMainChatId,
-            chatTitle: AppConfig.defaultSeedMainChatTitle,
+            chatId: testMainChatId,
+            chatTitle: testMainChatTitle,
             forumTopics: [12215: "yeat"]
         )
         XCTAssertNotNil(parsed)

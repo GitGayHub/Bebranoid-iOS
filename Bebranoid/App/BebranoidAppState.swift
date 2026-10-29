@@ -905,12 +905,10 @@ public final class BebranoidAppState: ObservableObject {
 
             var didMutateSelection = false
 
-            // Автоматический выбор основного чата AndroSend (по ID или по названию), если пользователь ещё не выбрал чат
+            // Автоматический выбор основного чата AndroSend по названию или типу форума, если пользователь ещё не выбрал чат
             let normCurrentMain = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramChatId)
             if normCurrentMain.isEmpty {
-                let normSeedMain = AppConfig.normalizeTelegramChatId(AppConfig.defaultSeedMainChatId)
-                if let matched = chats.first(where: { AppConfig.normalizeTelegramChatId($0.id) == normSeedMain })
-                    ?? chats.first(where: {
+                if let matched = chats.first(where: {
                         let lower = $0.title.lowercased()
                         return lower.contains("androsend") && !lower.contains("архив") && !lower.contains("📦")
                     })
@@ -926,12 +924,10 @@ public final class BebranoidAppState: ObservableObject {
                 }
             }
 
-            // Автоматический выбор архивного чата AndroSend (по ID или по названию)
+            // Автоматический выбор архивного чата AndroSend по названию
             let normCurrentArchive = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramArchiveChatId)
             if normCurrentArchive.isEmpty {
-                let normSeedArchive = AppConfig.normalizeTelegramChatId(AppConfig.defaultSeedArchiveChatId)
-                if let matchedArchive = chats.first(where: { AppConfig.normalizeTelegramChatId($0.id) == normSeedArchive })
-                    ?? chats.first(where: {
+                if let matchedArchive = chats.first(where: {
                         let lower = $0.title.lowercased()
                         return lower.contains("androsend") && (lower.contains("архив") || lower.contains("📦"))
                     }) {

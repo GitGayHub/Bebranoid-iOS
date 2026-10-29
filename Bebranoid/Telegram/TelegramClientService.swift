@@ -905,14 +905,34 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
-        // Также принудительно разрешаем дефолтные/выбранные супергруппы AndroSend, если они ещё не попали в топ диалогов
+        // Ищем облачные супергруппы AndroSend на сервере и в локальном кеше TDLib, чтобы на свежей QR-сессии они сразу появились
+        if let serverSearch = try? await bridge.sendAsync([
+            "@type": "searchChatsOnServer",
+            "query": AppConfig.defaultCloudChatSearchKeyword,
+            "limit": 20
+        ], timeoutSeconds: 8.0),
+           let foundIds = Self.extractInt64Array(from: serverSearch["chat_ids"]) {
+            for fid in foundIds where !chatIds.contains(fid) {
+                chatIds.insert(fid, at: 0)
+            }
+        }
+        if let localSearch = try? await bridge.sendAsync([
+            "@type": "searchChats",
+            "query": AppConfig.defaultCloudChatSearchKeyword,
+            "limit": 20
+        ], timeoutSeconds: 6.0),
+           let foundIds = Self.extractInt64Array(from: localSearch["chat_ids"]) {
+            for fid in foundIds where !chatIds.contains(fid) {
+                chatIds.insert(fid, at: 0)
+            }
+        }
+
+        // Также принудительно разрешаем выбранные супергруппы из сохранённого состояния, если они ещё не попали в список
         let savedState = PlaybackSessionStore.shared.loadLibraryState()
         let candidatePinnedStrings = [
             savedState.selectedTelegramChatId,
             savedState.selectedTelegramArchiveChatId,
-            configuredArchiveChatId ?? "",
-            AppConfig.defaultSeedMainChatId,
-            AppConfig.defaultSeedArchiveChatId
+            configuredArchiveChatId ?? ""
         ]
         for rawPinned in candidatePinnedStrings {
             let trimmed = rawPinned.trimmingCharacters(in: .whitespacesAndNewlines)

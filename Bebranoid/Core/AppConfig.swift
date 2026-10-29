@@ -5,11 +5,9 @@ public enum AppConfig {
     public static let defaultMainChatPlaceholderTitle: String = "Не выбран (выберите после входа)"
     public static let defaultArchiveChatPlaceholderTitle: String = "Не выбран (опционально)"
 
-    /// Стандартные облачные чаты Bebranoid / AndroSend (аналогично `electron/main.js` DEFAULT_CHAT_ID / DEFAULT_ARCHIVE_CHAT_ID),
-    /// автоматически подхватываемые после входа по QR-коду, если пользователь ещё не выбрал другой чат вручную.
-    public static let defaultSeedMainChatId: String = "-1003734947911"
+    /// Ключевое слово и стандартные названия облачных чатов Bebranoid / AndroSend для автоподхвата после QR-входа
+    public static let defaultCloudChatSearchKeyword: String = "AndroSend"
     public static let defaultSeedMainChatTitle: String = "AndroSend Облако"
-    public static let defaultSeedArchiveChatId: String = "-1003890744365"
     public static let defaultSeedArchiveChatTitle: String = "AndroSend Архив"
 
     /// Виртуальные идентификаторы альбомов и плейлистов
