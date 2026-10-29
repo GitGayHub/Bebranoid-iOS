@@ -223,7 +223,8 @@ public final class YouTubeService: @unchecked Sendable {
     }
 
     private func fetchPlaylistFirstPageViaBrowse(playlistId: String) async throws -> ImportedYouTubePlaylistResult {
-        let raw = try await fetchBrowseRawJSON(extra: ["browseId": "VL" + playlistId])
+        let cleanId = playlistId.hasPrefix("VL") ? String(playlistId.dropFirst(2)) : playlistId
+        let raw = try await fetchBrowseRawJSON(extra: ["browseId": "VL" + cleanId])
         let title = Self.extractPlaylistTitle(fromRawJSON: raw) ?? "YouTube Плейлист"
         var seen = Set<String>()
         let page = Self.extractPlaylistItemsAndToken(
@@ -233,18 +234,19 @@ public final class YouTubeService: @unchecked Sendable {
             remainingLimit: AppConfig.maxPlaylistTrackLimit
         )
         return ImportedYouTubePlaylistResult(
-            playlistId: playlistId,
+            playlistId: cleanId,
             title: title,
             author: nil,
             thumbnailURL: page.tracks.first?.remoteArtworkURL,
             tracks: page.tracks,
-            canonicalURL: "https://www.youtube.com/playlist?list=\(playlistId)",
+            canonicalURL: "https://www.youtube.com/playlist?list=\(cleanId)",
             nextContinuationToken: page.nextToken
         )
     }
 
     private func fetchPlaylistFirstPageViaHTML(playlistId: String) async throws -> ImportedYouTubePlaylistResult {
-        let playlistURLStr = "https://www.youtube.com/playlist?list=\(playlistId)&hl=ru"
+        let cleanId = playlistId.hasPrefix("VL") ? String(playlistId.dropFirst(2)) : playlistId
+        let playlistURLStr = "https://www.youtube.com/playlist?list=\(cleanId)&hl=ru"
         guard let url = URL(string: playlistURLStr) else {
             throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
         }
@@ -260,7 +262,7 @@ public final class YouTubeService: @unchecked Sendable {
               let html = String(data: data, encoding: .utf8) else {
             throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Не удалось загрузить страницу плейлиста YouTube"])
         }
-        return Self.parsePlaylistFromHTML(html: html, playlistId: playlistId)
+        return Self.parsePlaylistFromHTML(html: html, playlistId: cleanId)
     }
 
     // MARK: - Structured JSON parsing (lockupViewModel + legacy playlistVideoRenderer)

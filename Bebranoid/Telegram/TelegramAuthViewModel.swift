@@ -70,28 +70,35 @@ public final class TelegramAuthViewModel: ObservableObject {
         }
     }
 
-    /// `true`, если api_id/api_hash уже лежат в Keychain (импорт с ПК или ввод вручную) и вводить их не нужно.
+    /// `true`, если api_id/api_hash уже настроены (встроенные или в Keychain) и пользователю не нужно их искать.
     public var hasStoredCredentials: Bool {
         client.hasConfiguredApiCredentials
     }
 
     public func saveCredentialsOnly() {
         errorMessage = nil
-        guard let numericId = Int(apiId.trimmingCharacters(in: .whitespacesAndNewlines)), numericId > 0 else {
+        let cleanId = apiId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanHash = apiHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanId.isEmpty && cleanHash.isEmpty && client.hasConfiguredApiCredentials {
+            return
+        }
+        guard let numericId = Int(cleanId), numericId > 0 else {
             errorMessage = "API ID должен быть положительным числом (получите на https://my.telegram.org)"
             return
         }
-        guard !apiHash.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !cleanHash.isEmpty else {
             errorMessage = "Введите API Hash (32-символьная строка с https://my.telegram.org)"
             return
         }
-        client.saveApiCredentials(apiId: "\(numericId)", apiHash: apiHash)
+        client.saveApiCredentials(apiId: "\(numericId)", apiHash: cleanHash)
     }
 
     public func requestCode() async {
         errorMessage = nil
-        saveCredentialsOnly()
-        guard errorMessage == nil else { return }
+        if !client.hasConfiguredApiCredentials || (!apiId.isEmpty && !apiHash.isEmpty) {
+            saveCredentialsOnly()
+            guard errorMessage == nil else { return }
+        }
 
         isLoading = true
         defer { isLoading = false }
@@ -106,8 +113,10 @@ public final class TelegramAuthViewModel: ObservableObject {
 
     public func requestQRLogin() async {
         errorMessage = nil
-        saveCredentialsOnly()
-        guard errorMessage == nil else { return }
+        if !client.hasConfiguredApiCredentials || (!apiId.isEmpty && !apiHash.isEmpty) {
+            saveCredentialsOnly()
+            guard errorMessage == nil else { return }
+        }
 
         isLoading = true
         defer { isLoading = false }

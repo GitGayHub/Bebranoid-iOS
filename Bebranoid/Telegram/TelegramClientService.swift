@@ -338,12 +338,18 @@ public final class TelegramClientService: @unchecked Sendable {
         return keychain.readString(for: .telegramAuthorizedPhone)
     }
 
+    /// Встроенные ключи Telegram API клиента Bebranoid (для мгновенного входа по QR-коду без ручного поиска на my.telegram.org).
+    public static let defaultApiId = "33115622"
+    public static let defaultApiHash = "7104c21dc90d615693147c6cc6416e7e"
+
     public var configuredApiId: String {
-        keychain.readString(for: .telegramApiId) ?? ""
+        let saved = keychain.readString(for: .telegramApiId)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return saved.isEmpty ? Self.defaultApiId : saved
     }
 
     public var configuredApiHash: String {
-        keychain.readString(for: .telegramApiHash) ?? ""
+        let saved = keychain.readString(for: .telegramApiHash)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return saved.isEmpty ? Self.defaultApiHash : saved
     }
 
     public var hasConfiguredApiCredentials: Bool {
@@ -352,6 +358,11 @@ public final class TelegramClientService: @unchecked Sendable {
             return false
         }
         return !configuredApiHash.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public var hasCustomApiCredentials: Bool {
+        let saved = keychain.readString(for: .telegramApiId)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !saved.isEmpty
     }
 
     public func saveApiCredentials(apiId: String, apiHash: String) {

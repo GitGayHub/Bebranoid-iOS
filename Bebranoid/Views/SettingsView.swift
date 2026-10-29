@@ -364,46 +364,30 @@ public struct TelegramAuthView: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white)
 
-            if authVM.hasStoredCredentials {
-                Text("Ключи Telegram API уже настроены — вводить их не нужно. Самый простой способ войти: QR-код ниже.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.68))
+            Text("Вход по QR-коду не требует ввода ключей — авторизуйтесь прямо сейчас:")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.68))
 
-                Button {
-                    Task { await authVM.requestQRLogin() }
-                } label: {
-                    HStack(spacing: 8) {
-                        if authVM.isLoading {
-                            ProgressView().tint(Color(red: 0.08, green: 0.06, blue: 0.14))
-                        }
-                        Label("Войти по QR-коду", systemImage: "qrcode")
-                            .font(.system(size: 15, weight: .bold))
+            Button {
+                Task { await authVM.requestQRLogin() }
+            } label: {
+                HStack(spacing: 8) {
+                    if authVM.isLoading {
+                        ProgressView().tint(Color(red: 0.08, green: 0.06, blue: 0.14))
                     }
-                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
+                    Label("Войти по QR-коду", systemImage: "qrcode")
+                        .font(.system(size: 15, weight: .bold))
                 }
-                .disabled(authVM.isLoading)
-
-                Text("Или по номеру телефона:")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.55))
-            } else {
-                Text("Получите персональные api_id и api_hash на https://my.telegram.org — ключи сохраняются только в защищённом iOS Keychain. Авторизация подтверждается исключительно состоянием authorizationStateReady от TDLib.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.68))
-
-                TextField("Telegram API ID (число)", text: $authVM.apiId)
-                    .padding(14)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                    .foregroundStyle(.white)
-
-                SecureField("Telegram API Hash", text: $authVM.apiHash)
-                    .padding(14)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                    .foregroundStyle(.white)
+                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
             }
+            .disabled(authVM.isLoading)
+
+            Text("Или по номеру телефона:")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
 
             TextField("Номер телефона (+7... / +380...)", text: $authVM.phoneNumber)
                 .padding(14)
@@ -427,28 +411,35 @@ public struct TelegramAuthView: View {
             }
             .disabled(authVM.isLoading)
 
-            if !authVM.hasStoredCredentials {
-                Button {
-                    Task { await authVM.requestQRLogin() }
-                } label: {
-                    Label("Войти по QR-коду (с другого устройства)", systemImage: "qrcode")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
-                        .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
-                }
-                .disabled(authVM.isLoading)
+            DisclosureGroup("Пользовательские API ID / Hash (опционально)") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("По умолчанию используются проверенные ключи Bebranoid. Если хотите подключить личные ключи с https://my.telegram.org:")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.60))
 
-                Button("Сохранить API ID / API Hash в Keychain") {
-                    authVM.saveCredentialsOnly()
+                    TextField("Telegram API ID (число)", text: $authVM.apiId)
+                        .padding(12)
+                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        .foregroundStyle(.white)
+
+                    SecureField("Telegram API Hash", text: $authVM.apiHash)
+                        .padding(12)
+                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        .foregroundStyle(.white)
+
+                    Button("Сохранить свои ключи в Keychain") {
+                        authVM.saveCredentialsOnly()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                 }
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                .padding(.top, 6)
             }
+            .font(.system(size: 12))
+            .foregroundStyle(.white.opacity(0.65))
         }
     }
 

@@ -30,6 +30,10 @@ final class YouTubeLinkParserTests: XCTestCase {
         let bareId = YouTubeLinkParser.parseInput("dQw4w9WgXcQ")
         XCTAssertEqual(bareId.kind, .video)
         XCTAssertEqual(bareId.videoId, "dQw4w9WgXcQ")
+
+        let vlPlaylist = YouTubeLinkParser.parseInput("VLPL1234567890abcdef")
+        XCTAssertEqual(vlPlaylist.kind, .playlist)
+        XCTAssertEqual(vlPlaylist.playlistId, "VLPL1234567890abcdef")
     }
 
     func testArtistSplitterCollaborations() {

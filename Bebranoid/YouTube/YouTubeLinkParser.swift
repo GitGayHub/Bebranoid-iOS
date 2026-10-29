@@ -33,7 +33,7 @@ public struct ParsedYouTubeInput: Equatable, Sendable {
 /// - Прямые 11-символьные `videoId` и прямые `playlistId` (`PL...`, `OLAK5uy_...`, `UU...`, `FL...`, `LL...`, `RD...`)
 public enum YouTubeLinkParser {
     private static let bareVideoIdPattern = #"^[A-Za-z0-9_-]{11}$"#
-    private static let barePlaylistIdPattern = #"^(?:PL|OLAK5uy_|UU|FL|LL|RD|WL)[A-Za-z0-9_-]{10,}$"#
+    private static let barePlaylistIdPattern = #"^(?:PL|OLAK5uy_|UU|FL|LL|RD|WL|VL)[A-Za-z0-9_-]{10,}$"#
 
     public static func isValidVideoId(_ candidate: String?) -> Bool {
         guard let raw = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), raw.count == 11 else {

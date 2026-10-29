@@ -195,4 +195,12 @@ final class TelegramParserTests: XCTestCase {
         XCTAssertEqual(activeResult, dummyURL)
         bgTask.cancel()
     }
+
+    func testDefaultTelegramCredentialsFallback() {
+        XCTAssertFalse(TelegramClientService.defaultApiId.isEmpty)
+        XCTAssertFalse(TelegramClientService.defaultApiHash.isEmpty)
+        XCTAssertGreaterThan(Int(TelegramClientService.defaultApiId) ?? 0, 0)
+        XCTAssertEqual(TelegramClientService.defaultApiHash.count, 32)
+        XCTAssertTrue(TelegramClientService.shared.hasConfiguredApiCredentials)
+    }
 }
