@@ -452,7 +452,23 @@ public final class YouTubeService: @unchecked Sendable {
         return nil
     }
 
-    /// Извлекает название плейлиста, элементы `playlistVideoRenderer` и токен продолжения `continuationCommand.token` из `ytInitialData`
+    /// Выделяет JSON-объект `ytInitialData` из HTML-страницы плейлиста YouTube
+    static func extractYtInitialDataJSONString(fromHTML html: String) -> String? {
+        let markers = ["var ytInitialData = ", "window[\"ytInitialData\"] = ", "ytInitialData = "]
+        for marker in markers {
+            guard let startRange = html.range(of: marker) else { continue }
+            let afterMarker = html[startRange.upperBound...]
+            if let endRange = afterMarker.range(of: ";</script>") {
+                let candidate = String(afterMarker[..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if candidate.hasPrefix("{") && candidate.hasSuffix("}") {
+                    return candidate
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Извлекает название плейлиста, элементы `lockupViewModel` / `playlistVideoRenderer` и токен продолжения `continuationCommand.token` из `ytInitialData`
     public static func parsePlaylistFromHTML(html: String, playlistId: String) -> ImportedYouTubePlaylistResult {
         var playlistTitle = "YouTube Плейлист"
         if let titleRange = html.range(of: #"<meta property="og:title" content="([^"]+)""#, options: .regularExpression) {
@@ -460,10 +476,16 @@ public final class YouTubeService: @unchecked Sendable {
             if let contentStart = matchStr.range(of: "content=\"")?.upperBound,
                let contentEnd = matchStr.lastIndex(of: "\"") {
                 let rawTitle = String(matchStr[contentStart..<contentEnd])
-                if !rawTitle.isEmpty {
+                if !rawTitle.isEmpty, rawTitle.lowercased() != "youtube" {
                     playlistTitle = rawTitle.replacingOccurrences(of: "&amp;", with: "&").replacingOccurrences(of: "&#39;", with: "'")
                 }
             }
+        }
+        if playlistTitle == "YouTube Плейлист",
+           let initialJSON = extractYtInitialDataJSONString(fromHTML: html),
+           let jsonTitle = extractPlaylistTitle(fromRawJSON: initialJSON),
+           !jsonTitle.isEmpty {
+            playlistTitle = jsonTitle
         }
 
         var seenVideoIds = Set<String>()
@@ -492,19 +514,27 @@ public final class YouTubeService: @unchecked Sendable {
         seenVideoIds: inout Set<String>,
         remainingLimit: Int
     ) -> (tracks: [Track], nextToken: String?) {
-        // JSON-ответ `/youtubei/v1/browse`: структурный разбор (новый `lockupViewModel` и старый `playlistVideoRenderer`)
-        if rawText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{"),
-           let data = rawText.data(using: .utf8),
+        // JSON-ответ `/youtubei/v1/browse` или `var ytInitialData = {...}` внутри HTML:
+        // структурный разбор (новый `lockupViewModel` и старый `playlistVideoRenderer`)
+        let trimmedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let jsonCandidate: String? = trimmedText.hasPrefix("{")
+            ? trimmedText
+            : extractYtInitialDataJSONString(fromHTML: rawText)
+
+        if let jsonStr = jsonCandidate,
+           let data = jsonStr.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) {
             let page = parsePlaylistPage(json: json, albumTitle: playlistTitle)
-            var uniqueTracks: [Track] = []
-            for track in page.tracks {
-                if uniqueTracks.count >= remainingLimit { break }
-                guard let vid = track.youtubeVideoId, !seenVideoIds.contains(vid) else { continue }
-                seenVideoIds.insert(vid)
-                uniqueTracks.append(track)
+            if !page.tracks.isEmpty || trimmedText.hasPrefix("{") {
+                var uniqueTracks: [Track] = []
+                for track in page.tracks {
+                    if uniqueTracks.count >= remainingLimit { break }
+                    guard let vid = track.youtubeVideoId, !seenVideoIds.contains(vid) else { continue }
+                    seenVideoIds.insert(vid)
+                    uniqueTracks.append(track)
+                }
+                return (uniqueTracks, page.continuationToken)
             }
-            return (uniqueTracks, page.continuationToken)
         }
 
         let itemPattern = #""playlistVideoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})".*?"title":\{"runs":\[\{"text":"((?:\\.|[^"\\])*)"\}"#

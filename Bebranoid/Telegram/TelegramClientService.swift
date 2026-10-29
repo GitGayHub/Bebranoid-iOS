@@ -370,10 +370,21 @@ public final class TelegramClientService: @unchecked Sendable {
         keychain.saveString(apiHash.trimmingCharacters(in: .whitespacesAndNewlines), for: .telegramApiHash)
     }
 
+    public static var isRunningUnderXCTest: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return NSClassFromString("XCTestCase") != nil
+            || env["XCTestConfigurationFilePath"] != nil
+            || env["XCTestSessionIdentifier"] != nil
+            || env["XCTestBundlePath"] != nil
+    }
+
     /// Инициализирует TDLib при запуске приложения, открывает существующую локальную базу TDLib,
     /// дожидается ответа `updateAuthorizationState` от TDLib и только после `authorizationStateReady` активирует авторизованное состояние.
     @discardableResult
     public func initializeAndRestoreSession() async -> TelegramAuthStepState {
+        if Self.isRunningUnderXCTest {
+            return .unauthorized
+        }
         importBundledCredentialsIfPresent()
         guard hasConfiguredApiCredentials else {
             setAuthStep(.unauthorized, rawState: "missingApiCredentials")
@@ -416,6 +427,10 @@ public final class TelegramClientService: @unchecked Sendable {
             .joined(separator: " ")
         if !fullName.isEmpty {
             withLock { currentUserDisplayName = fullName }
+        }
+        let stepSnapshot = authStep
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .telegramAuthStateDidChange, object: stepSnapshot)
         }
     }
 
@@ -531,6 +546,9 @@ public final class TelegramClientService: @unchecked Sendable {
     }
 
     private func sendTdlibParameters(apiId: Int32, apiHash: String) async throws {
+        if withLock({ tdlibParametersConfigured }) {
+            return
+        }
         let tdlibRoot = storage.databaseDirectory.appendingPathComponent("tdlib", isDirectory: true)
         let dbDir = tdlibRoot.appendingPathComponent("db", isDirectory: true)
         let filesDir = tdlibRoot.appendingPathComponent("files", isDirectory: true)
@@ -635,22 +653,55 @@ public final class TelegramClientService: @unchecked Sendable {
 
     /// Официальный Telegram QR-login flow (`requestQrCodeAuthentication` -> `authorizationStateWaitOtherDeviceConfirmation`)
     public func requestQRCodeAuthentication() async throws -> TelegramAuthStepState {
+        if isAuthorized {
+            return .authorized
+        }
+        if case .awaitingQRConfirmation(let existingLink) = authStep, !existingLink.isEmpty {
+            return authStep
+        }
+
         try await ensureTdlibInitialized(apiId: configuredApiId, apiHash: configuredApiHash)
+
+        if let state = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0) {
+            handleAuthorizationState(state)
+        }
+        if isAuthorized {
+            return .authorized
+        }
+        if case .awaitingQRConfirmation(let existingLink) = authStep, !existingLink.isEmpty {
+            return authStep
+        }
+
         do {
             let resp = try await bridge.sendAsync([
                 "@type": "requestQrCodeAuthentication",
                 "other_user_ids": [] as [Int]
             ], timeoutSeconds: 15.0)
             handleAuthorizationState(resp)
+        } catch {
+            let msgLower = error.localizedDescription.lowercased()
+            if !msgLower.contains("unexpected requestqrcodeauthentication") {
+                let friendly = Self.translateTDLibError(error.localizedDescription)
+                withLock { lastErrorText = friendly }
+                throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+            }
+        }
+
+        // Дожидаемся асинхронного прихода ссылки QR-кода (`authorizationStateWaitOtherDeviceConfirmation`) от серверов Telegram
+        for _ in 0..<15 {
             if let state = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0) {
                 handleAuthorizationState(state)
             }
-            return authStep
-        } catch {
-            let friendly = Self.translateTDLibError(error.localizedDescription)
-            withLock { lastErrorText = friendly }
-            throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+            if case .awaitingQRConfirmation(let link) = authStep, !link.isEmpty {
+                break
+            }
+            if authStep == .authorized {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
+
+        return authStep
     }
 
     public func submitVerificationCode(_ code: String) async throws -> TelegramAuthStepState {
@@ -761,27 +812,84 @@ public final class TelegramClientService: @unchecked Sendable {
 
     // MARK: - Real Dialogs & Forum Topics (`getChats`, `getChat`, `getForumTopics`)
 
+    /// Принудительно открывает/разрешает чат или супергруппу в TDLib (1:1 аналог `ensureChat` в `electron/main.js`),
+    /// чтобы даже на чистой сессии после входа по QR-коду облачный и архивный чаты `AndroSend` находились сразу.
+    @discardableResult
+    public func ensureChatResolved(chatId: Int64) async -> [String: Any]? {
+        if let chat = try? await bridge.sendAsync([
+            "@type": "getChat",
+            "chat_id": chatId
+        ], timeoutSeconds: 8.0), chat["id"] != nil {
+            return chat
+        }
+
+        let chatIdStr = String(chatId)
+        if chatIdStr.hasPrefix("-100"),
+           let supergroupId = Int64(chatIdStr.dropFirst(4)),
+           supergroupId > 0 {
+            if let created = try? await bridge.sendAsync([
+                "@type": "createSupergroupChat",
+                "supergroup_id": supergroupId,
+                "force": true
+            ], timeoutSeconds: 10.0), created["id"] != nil {
+                return created
+            }
+        }
+
+        _ = try? await bridge.sendAsync([
+            "@type": "searchChatsOnServer",
+            "query": "AndroSend",
+            "limit": 20
+        ], timeoutSeconds: 8.0)
+        _ = try? await bridge.sendAsync([
+            "@type": "searchChats",
+            "query": "AndroSend",
+            "limit": 20
+        ], timeoutSeconds: 8.0)
+
+        if let chat = try? await bridge.sendAsync([
+            "@type": "getChat",
+            "chat_id": chatId
+        ], timeoutSeconds: 6.0), chat["id"] != nil {
+            return chat
+        }
+        return nil
+    }
+
     public func fetchAvailableAudioChats(configuredArchiveChatId: String? = nil) async throws -> [TelegramChatSummary] {
         try await sendTdlibParametersIfPossible()
 
-        _ = try? await bridge.sendAsync([
-            "@type": "loadChats",
-            "chat_list": ["@type": "chatListMain"],
-            "limit": 100
-        ], timeoutSeconds: 15.0)
+        // Подгружаем основной и архивный списки диалогов в несколько итераций (аналогично `electron/main.js`)
+        for _ in 0..<8 {
+            do {
+                _ = try await bridge.sendAsync([
+                    "@type": "loadChats",
+                    "chat_list": ["@type": "chatListMain"],
+                    "limit": 100
+                ], timeoutSeconds: 8.0)
+            } catch {
+                break
+            }
+        }
 
-        _ = try? await bridge.sendAsync([
-            "@type": "loadChats",
-            "chat_list": ["@type": "chatListArchive"],
-            "limit": 50
-        ], timeoutSeconds: 10.0)
+        for _ in 0..<4 {
+            do {
+                _ = try await bridge.sendAsync([
+                    "@type": "loadChats",
+                    "chat_list": ["@type": "chatListArchive"],
+                    "limit": 100
+                ], timeoutSeconds: 6.0)
+            } catch {
+                break
+            }
+        }
 
         var chatIds: [Int64] = []
         if let mainResp = try? await bridge.sendAsync([
             "@type": "getChats",
             "chat_list": ["@type": "chatListMain"],
-            "limit": 100
-        ], timeoutSeconds: 15.0),
+            "limit": 200
+        ], timeoutSeconds: 12.0),
            let ids = Self.extractInt64Array(from: mainResp["chat_ids"]) {
             chatIds.append(contentsOf: ids)
         }
@@ -789,7 +897,7 @@ public final class TelegramClientService: @unchecked Sendable {
         if let archResp = try? await bridge.sendAsync([
             "@type": "getChats",
             "chat_list": ["@type": "chatListArchive"],
-            "limit": 50
+            "limit": 100
         ], timeoutSeconds: 10.0),
            let ids = Self.extractInt64Array(from: archResp["chat_ids"]) {
             for id in ids where !chatIds.contains(id) {
@@ -797,14 +905,33 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
+        // Также принудительно разрешаем дефолтные/выбранные супергруппы AndroSend, если они ещё не попали в топ диалогов
+        let savedState = PlaybackSessionStore.shared.loadLibraryState()
+        let candidatePinnedStrings = [
+            savedState.selectedTelegramChatId,
+            savedState.selectedTelegramArchiveChatId,
+            configuredArchiveChatId ?? "",
+            AppConfig.defaultSeedMainChatId,
+            AppConfig.defaultSeedArchiveChatId
+        ]
+        for rawPinned in candidatePinnedStrings {
+            let trimmed = rawPinned.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pinnedId = Int64(trimmed), pinnedId != 0, !chatIds.contains(pinnedId) {
+                if await ensureChatResolved(chatId: pinnedId) != nil {
+                    chatIds.insert(pinnedId, at: 0)
+                }
+            }
+        }
+
         var summaries: [TelegramChatSummary] = []
+        var seenChatIds = Set<String>()
         for cid in chatIds {
-            guard let chatDict = try? await bridge.sendAsync([
-                "@type": "getChat",
-                "chat_id": cid
-            ], timeoutSeconds: 8.0) else {
+            let chatIdStr = String(cid)
+            guard !seenChatIds.contains(chatIdStr) else { continue }
+            guard let chatDict = await ensureChatResolved(chatId: cid) else {
                 continue
             }
+            seenChatIds.insert(chatIdStr)
 
             let title = (chatDict["title"] as? String) ?? "Chat \(cid)"
             var isForum = false
@@ -819,7 +946,6 @@ public final class TelegramClientService: @unchecked Sendable {
                 isForum = (sgDict["is_forum"] as? Bool) ?? false
             }
 
-            let chatIdStr = String(cid)
             let isArchive = AppConfig.isArchiveChatId(chatIdStr, configuredArchiveChatId: configuredArchiveChatId)
 
             summaries.append(
@@ -835,33 +961,62 @@ public final class TelegramClientService: @unchecked Sendable {
         return summaries
     }
 
-    /// Загружает список топиков форума (`getForumTopics`) для супергруппы с включёнными темами
+    /// Загружает список топиков форума (`getForumTopics`) для супергруппы с пагинацией и поддержкой всех полей ID TDLib 1.8.68
     public func fetchForumTopics(chatId: Int64) async -> [Int: String] {
-        guard let resp = try? await bridge.sendAsync([
-            "@type": "getForumTopics",
-            "chat_id": chatId,
-            "query": "",
-            "offset_date": 0,
-            "offset_message_id": 0,
-            "offset_message_thread_id": 0,
-            "limit": 100
-        ], timeoutSeconds: 12.0),
-              let topics = resp["topics"] as? [[String: Any]] else {
-            return [:]
-        }
-
         var map: [Int: String] = [:]
-        for topic in topics {
-            if let info = topic["info"] as? [String: Any],
-               let name = info["name"] as? String,
-               !name.isEmpty {
-                if let threadId = Self.extractInt(from: info["message_thread_id"]) {
+        var offsetDate: Int = 0
+        var offsetMessageId: Int64 = 0
+        var offsetThreadId: Int64 = 0
+
+        for _ in 0..<10 {
+            guard let resp = try? await bridge.sendAsync([
+                "@type": "getForumTopics",
+                "chat_id": chatId,
+                "query": "",
+                "offset_date": offsetDate,
+                "offset_message_id": offsetMessageId,
+                "offset_message_thread_id": offsetThreadId,
+                "limit": 100
+            ], timeoutSeconds: 12.0),
+                  let topics = resp["topics"] as? [[String: Any]],
+                  !topics.isEmpty else {
+                break
+            }
+
+            for topic in topics {
+                guard let info = topic["info"] as? [String: Any],
+                      let rawName = info["name"] as? String else { continue }
+                let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { continue }
+
+                if let threadId = Self.extractInt(from: info["message_thread_id"]), threadId != 0 {
                     map[threadId] = name
                 }
-                if let topicId = Self.extractInt(from: info["forum_topic_id"]) {
+                if let topicId = Self.extractInt(from: info["forum_topic_id"]), topicId != 0 {
                     map[topicId] = name
                 }
+                if let infoId = Self.extractInt(from: info["id"]), infoId != 0 {
+                    map[infoId] = name
+                }
+                if let lastMsg = topic["last_message"] as? [String: Any],
+                   let lastThreadId = Self.extractInt(from: lastMsg["message_thread_id"]),
+                   lastThreadId != 0 {
+                    map[lastThreadId] = name
+                }
             }
+
+            let nextDate = Self.extractInt(from: resp["next_offset_date"]) ?? 0
+            let nextMsgId = Self.extractInt64(from: resp["next_offset_message_id"]) ?? 0
+            let nextThreadId = Self.extractInt64(from: resp["next_offset_message_thread_id"]) ?? 0
+            if nextDate == 0 && nextMsgId == 0 && nextThreadId == 0 {
+                break
+            }
+            if nextDate == offsetDate && nextMsgId == offsetMessageId && nextThreadId == offsetThreadId {
+                break
+            }
+            offsetDate = nextDate
+            offsetMessageId = nextMsgId
+            offsetThreadId = nextThreadId
         }
         return map
     }
@@ -874,7 +1029,7 @@ public final class TelegramClientService: @unchecked Sendable {
         chatTitle: String,
         isArchiveChat: Bool,
         ignoredChatTitles: Set<String> = [],
-        maxTracks: Int = 2500
+        maxTracks: Int = 10000
     ) async throws -> [Track] {
         guard let numericChatId = Int64(chatId.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             throw NSError(
@@ -884,8 +1039,9 @@ public final class TelegramClientService: @unchecked Sendable {
             )
         }
 
-        withLock { currentScanProgressText = "Загрузка топиков \(chatTitle)..." }
+        withLock { currentScanProgressText = "Открытие чата и загрузка топиков \(chatTitle)..." }
         try await sendTdlibParametersIfPossible()
+        _ = await ensureChatResolved(chatId: numericChatId)
         let forumTopics = await fetchForumTopics(chatId: numericChatId)
 
         var rawMessages: [RawTelegramAudioMessage] = []
@@ -988,9 +1144,7 @@ public final class TelegramClientService: @unchecked Sendable {
                 "from_message_id": fromMessageId,
                 "offset": 0,
                 "limit": 100,
-                "filter": ["@type": filterType],
-                "message_thread_id": 0,
-                "saved_messages_topic_id": 0
+                "filter": ["@type": filterType]
             ], timeoutSeconds: 20.0)
 
             guard let messages = resp["messages"] as? [[String: Any]], !messages.isEmpty else {
@@ -1034,7 +1188,13 @@ public final class TelegramClientService: @unchecked Sendable {
             return nil
         }
 
-        let threadId = extractInt(from: msgDict["message_thread_id"])
+        let topicDict = msgDict["topic_id"] as? [String: Any]
+        let replyDict = msgDict["reply_to"] as? [String: Any]
+        let rawThreadId = extractInt(from: msgDict["message_thread_id"])
+            ?? extractInt(from: topicDict?["forum_topic_id"])
+            ?? extractInt(from: topicDict?["message_thread_id"])
+            ?? extractInt(from: replyDict?["message_thread_id"])
+        let threadId = (rawThreadId == 0) ? nil : rawThreadId
         let topicTitle = threadId.flatMap { forumTopics[$0] }
         let captionText = (content["caption"] as? [String: Any])?["text"] as? String
         let timestamp = extractInt64(from: msgDict["date"]) ?? Int64(Date().timeIntervalSince1970)

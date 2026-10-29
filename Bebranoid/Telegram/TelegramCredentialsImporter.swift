@@ -38,6 +38,34 @@ public extension TelegramClientService {
         }
 
         saveApiCredentials(apiId: String(numericId), apiHash: hash)
+
+        // Также автоматически подхватываем выбранные чаты (основной и архивный), если они переданы из конфига ПК
+        var state = PlaybackSessionStore.shared.loadLibraryState()
+        var stateUpdated = false
+        if let selectedChatId = (json["selectedChatId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !selectedChatId.isEmpty {
+            state.selectedTelegramChatId = selectedChatId
+            if let title = (json["selectedChatTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+                state.selectedTelegramChatTitle = title
+            } else if state.selectedTelegramChatTitle == AppConfig.defaultMainChatPlaceholderTitle {
+                state.selectedTelegramChatTitle = AppConfig.defaultSeedMainChatTitle
+            }
+            stateUpdated = true
+        }
+        if let archiveChatId = (json["archiveChatId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !archiveChatId.isEmpty {
+            state.selectedTelegramArchiveChatId = archiveChatId
+            if let title = (json["archiveChatTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+                state.selectedTelegramArchiveChatTitle = title
+            } else if state.selectedTelegramArchiveChatTitle == AppConfig.defaultArchiveChatPlaceholderTitle {
+                state.selectedTelegramArchiveChatTitle = AppConfig.defaultSeedArchiveChatTitle
+            }
+            stateUpdated = true
+        }
+        if stateUpdated {
+            PlaybackSessionStore.shared.saveLibraryState(state)
+        }
+
         try? fileManager.removeItem(at: fileURL)
         return true
     }

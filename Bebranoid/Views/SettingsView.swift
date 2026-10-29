@@ -32,10 +32,15 @@ public struct SettingsView: View {
                                 .foregroundStyle(Color(red: 0.24, green: 0.68, blue: 1.0))
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(appState.telegramClient.isAuthorized ? "Авторизован в Telegram" : "Не выполнен вход (TDLib)")
+                                let userName = appState.telegramClient.authorizedUserDisplayName
+                                Text(appState.telegramClient.isAuthorized
+                                     ? (userName.map { "Telegram: \($0)" } ?? "Авторизован в Telegram")
+                                     : "Вход по QR-коду Telegram")
                                     .font(.system(size: 15, weight: .bold))
                                     .foregroundStyle(.white)
-                                Text(appState.telegramClient.authorizedPhoneNumber ?? "Статус: \(appState.telegramClient.connectionState.rawValue)")
+                                Text(appState.telegramClient.isAuthorized
+                                     ? (appState.telegramClient.authorizedPhoneNumber ?? "Сессия активна • Чаты синхронизированы")
+                                     : "Без ввода API-ключей • Автоподхват чатов и медиатеки")
                                     .font(.system(size: 12))
                                     .foregroundStyle(.white.opacity(0.65))
                             }
@@ -285,6 +290,7 @@ public struct SettingsView: View {
 public struct TelegramAuthView: View {
     @ObservedObject var appState: BebranoidAppState
     @StateObject private var authVM = TelegramAuthViewModel()
+    @State private var showPhoneLogin: Bool = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
@@ -310,7 +316,11 @@ public struct TelegramAuthView: View {
 
                         switch authVM.step {
                         case .unauthorized:
-                            phoneStepView
+                            if showPhoneLogin {
+                                phoneStepView
+                            } else {
+                                qrConfirmationStepView(link: authVM.qrCodeConfirmLink ?? "")
+                            }
                         case .awaitingCode:
                             codeStepView
                         case .awaitingQRConfirmation(let link):
@@ -345,13 +355,13 @@ public struct TelegramAuthView: View {
             }
             .onAppear {
                 authVM.onAuthSuccess = {
-                    Task { await appState.refreshTelegramChats() }
+                    Task { await appState.handleTelegramAuthorized() }
                     dismiss()
                 }
             }
             .task {
-                // Ключи уже есть (импортированы с ПК или введены ранее) — сразу показываем QR без лишних шагов
-                if authVM.hasStoredCredentials, authVM.step == .unauthorized {
+                // Сразу запрашиваем QR-код без необходимости искать и вводить API ID / API Hash
+                if !showPhoneLogin, authVM.step == .unauthorized {
                     await authVM.requestQRLogin()
                 }
             }
@@ -360,22 +370,19 @@ public struct TelegramAuthView: View {
 
     private var phoneStepView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Нативная сессия TDLib на iPhone")
+            Text("Вход по номеру телефона")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white)
 
-            Text("Вход по QR-коду не требует ввода ключей — авторизуйтесь прямо сейчас:")
-                .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.68))
-
             Button {
+                showPhoneLogin = false
                 Task { await authVM.requestQRLogin() }
             } label: {
                 HStack(spacing: 8) {
                     if authVM.isLoading {
                         ProgressView().tint(Color(red: 0.08, green: 0.06, blue: 0.14))
                     }
-                    Label("Войти по QR-коду", systemImage: "qrcode")
+                    Label("Вернуться к быстрому входу по QR-коду", systemImage: "qrcode")
                         .font(.system(size: 15, weight: .bold))
                 }
                 .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
@@ -385,7 +392,7 @@ public struct TelegramAuthView: View {
             }
             .disabled(authVM.isLoading)
 
-            Text("Или по номеру телефона:")
+            Text("Или получите код в Telegram по номеру телефона:")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.55))
 
@@ -474,15 +481,26 @@ public struct TelegramAuthView: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white)
 
-            Text("Если Telegram установлен на этом iPhone — нажмите кнопку ниже и подтвердите вход. Либо отсканируйте QR другим устройством: Telegram → Настройки → Устройства → Подключить устройство.")
+            Text("Никаких API-ключей вводить не нужно: после подтверждения входа приложение само подтянет ваш профиль, облачные чаты AndroSend, топики и все треки.")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.70))
+                .foregroundStyle(.white.opacity(0.75))
 
             if let url = URL(string: link), !link.isEmpty {
                 Button {
                     openURL(url)
                 } label: {
-                    Label("Открыть Telegram и подтвердить вход", systemImage: "paperplane.fill")
+                    Label("Открыть Telegram на этом iPhone и подтвердить", systemImage: "paperplane.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
+                }
+            } else if !authVM.isLoading {
+                Button {
+                    Task { await authVM.requestQRLogin() }
+                } label: {
+                    Label("Обновить QR-код", systemImage: "arrow.clockwise")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                         .frame(maxWidth: .infinity)
@@ -495,12 +513,12 @@ public struct TelegramAuthView: View {
                 .frame(maxWidth: 260)
                 .frame(maxWidth: .infinity)
 
-            Text("Код обновляется автоматически каждые ~30 секунд. Если у аккаунта включён облачный пароль (2FA), после подтверждения приложение попросит его ввести.")
+            Text("Отсканируйте QR с другого устройства (Telegram → Настройки → Устройства → Подключить устройство) или нажмите кнопку выше. Код обновляется автоматически.")
                 .font(.system(size: 11))
                 .foregroundStyle(.white.opacity(0.55))
 
-            Button("Вернуться к входу по номеру телефона") {
-                authVM.logout()
+            Button("Войти по номеру телефона") {
+                showPhoneLogin = true
             }
             .font(.system(size: 14, weight: .semibold))
             .foregroundStyle(.white)
@@ -547,9 +565,19 @@ public struct TelegramAuthView: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.green)
 
-            Text("Аккаунт: \(appState.telegramClient.authorizedPhoneNumber ?? "Подключён")")
+            if let userName = appState.telegramClient.authorizedUserDisplayName, !userName.isEmpty {
+                Text("Профиль: \(userName)")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+
+            Text("Телефон: \(appState.telegramClient.authorizedPhoneNumber ?? "Подключён")")
                 .font(.system(size: 14))
                 .foregroundStyle(.white.opacity(0.80))
+
+            Text("Основной чат: \(appState.libraryState.selectedTelegramChatTitle)")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.70))
 
             Button(role: .destructive) {
                 authVM.logout()

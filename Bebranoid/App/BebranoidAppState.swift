@@ -135,11 +135,21 @@ public final class BebranoidAppState: ObservableObject {
         }
         #endif
         restorePreviousSession()
+        guard !TelegramClientService.isRunningUnderXCTest else { return }
         Task { [weak self] in
             guard let self else { return }
             await self.telegramClient.initializeAndRestoreSession()
+            let latestSaved = PlaybackSessionStore.shared.loadLibraryState()
+            if self.libraryState.selectedTelegramChatId.isEmpty, !latestSaved.selectedTelegramChatId.isEmpty {
+                self.libraryState.selectedTelegramChatId = latestSaved.selectedTelegramChatId
+                self.libraryState.selectedTelegramChatTitle = latestSaved.selectedTelegramChatTitle
+            }
+            if self.libraryState.selectedTelegramArchiveChatId.isEmpty, !latestSaved.selectedTelegramArchiveChatId.isEmpty {
+                self.libraryState.selectedTelegramArchiveChatId = latestSaved.selectedTelegramArchiveChatId
+                self.libraryState.selectedTelegramArchiveChatTitle = latestSaved.selectedTelegramArchiveChatTitle
+            }
             if self.telegramClient.isAuthorized {
-                await self.refreshTelegramChats()
+                await self.handleTelegramAuthorized()
             }
         }
     }
@@ -160,8 +170,12 @@ public final class BebranoidAppState: ObservableObject {
 
         NotificationCenter.default.publisher(for: .telegramAuthStateDidChange)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
+            .sink { [weak self] note in
+                guard let self else { return }
+                self.objectWillChange.send()
+                if let step = note.object as? TelegramAuthStepState, step == .authorized {
+                    Task { await self.handleTelegramAuthorized() }
+                }
             }
             .store(in: &cancellables)
     }
@@ -877,12 +891,70 @@ public final class BebranoidAppState: ObservableObject {
 
     // MARK: - Persistence & Restoration
 
-    public func refreshTelegramChats() async {
+    public func handleTelegramAuthorized() async {
+        await telegramClient.refreshAuthorizedUserProfile()
+        await refreshTelegramChats(autoSyncIfNeeded: true)
+    }
+
+    public func refreshTelegramChats(autoSyncIfNeeded: Bool = false) async {
         do {
             let chats = try await telegramClient.fetchAvailableAudioChats(
                 configuredArchiveChatId: libraryState.selectedTelegramArchiveChatId
             )
             availableTelegramChats = chats
+
+            var didMutateSelection = false
+
+            // Автоматический выбор основного чата AndroSend (по ID или по названию), если пользователь ещё не выбрал чат
+            let normCurrentMain = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramChatId)
+            if normCurrentMain.isEmpty {
+                let normSeedMain = AppConfig.normalizeTelegramChatId(AppConfig.defaultSeedMainChatId)
+                if let matched = chats.first(where: { AppConfig.normalizeTelegramChatId($0.id) == normSeedMain })
+                    ?? chats.first(where: {
+                        let lower = $0.title.lowercased()
+                        return lower.contains("androsend") && !lower.contains("архив") && !lower.contains("📦")
+                    })
+                    ?? chats.first(where: { $0.isForum }) {
+                    libraryState.selectedTelegramChatId = matched.id
+                    libraryState.selectedTelegramChatTitle = matched.title
+                    didMutateSelection = true
+                }
+            } else if let existingMain = chats.first(where: { AppConfig.normalizeTelegramChatId($0.id) == normCurrentMain }) {
+                if libraryState.selectedTelegramChatTitle != existingMain.title {
+                    libraryState.selectedTelegramChatTitle = existingMain.title
+                    didMutateSelection = true
+                }
+            }
+
+            // Автоматический выбор архивного чата AndroSend (по ID или по названию)
+            let normCurrentArchive = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramArchiveChatId)
+            if normCurrentArchive.isEmpty {
+                let normSeedArchive = AppConfig.normalizeTelegramChatId(AppConfig.defaultSeedArchiveChatId)
+                if let matchedArchive = chats.first(where: { AppConfig.normalizeTelegramChatId($0.id) == normSeedArchive })
+                    ?? chats.first(where: {
+                        let lower = $0.title.lowercased()
+                        return lower.contains("androsend") && (lower.contains("архив") || lower.contains("📦"))
+                    }) {
+                    libraryState.selectedTelegramArchiveChatId = matchedArchive.id
+                    libraryState.selectedTelegramArchiveChatTitle = matchedArchive.title
+                    didMutateSelection = true
+                }
+            } else if let existingArchive = chats.first(where: { AppConfig.normalizeTelegramChatId($0.id) == normCurrentArchive }) {
+                if libraryState.selectedTelegramArchiveChatTitle != existingArchive.title {
+                    libraryState.selectedTelegramArchiveChatTitle = existingArchive.title
+                    didMutateSelection = true
+                }
+            }
+
+            if didMutateSelection {
+                saveLibraryState()
+            }
+
+            let hasTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
+            if (autoSyncIfNeeded || !hasTelegramTracks),
+               !libraryState.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                await syncTelegramLibrary()
+            }
         } catch {
             statusBannerMessage = error.localizedDescription
         }
@@ -892,6 +964,9 @@ public final class BebranoidAppState: ObservableObject {
         libraryState.selectedTelegramChatId = chat.id
         libraryState.selectedTelegramChatTitle = chat.title
         saveLibraryState()
+        if telegramClient.isAuthorized {
+            Task { await syncTelegramLibrary() }
+        }
     }
 
     public func selectTelegramArchiveChat(_ chat: TelegramChatSummary?) {
@@ -903,6 +978,9 @@ public final class BebranoidAppState: ObservableObject {
             libraryState.selectedTelegramArchiveChatTitle = AppConfig.defaultArchiveChatPlaceholderTitle
         }
         saveLibraryState()
+        if telegramClient.isAuthorized, !libraryState.selectedTelegramChatId.isEmpty {
+            Task { await syncTelegramLibrary() }
+        }
     }
 
     public func syncTelegramLibrary() async {

@@ -203,4 +203,41 @@ final class TelegramParserTests: XCTestCase {
         XCTAssertEqual(TelegramClientService.defaultApiHash.count, 32)
         XCTAssertTrue(TelegramClientService.shared.hasConfiguredApiCredentials)
     }
+
+    func testTDLib1868TopicIdExtraction() {
+        let msgWithNestedTopicId: [String: Any] = [
+            "@type": "message",
+            "id": Int64(888),
+            "topic_id": [
+                "@type": "messageTopicForum",
+                "forum_topic_id": 12215
+            ],
+            "date": Int64(1_715_000_000),
+            "content": [
+                "@type": "messageAudio",
+                "audio": [
+                    "duration": 180,
+                    "title": "Topic Song",
+                    "performer": "Topic Artist",
+                    "file_name": "Topic_Song.m4a",
+                    "mime_type": "audio/mp4",
+                    "audio": [
+                        "id": 99,
+                        "size": Int64(5_000_000),
+                        "remote": ["unique_id": "uid_99"]
+                    ]
+                ]
+            ]
+        ]
+
+        let parsed = TelegramClientService.parseTDLibMessage(
+            msgWithNestedTopicId,
+            chatId: AppConfig.defaultSeedMainChatId,
+            chatTitle: AppConfig.defaultSeedMainChatTitle,
+            forumTopics: [12215: "yeat"]
+        )
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.messageThreadId, 12215)
+        XCTAssertEqual(parsed?.topicTitle, "yeat")
+    }
 }

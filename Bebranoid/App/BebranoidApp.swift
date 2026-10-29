@@ -8,8 +8,12 @@ public struct BebranoidApp: App {
 
     public var body: some Scene {
         WindowGroup {
-            RootTabView(appState: appState)
-                .preferredColorScheme(.dark)
+            if TelegramClientService.isRunningUnderXCTest {
+                Text("Testing...")
+            } else {
+                RootTabView(appState: appState)
+                    .preferredColorScheme(.dark)
+            }
         }
     }
 }

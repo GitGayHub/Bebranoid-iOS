@@ -96,4 +96,45 @@ final class YouTubeServiceParsingTests: XCTestCase {
         XCTAssertEqual(YouTubeService.parseClockDuration("1:02:03"), 3723, accuracy: 0.01)
         XCTAssertEqual(YouTubeService.parseClockDuration("LIVE"), 0, accuracy: 0.01)
     }
+
+    func testParsesPlaylistFromHTMLWithYtInitialDataLockup() throws {
+        let json: [String: Any] = [
+            "metadata": [
+                "playlistMetadataRenderer": [
+                    "title": "spotify mod free apk"
+                ]
+            ],
+            "contents": [
+                "itemSectionRenderer": [
+                    "contents": [
+                        lockup(id: "fOT0BUpITw8", title: "Peso Pluma - BELLAKEO", author: "Peso Pluma", duration: "3:55"),
+                        lockup(id: "vNF-RTZF6bc", title: "Track Two", author: "Artist Two - Topic", duration: "2:40")
+                    ]
+                ]
+            ]
+        ]
+        let jsonData = try JSONSerialization.data(withJSONObject: json)
+        let jsonString = String(data: jsonData, encoding: .utf8)!
+        let html = """
+        <!DOCTYPE html><html><head><title>YouTube</title></head><body>
+        <script nonce="abc">var ytInitialData = \(jsonString);</script>
+        </body></html>
+        """
+
+        let result = YouTubeService.parsePlaylistFromHTML(
+            html: html,
+            playlistId: "PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP"
+        )
+        XCTAssertEqual(result.title, "spotify mod free apk")
+        XCTAssertEqual(result.tracks.count, 2)
+        XCTAssertEqual(result.tracks[0].youtubeVideoId, "fOT0BUpITw8")
+        XCTAssertEqual(result.tracks[1].youtubeVideoId, "vNF-RTZF6bc")
+    }
+
+    func testLinkParserExtractsPlaylistFromShareTextWithSurroundingWords() {
+        let shared = "Посмотрите этот плейлист на YouTube: https://www.youtube.com/playlist?list=PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP&si=abc123!"
+        let parsed = YouTubeLinkParser.parseInput(shared)
+        XCTAssertEqual(parsed.kind, .playlist)
+        XCTAssertEqual(parsed.playlistId, "PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP")
+    }
 }

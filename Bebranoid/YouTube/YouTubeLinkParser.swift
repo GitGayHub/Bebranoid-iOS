@@ -49,6 +49,20 @@ public enum YouTubeLinkParser {
         return raw.range(of: barePlaylistIdPattern, options: .regularExpression) != nil
     }
 
+    /// Выделяет первую URL-подстроку из произвольного текста (например, из системного меню «Поделиться» на iOS)
+    private static func extractFirstURLCandidate(_ raw: String) -> String {
+        let pattern = #"https?://[^\s"'<>]+"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+           let match = regex.firstMatch(in: raw, options: [], range: NSRange(location: 0, length: (raw as NSString).length)) {
+            var urlStr = (raw as NSString).substring(with: match.range)
+            while let last = urlStr.last, [",", ".", ";", ")", "]"].contains(String(last)) {
+                urlStr.removeLast()
+            }
+            return urlStr
+        }
+        return raw
+    }
+
     /// Извлекает `playlistId` из URL или голой строки ID (`extractPlaylistId` в `electron/youtube.cjs`)
     public static func extractPlaylistId(_ input: String?) -> String? {
         guard let trimmed = input?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
@@ -56,20 +70,30 @@ public enum YouTubeLinkParser {
         }
 
         if isValidPlaylistId(trimmed) {
-            return trimmed
+            return trimmed.hasPrefix("VL") ? String(trimmed.dropFirst(2)) : trimmed
         }
 
-        if let comps = URLComponents(string: trimmed),
+        let urlCandidate = extractFirstURLCandidate(trimmed)
+        if let comps = URLComponents(string: urlCandidate),
            let listParam = comps.queryItems?.first(where: { $0.name.lowercased() == "list" })?.value?.trimmingCharacters(in: .whitespacesAndNewlines),
            !listParam.isEmpty {
-            return listParam
+            return listParam.hasPrefix("VL") ? String(listParam.dropFirst(2)) : listParam
         }
 
-        // Регулярный фолбэк для неполных ссылок без схемы
-        let pattern = #"[?&]list=([A-Za-z0-9_-]+)"#
-        if let regex = try? NSRegularExpression(pattern: pattern, options: []),
+        // Регулярный фолбэк для неполных ссылок без схемы или ссылок внутри текста
+        let pattern = #"(?:[?&]|^)list=([A-Za-z0-9_-]+)"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
            let match = regex.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: (trimmed as NSString).length)) {
-            return (trimmed as NSString).substring(with: match.range(at: 1))
+            let rawId = (trimmed as NSString).substring(with: match.range(at: 1))
+            return rawId.hasPrefix("VL") ? String(rawId.dropFirst(2)) : rawId
+        }
+
+        // Фолбэк на поиск прямого ID плейлиста (PL..., OLAK5uy_...) внутри произвольной строки
+        let embeddedIdPattern = #"\b((?:PL|OLAK5uy_|UU|FL|LL|RD|WL|VL)[A-Za-z0-9_-]{10,})\b"#
+        if let regex = try? NSRegularExpression(pattern: embeddedIdPattern, options: []),
+           let match = regex.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: (trimmed as NSString).length)) {
+            let rawId = (trimmed as NSString).substring(with: match.range(at: 1))
+            return rawId.hasPrefix("VL") ? String(rawId.dropFirst(2)) : rawId
         }
 
         return nil
@@ -85,7 +109,8 @@ public enum YouTubeLinkParser {
             return trimmed
         }
 
-        if let comps = URLComponents(string: trimmed),
+        let urlCandidate = extractFirstURLCandidate(trimmed)
+        if let comps = URLComponents(string: urlCandidate),
            let host = comps.host?.lowercased() {
             if host == "youtu.be" || host.hasSuffix(".youtu.be") {
                 let pathSeg = comps.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).components(separatedBy: "/").first

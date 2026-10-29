@@ -44,7 +44,19 @@ asyncio.run(main())
     if (-not $BundleId) { throw "Bebranoid not found on the iPhone (USB connected, trusted, app installed?)" }
 }
 
-$payload = @{ apiId = [int]$cfg.apiId; apiHash = [string]$cfg.apiHash } | ConvertTo-Json -Compress
+$selectedChatId = if ($cfg.selectedChatId) { [string]$cfg.selectedChatId } else { "-1003734947911" }
+$selectedChatTitle = if ($cfg.selectedChatTitle) { [string]$cfg.selectedChatTitle } else { "AndroSend Облако" }
+$archiveChatId = if ($cfg.archiveChatId) { [string]$cfg.archiveChatId } else { "-1003890744365" }
+$archiveChatTitle = if ($cfg.archiveChatTitle) { [string]$cfg.archiveChatTitle } else { "AndroSend Архив" }
+
+$payload = @{
+    apiId = [int]$cfg.apiId
+    apiHash = [string]$cfg.apiHash
+    selectedChatId = $selectedChatId
+    selectedChatTitle = $selectedChatTitle
+    archiveChatId = $archiveChatId
+    archiveChatTitle = $archiveChatTitle
+} | ConvertTo-Json -Compress
 $tmp = Join-Path $env:TEMP "telegram-credentials.json"
 [IO.File]::WriteAllText($tmp, $payload, (New-Object Text.UTF8Encoding($false)))
 
