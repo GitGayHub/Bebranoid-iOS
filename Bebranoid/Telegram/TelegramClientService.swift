@@ -490,7 +490,7 @@ public final class TelegramClientService: @unchecked Sendable {
         case "authorizationStateWaitOtherDeviceConfirmation":
             let link = (authState["link"] as? String) ?? ""
             if !link.isEmpty {
-                let qrFile = storage.documentsDirectory.appendingPathComponent("pending_qr_link.txt")
+                let qrFile = storage.databaseDirectory.appendingPathComponent("pending_qr_link.txt")
                 try? link.write(to: qrFile, atomically: true, encoding: .utf8)
             }
             setAuthStep(.awaitingQRConfirmation(link: link), rawState: stateType)
