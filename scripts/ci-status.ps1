@@ -1,6 +1,5 @@
 param(
-    [string]$Repo = "GitGayHub/Bebranoid-iOS",
-    [string]$Branch = "main",
+    [string]$Branch = "feature/ios-port",
     [int]$Limit = 10
 )
 
@@ -11,10 +10,10 @@ if (-not (Get-Command $ghExe -ErrorAction SilentlyContinue)) {
     if (Test-Path $fallbackGh) { $ghExe = $fallbackGh }
 }
 
-Write-Host "=== Bebranoid iOS -- GitHub Actions CI Status ($Repo @ $Branch) ===" -ForegroundColor Cyan
-& $ghExe run list --repo $Repo --branch $Branch --limit $Limit
+Write-Host "=== Bebranoid iOS -- GitHub Actions CI Status ($Branch) ===" -ForegroundColor Cyan
+& $ghExe run list --branch $Branch --limit $Limit
 
-$latestJson = & $ghExe run list --repo $Repo --branch $Branch --limit 1 --json databaseId,workflowName,status,conclusion,url,createdAt | ConvertFrom-Json
+$latestJson = & $ghExe run list --branch $Branch --limit 1 --json databaseId,workflowName,status,conclusion,url,createdAt | ConvertFrom-Json
 if ($latestJson -and $latestJson.Count -gt 0) {
     $run = $latestJson[0]
     Write-Host "`nLatest Run Details:" -ForegroundColor Cyan
@@ -22,5 +21,5 @@ if ($latestJson -and $latestJson.Count -gt 0) {
     Write-Host "  Run ID     : $($run.databaseId)"
     Write-Host "  Status     : $($run.status) / $($run.conclusion)"
     Write-Host "  URL        : $($run.url)"
-    & $ghExe run view $run.databaseId --repo $Repo
+    & $ghExe run view $run.databaseId
 }

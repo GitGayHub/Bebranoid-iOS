@@ -91,7 +91,7 @@ ios/
 │   │   ├── Playlist.swift              # Модели пользовательских, YouTube и авто-плейлистов
 │   │   ├── PlaybackState.swift         # Состояние плеера, режимы повтора, AudioFXMode, сортировки
 │   │   ├── AudioFormatInfo.swift       # Технические метаданные и расчёт бейджей Hi-Res / Lossless / HQ
-│   │   ├── AppConfig.swift             # Константы и нормализация ID чатов Telegram, лимиты, ключи хранилища
+│   │   ├── AppConfig.swift             # Константы чатов AndroSend, лимиты, ключи хранилища
 │   │   ├── VolumeCurve.swift           # Перцептивная кривая громкости u^2.75
 │   │   ├── QueueOrder.swift            # Алгоритм reshuffleUpcoming с защитой от повторов
 │   │   ├── PlaylistPreferences.swift   # Лимиты шаффла YouTube-плейлистов и reconcilePlaylist
@@ -111,8 +111,8 @@ ios/
 │   │   ├── AudioFXProcessor.swift      # Граф DSP эффектов (Slowed, Speedup, Reverb, Bass Boost +8dB)
 │   │   └── DualStreamAudioEngine.swift # Двухдековый AVAudioEngine с реальным перекрывающимся кроссфейдом
 │   ├── Telegram/
-│   │   ├── TelegramClientService.swift # Нативный клиент Telegram на базе TDLibFramework (Auth, чаты, топики, скачивание)
-│   │   ├── TelegramScanner.swift       # Парсер key=value подписей, разрешение альбомов, 3x дедупликация архива
+│   │   ├── TelegramClientService.swift # Автономный клиент Telegram (Auth, чаты, топики, скачивание)
+│   │   ├── TelegramScanner.swift       # Парсер AndroSend подписей, разрешение альбомов, 3x дедупликация архива
 │   │   ├── PriorityDownloadQueue.swift # Очередь загрузок с приоритетами (3/1/0) и вытеснением DownloadPreempted
 │   │   └── TelegramAuthViewModel.swift # ViewModel пошаговой авторизации (телефон -> код -> 2FA)
 │   ├── YouTube/

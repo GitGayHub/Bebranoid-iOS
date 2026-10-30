@@ -1,12 +1,12 @@
 param(
-    [string]$ArtifactsDir = "artifacts"
+    [string]$ArtifactsDir = "ios\artifacts"
 )
 
 $ErrorActionPreference = "Stop"
 Write-Host "=== Bebranoid iOS -- Downloaded Artifacts Verification ===" -ForegroundColor Cyan
 
 if (-not (Test-Path $ArtifactsDir)) {
-    Write-Warning "Artifacts directory '$ArtifactsDir' does not exist yet. Run .\scripts\download-preview.ps1 after a successful GitHub Actions run."
+    Write-Warning "Artifacts directory '$ArtifactsDir' does not exist yet. Run .\ios\scripts\download-preview.ps1 after a successful GitHub Actions run."
     exit 1
 }
 

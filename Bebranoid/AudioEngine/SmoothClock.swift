@@ -30,7 +30,7 @@ public final class SmoothClock: ObservableObject {
         isRunning = true
         syncFromHardware()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.step()
             }
@@ -38,6 +38,15 @@ public final class SmoothClock: ObservableObject {
         if let timer {
             RunLoop.main.add(timer, forMode: .common)
         }
+    }
+
+    /// Возвращает высокоточную интерполированную позицию в реальном времени (120 Гц ProMotion) без ожидания публикации `@Published`.
+    public func interpolatedTime(at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Double {
+        guard isRunning, effectiveRate > 0 else {
+            return currentTime
+        }
+        let dt = max(0.0, min(0.25, uptime - anchorWallTime))
+        return max(0.0, anchorAudioTime + dt * effectiveRate)
     }
 
     public func stop() {
@@ -73,6 +82,7 @@ public final class SmoothClock: ObservableObject {
             return
         }
 
+        effectiveRate = max(0.1, sample.rate)
         let dt = max(0.0, now - anchorWallTime)
         let extrapolated = anchorAudioTime + dt * sample.rate
         let drift = abs(extrapolated - sample.time)

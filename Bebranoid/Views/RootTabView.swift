@@ -46,6 +46,17 @@ public struct RootTabView: View {
                             .foregroundStyle(.white)
                             .lineLimit(3)
                         Spacer(minLength: 4)
+                        if !appState.telegramClient.isAuthorized {
+                            Button("Войти") {
+                                appState.statusBannerMessage = nil
+                                appState.openTelegramAuthSheet()
+                            }
+                            .font(.system(size: 12, weight: .bold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(appState.accentSwiftUIColor, in: Capsule())
+                            .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                        }
                         Button {
                             appState.statusBannerMessage = nil
                         } label: {

@@ -108,6 +108,7 @@ public final class BebranoidAppState: ObservableObject {
 
     private var _cachedFilteredTracks: [Track]?
     private var _cachedAlbums: [Album]?
+    private var isHandlingTelegramAuthorized: Bool = false
     private var _cachedArtists: [ArtistSummary]?
     private var _cachedPlaylists: [Playlist]?
 
@@ -531,10 +532,26 @@ public final class BebranoidAppState: ObservableObject {
             } catch {
                 if currentTrack?.id == track.id {
                     statusBannerMessage = error.localizedDescription
-                    if track.sourceKind == .telegram && !telegramClient.isAuthorized {
-                        isTelegramAuthPresented = true
-                    }
                 }
+            }
+        }
+    }
+
+    public func openTelegramAuthSheet() {
+        haptics.softSelection()
+        if isFullScreenPlayerPresented {
+            isFullScreenPlayerPresented = false
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 320_000_000)
+                isTelegramAuthPresented = false
+                try? await Task.sleep(nanoseconds: 40_000_000)
+                isTelegramAuthPresented = true
+            }
+        } else {
+            isTelegramAuthPresented = false
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 25_000_000)
+                isTelegramAuthPresented = true
             }
         }
     }
@@ -975,15 +992,23 @@ public final class BebranoidAppState: ObservableObject {
     // MARK: - Persistence & Restoration
 
     public func handleTelegramAuthorized() async {
+        guard !isHandlingTelegramAuthorized else { return }
+        isHandlingTelegramAuthorized = true
+        defer { isHandlingTelegramAuthorized = false }
+
         statusBannerMessage = nil
         isTelegramAuthPresented = false
+        try? await Task.sleep(nanoseconds: 400_000_000)
         await telegramClient.refreshAuthorizedUserProfile()
         let hasExistingTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
         let hasConfiguredChat = !libraryState.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if !hasExistingTelegramTracks || !hasConfiguredChat {
             await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
         }
-        if let pendingTrack = currentTrack, pendingTrack.sourceKind == .telegram, !isPlaying {
+        if let pendingTrack = currentTrack,
+           pendingTrack.sourceKind == .telegram,
+           !isPlaying,
+           trackDownloadProgress[pendingTrack.cacheKey] == nil {
             startPlayingCurrentIndex(autoPlay: true)
         }
     }

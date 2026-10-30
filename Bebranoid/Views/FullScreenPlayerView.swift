@@ -16,6 +16,8 @@ public struct FullScreenPlayerView: View {
     @State private var isDraggingSlider: Bool = false
     @State private var draggedTime: Double = 0.0
     @State private var dragDismissOffset: CGFloat = 0.0
+    @State private var coverHorizontalOffset: CGFloat = 0.0
+    @State private var lockedGestureAxis: Axis? = nil
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
@@ -45,7 +47,7 @@ public struct FullScreenPlayerView: View {
                     currentPalette: appState.currentPalette,
                     nextPalette: appState.nextTrackPalette,
                     crossfadeProgress: appState.crossfadeProgress,
-                    isReducedMotion: appState.isReducedMotionEnabled,
+                    isReducedMotion: appState.isReducedMotionEnabled || dragDismissOffset > 1 || abs(coverHorizontalOffset) > 1,
                     fixedAnimationTime: fixedTime
                 )
 
@@ -56,7 +58,7 @@ public struct FullScreenPlayerView: View {
 
                     Spacer(minLength: 12)
 
-                    // Большая квадратная обложка альбома
+                    // Большая квадратная обложка альбома (свайп влево/вправо переключает треки, свайп вниз сворачивает плеер)
                     let coverSide = min(geo.size.width - 48, geo.size.height * 0.43)
                     ZStack(alignment: .bottom) {
                         ArtworkThumbnailView(
@@ -89,10 +91,11 @@ public struct FullScreenPlayerView: View {
                             .padding(.bottom, 14)
                         }
                     }
+                    .offset(x: coverHorizontalOffset)
+                    .rotationEffect(.degrees(Double(coverHorizontalOffset) * 0.035))
                     .scaleEffect(appState.isPlaying ? 1.0 : 0.93)
                     .shadow(color: Color.black.opacity(0.48), radius: 28, x: 0, y: 16)
-                    .animation(.spring(response: 0.45, dampingFraction: 0.78), value: appState.isPlaying)
-                    .animation(.easeInOut(duration: 0.35), value: track?.id)
+                    .animation(.spring(response: 0.42, dampingFraction: 0.78), value: appState.isPlaying)
 
                     Spacer(minLength: 20)
 
@@ -119,9 +122,10 @@ public struct FullScreenPlayerView: View {
                         .padding(.horizontal, 24)
                         .padding(.bottom, max(18, geo.safeAreaInsets.bottom > 0 ? 12 : 22))
                 }
+                .scaleEffect(max(0.92, 1.0 - (dragDismissOffset / 1800.0)))
                 .offset(y: dragDismissOffset)
                 .contentShape(Rectangle())
-                .simultaneousGesture(swipeDownDismissGesture)
+                .simultaneousGesture(playerInteractiveGesture(coverWidth: geo.size.width))
             }
         }
         .sheet(isPresented: $appState.isQueueSheetPresented) {
@@ -144,29 +148,85 @@ public struct FullScreenPlayerView: View {
         }
     }
 
-    private var swipeDownDismissGesture: some Gesture {
-        DragGesture(minimumDistance: 16, coordinateSpace: .global)
+    private func playerInteractiveGesture(coverWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .onChanged { value in
                 guard !isDraggingSlider else { return }
+                let dx = value.translation.width
                 let dy = value.translation.height
-                let dx = abs(value.translation.width)
-                if dy > 0 && dy > dx * 1.15 {
-                    dragDismissOffset = dy * 0.85
+
+                if lockedGestureAxis == nil {
+                    if abs(dx) > 10 || abs(dy) > 10 {
+                        if abs(dx) > abs(dy) * 1.12 {
+                            lockedGestureAxis = .horizontal
+                        } else if dy > 0 && dy > abs(dx) * 1.05 {
+                            lockedGestureAxis = .vertical
+                        }
+                    }
+                }
+
+                switch lockedGestureAxis {
+                case .horizontal:
+                    coverHorizontalOffset = dx * 0.88
+                case .vertical:
+                    dragDismissOffset = max(0, dy)
+                case .none:
+                    break
                 }
             }
             .onEnded { value in
+                defer { lockedGestureAxis = nil }
                 guard !isDraggingSlider else {
                     dragDismissOffset = 0
+                    coverHorizontalOffset = 0
                     return
                 }
+
+                let dx = value.translation.width
                 let dy = value.translation.height
+                let predictedX = value.predictedEndTranslation.width
                 let predictedY = value.predictedEndTranslation.height
-                if dy > 80 || predictedY > 150 {
-                    appState.haptics.softSelection()
-                    dismiss()
-                } else {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+
+                switch lockedGestureAxis {
+                case .horizontal:
+                    if dx < -52 || predictedX < -125 {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            coverHorizontalOffset = -coverWidth * 0.42
+                        }
+                        appState.skipToNext(isManualUserAction: true)
+                        coverHorizontalOffset = coverWidth * 0.28
+                        withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.82)) {
+                            coverHorizontalOffset = 0
+                        }
+                    } else if dx > 52 || predictedX > 125 {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            coverHorizontalOffset = coverWidth * 0.42
+                        }
+                        appState.skipToPrevious()
+                        coverHorizontalOffset = -coverWidth * 0.28
+                        withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.82)) {
+                            coverHorizontalOffset = 0
+                        }
+                    } else {
+                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.82)) {
+                            coverHorizontalOffset = 0
+                        }
+                    }
+
+                case .vertical:
+                    if dy > 78 || predictedY > 150 {
+                        appState.haptics.softSelection()
+                        dismiss()
+                    } else {
+                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.84)) {
+                            dragDismissOffset = 0
+                        }
+                    }
+
+                case .none:
+                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.84)) {
                         dragDismissOffset = 0
+                        coverHorizontalOffset = 0
                     }
                 }
             }

@@ -1,8 +1,6 @@
 param(
-    [string]$Repo = "GitGayHub/Bebranoid-iOS",
-    [string]$Branch = "main",
     [string]$RunId = "",
-    [string]$OutputDir = "artifacts"
+    [string]$OutputDir = "ios\artifacts"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,11 +13,11 @@ if (-not (Get-Command $ghExe -ErrorAction SilentlyContinue)) {
 Write-Host "=== Bebranoid iOS -- Download Simulator Preview and IPA Artifacts ===" -ForegroundColor Cyan
 
 if ([string]::IsNullOrWhiteSpace($RunId)) {
-    $runs = & $ghExe run list --repo $Repo --branch $Branch --limit 10 --json databaseId,conclusion,workflowName | ConvertFrom-Json
+    $runs = & $ghExe run list --branch feature/ios-port --limit 10 --json databaseId,conclusion,workflowName | ConvertFrom-Json
     $successRun = $runs | Where-Object { $_.conclusion -eq "success" } | Select-Object -First 1
     if (-not $successRun) {
-        Write-Warning "No completed successful GitHub Actions run found on $Repo ($Branch) yet."
-        Write-Host "Run .\scripts\ci-status.ps1 to inspect the current GitHub Actions run status." -ForegroundColor Yellow
+        Write-Warning "No completed successful GitHub Actions run found on branch feature/ios-port yet."
+        Write-Host "Run .\ios\scripts\ci-status.ps1 to inspect the current GitHub Actions run status or billing quota." -ForegroundColor Yellow
         exit 1
     }
     $RunId = $successRun.databaseId.ToString()
@@ -30,5 +28,11 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 
-& $ghExe run download $RunId --repo $Repo --dir $OutputDir
+& $ghExe run download $RunId --dir $OutputDir
 Write-Host "Downloaded artifacts to: $(Resolve-Path $OutputDir)" -ForegroundColor Green
+
+$screenshotsDir = Get-ChildItem -Path $OutputDir -Recurse -Directory | Where-Object { $_.Name -eq "screenshots" } | Select-Object -First 1
+if ($screenshotsDir) {
+    Write-Host "Opening Simulator screenshots directory: $($screenshotsDir.FullName)" -ForegroundColor Cyan
+    Invoke-Item $screenshotsDir.FullName
+}

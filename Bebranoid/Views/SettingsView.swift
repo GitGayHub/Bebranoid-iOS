@@ -48,8 +48,9 @@ public struct SettingsView: View {
                             Spacer()
 
                             Button(appState.telegramClient.isAuthorized ? "Аккаунт" : "Войти") {
-                                isTelegramAuthPresented = true
+                                appState.openTelegramAuthSheet()
                             }
+                            .buttonStyle(.plain)
                             .font(.system(size: 13, weight: .bold))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
@@ -254,9 +255,6 @@ public struct SettingsView: View {
             .onAppear {
                 refreshCacheStats()
             }
-            .sheet(isPresented: $isTelegramAuthPresented) {
-                TelegramAuthView(appState: appState)
-            }
             .sheet(isPresented: $appState.isAudioFXSheetPresented) {
                 AudioFXSheetView(appState: appState)
             }
@@ -290,7 +288,7 @@ public struct SettingsView: View {
 public struct TelegramAuthView: View {
     @ObservedObject var appState: BebranoidAppState
     @StateObject private var authVM = TelegramAuthViewModel()
-    @State private var showPhoneLogin: Bool = true
+    @State private var showPhoneLogin: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     public init(appState: BebranoidAppState) {
@@ -315,6 +313,33 @@ public struct TelegramAuthView: View {
                             Label("Anti-Ban защита активна", systemImage: "shield.lefthalf.filled.badge.checkmark")
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(.green)
+                        }
+
+                        if authVM.step != .authorized {
+                            HStack(spacing: 8) {
+                                Button {
+                                    showPhoneLogin = false
+                                    Task { await authVM.requestQRLogin() }
+                                } label: {
+                                    Label("По QR-коду", systemImage: "qrcode")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(!showPhoneLogin ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(!showPhoneLogin ? appState.accentSwiftUIColor : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                                }
+
+                                Button {
+                                    showPhoneLogin = true
+                                } label: {
+                                    Label("По номеру", systemImage: "phone.fill")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(showPhoneLogin ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(showPhoneLogin ? appState.accentSwiftUIColor : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                                }
+                            }
                         }
 
                         HStack(alignment: .top, spacing: 10) {
@@ -543,7 +568,12 @@ public struct TelegramAuthView: View {
 
             if !authVM.isLoading {
                 Button {
-                    Task { await authVM.requestQRLogin() }
+                    Task {
+                        if link.isEmpty {
+                            await appState.telegramClient.resetTDLibSession()
+                        }
+                        await authVM.requestQRLogin()
+                    }
                 } label: {
                     Label("Обновить QR-код", systemImage: "arrow.clockwise")
                         .font(.system(size: 14, weight: .semibold))

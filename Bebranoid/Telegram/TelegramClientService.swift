@@ -129,12 +129,19 @@ public final class TDLibJSONBridge: @unchecked Sendable {
         #endif
     }
 
-    public func resetClient() {
+    public func resetClient(sendCloseFirst: Bool = true) {
         lock.lock()
+        let oldClientId = clientId
         let pending = pendingContinuations
         pendingContinuations.removeAll()
         clientId = nil
         lock.unlock()
+
+        #if canImport(TDLibFramework)
+        if sendCloseFirst, let oldClientId {
+            td_send(oldClientId, "{\"@type\":\"close\"}")
+        }
+        #endif
 
         for (_, cont) in pending {
             cont.resume(throwing: NSError(domain: "TDLibJSONBridge", code: 499, userInfo: [NSLocalizedDescriptionKey: "Сессия TDLib перезапущена"]))
@@ -442,9 +449,9 @@ public final class TelegramClientService: @unchecked Sendable {
         if !fullName.isEmpty {
             withLock { currentUserDisplayName = fullName }
         }
-        let stepSnapshot = authStep
+        // Важно: передаём nil в object, чтобы UI обновил имя профиля, но не перезапускал handleTelegramAuthorized() в бесконечном цикле
         DispatchQueue.main.async {
-            NotificationCenter.default.post(name: .telegramAuthStateDidChange, object: stepSnapshot)
+            NotificationCenter.default.post(name: .telegramAuthStateDidChange, object: nil)
         }
     }
 
@@ -533,9 +540,10 @@ public final class TelegramClientService: @unchecked Sendable {
                 hasLoadedInitialChatLists = false
             }
             setAuthStep(.unauthorized, rawState: stateType)
-            bridge.resetClient()
+            bridge.resetClient(sendCloseFirst: false)
+            advanceTDLibSessionEpoch()
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 250_000_000)
+                try? await Task.sleep(nanoseconds: 350_000_000)
                 await self?.initializeAndRestoreSession()
             }
 
@@ -545,12 +553,32 @@ public final class TelegramClientService: @unchecked Sendable {
     }
 
     private func setAuthStep(_ newStep: TelegramAuthStepState, rawState: String) {
-        withLock {
+        let didChange = withLock { () -> Bool in
+            let changed = (currentAuthStep != newStep)
             currentAuthStep = newStep
             currentRawAuthStateName = rawState
+            return changed
         }
+        guard didChange else { return }
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .telegramAuthStateDidChange, object: newStep)
+        }
+    }
+
+    private static let tdlibEpochDefaultsKey = "bebranoid.tdlib.session_epoch"
+
+    private func currentTDLibRootDirectory() -> URL {
+        let epoch = UserDefaults.standard.integer(forKey: Self.tdlibEpochDefaultsKey)
+        let folderName = epoch <= 0 ? "tdlib" : "tdlib_v\(epoch)"
+        return storage.databaseDirectory.appendingPathComponent(folderName, isDirectory: true)
+    }
+
+    private func advanceTDLibSessionEpoch() {
+        let oldDir = currentTDLibRootDirectory()
+        let nextEpoch = max(1, UserDefaults.standard.integer(forKey: Self.tdlibEpochDefaultsKey) + 1)
+        UserDefaults.standard.set(nextEpoch, forKey: Self.tdlibEpochDefaultsKey)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+            try? FileManager.default.removeItem(at: oldDir)
         }
     }
 
@@ -584,7 +612,7 @@ public final class TelegramClientService: @unchecked Sendable {
         if withLock({ tdlibParametersConfigured }) {
             return
         }
-        let tdlibRoot = storage.databaseDirectory.appendingPathComponent("tdlib", isDirectory: true)
+        let tdlibRoot = currentTDLibRootDirectory()
         let dbDir = tdlibRoot.appendingPathComponent("db", isDirectory: true)
         let filesDir = tdlibRoot.appendingPathComponent("files", isDirectory: true)
         try? FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
@@ -615,7 +643,24 @@ public final class TelegramClientService: @unchecked Sendable {
             _ = try await bridge.sendAsync(request, timeoutSeconds: 15.0)
             withLock { tdlibParametersConfigured = true }
         } catch let error as NSError {
-            if error.localizedDescription.lowercased().contains("unexpected settdlibparameters") {
+            let msgLower = error.localizedDescription.lowercased()
+            if msgLower.contains("unexpected settdlibparameters") {
+                withLock { tdlibParametersConfigured = true }
+                return
+            }
+            if msgLower.contains("locked") || msgLower.contains("failed to open") || msgLower.contains("closed") || msgLower.contains("corrupt") {
+                bridge.resetClient(sendCloseFirst: true)
+                advanceTDLibSessionEpoch()
+                _ = bridge.ensureClientCreated()
+                let retryRoot = currentTDLibRootDirectory()
+                let retryDb = retryRoot.appendingPathComponent("db", isDirectory: true)
+                let retryFiles = retryRoot.appendingPathComponent("files", isDirectory: true)
+                try? FileManager.default.createDirectory(at: retryDb, withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: retryFiles, withIntermediateDirectories: true)
+                var retryReq = request
+                retryReq["database_directory"] = retryDb.path
+                retryReq["files_directory"] = retryFiles.path
+                _ = try await bridge.sendAsync(retryReq, timeoutSeconds: 15.0)
                 withLock { tdlibParametersConfigured = true }
                 return
             }
@@ -671,17 +716,16 @@ public final class TelegramClientService: @unchecked Sendable {
         do {
             _ = try await bridge.sendAsync(request, timeoutSeconds: 25.0)
         } catch {
-            // Если TDLib находился в режиме QR (`authorizationStateWaitOtherDeviceConfirmation`),
-            // перезапускаем неавторизованный клиент в состояние `authorizationStateWaitPhoneNumber` и повторяем
-            if error.localizedDescription.lowercased().contains("unexpected") {
-                bridge.sendFireAndForget(["@type": "close"])
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                bridge.resetClient()
+            // Если TDLib находился в режиме QR (`authorizationStateWaitOtherDeviceConfirmation`) или закрыт после сброса сессии,
+            // создаём чистую эпоху БД `tdlib_vN` в состоянии `authorizationStateWaitPhoneNumber` и повторяем
+            let errLower = error.localizedDescription.lowercased()
+            if errLower.contains("unexpected") || errLower.contains("closed") || errLower.contains("locked") {
+                bridge.resetClient(sendCloseFirst: true)
+                advanceTDLibSessionEpoch()
+                try? await Task.sleep(nanoseconds: 250_000_000)
                 withLock { tdlibParametersConfigured = false }
-                let dbDir = storage.databaseDirectory.appendingPathComponent("tdlib/db", isDirectory: true)
-                try? FileManager.default.removeItem(at: dbDir)
                 try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
-                for _ in 0..<10 {
+                for _ in 0..<12 {
                     if let st = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0),
                        (st["@type"] as? String) == "authorizationStateWaitPhoneNumber" {
                         break
@@ -718,9 +762,6 @@ public final class TelegramClientService: @unchecked Sendable {
         if isAuthorized {
             return .authorized
         }
-        if case .awaitingQRConfirmation(let existingLink) = authStep, !existingLink.isEmpty {
-            return authStep
-        }
 
         try await ensureTdlibInitialized(apiId: configuredApiId, apiHash: configuredApiHash)
 
@@ -742,7 +783,18 @@ public final class TelegramClientService: @unchecked Sendable {
             handleAuthorizationState(resp)
         } catch {
             let msgLower = error.localizedDescription.lowercased()
-            if !msgLower.contains("unexpected requestqrcodeauthentication") {
+            if msgLower.contains("unexpected") || msgLower.contains("closed") || msgLower.contains("locked") {
+                bridge.resetClient(sendCloseFirst: true)
+                advanceTDLibSessionEpoch()
+                withLock { tdlibParametersConfigured = false }
+                try await ensureTdlibInitialized(apiId: configuredApiId, apiHash: configuredApiHash)
+                if let retryResp = try? await bridge.sendAsync([
+                    "@type": "requestQrCodeAuthentication",
+                    "other_user_ids": [] as [Int]
+                ], timeoutSeconds: 15.0) {
+                    handleAuthorizationState(retryResp)
+                }
+            } else if !msgLower.contains("unexpected requestqrcodeauthentication") {
                 let friendly = Self.translateTDLibError(error.localizedDescription)
                 withLock { lastErrorText = friendly }
                 throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
@@ -750,7 +802,7 @@ public final class TelegramClientService: @unchecked Sendable {
         }
 
         // Дожидаемся асинхронного прихода ссылки QR-кода (`authorizationStateWaitOtherDeviceConfirmation`) от серверов Telegram
-        for _ in 0..<15 {
+        for _ in 0..<20 {
             if let state = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0) {
                 handleAuthorizationState(state)
             }
@@ -846,10 +898,8 @@ public final class TelegramClientService: @unchecked Sendable {
     }
 
     public func resetTDLibSession() async {
-        bridge.resetClient()
-        let tdlibDir = storage.databaseDirectory.appendingPathComponent("tdlib", isDirectory: true)
-        try? FileManager.default.removeItem(at: tdlibDir)
-        try? FileManager.default.createDirectory(at: tdlibDir, withIntermediateDirectories: true)
+        bridge.resetClient(sendCloseFirst: true)
+        advanceTDLibSessionEpoch()
         let qrFile = storage.databaseDirectory.appendingPathComponent("pending_qr_link.txt")
         try? FileManager.default.removeItem(at: qrFile)
         withLock {
@@ -862,7 +912,7 @@ public final class TelegramClientService: @unchecked Sendable {
             hasLoadedInitialChatLists = false
         }
         setAuthStep(.unauthorized, rawState: "authorizationStateWaitPhoneNumber")
-        await initializeAndRestoreSession()
+        _ = await initializeAndRestoreSession()
     }
 
     private func finalizeAuthorizedState(fallbackPhone: String?) {
@@ -956,6 +1006,13 @@ public final class TelegramClientService: @unchecked Sendable {
         }
         guard !alreadyLoaded else { return }
 
+        // Ждём до 4 секунд, если TDLib ещё устанавливает сетевое соединение с серверами Telegram
+        for _ in 0..<16 {
+            let conn = connectionState
+            if conn == .ready || conn == .updating { break }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+
         for _ in 0..<4 {
             do {
                 _ = try await bridge.sendAsync([
@@ -981,10 +1038,20 @@ public final class TelegramClientService: @unchecked Sendable {
                 break
             }
         }
+
+        // Проверяем, что TDLib действительно подгрузил хотя бы один чат, иначе разрешаем повторную загрузку позже
+        if let mainResp = try? await bridge.sendAsync([
+            "@type": "getChats",
+            "chat_list": ["@type": "chatListMain"],
+            "limit": 20
+        ], timeoutSeconds: 5.0),
+           let ids = Self.extractInt64Array(from: mainResp["chat_ids"]),
+           ids.isEmpty {
+            withLock { hasLoadedInitialChatLists = false }
+        }
     }
 
-    /// Безопасно открывает/разрешает чат или супергруппу в TDLib (1:1 аналог `ensureChat` в `electron/main.js`),
-    /// без глобального поиска `searchChatsOnServer` и без `force: true` заглушек без `access_hash`.
+    /// Безопасно открывает/разрешает чат или супергруппу в TDLib (1:1 аналог `ensureChat` в `electron/main.js` строки 2050–2075)
     @discardableResult
     public func ensureChatResolved(chatId: Int64) async -> [String: Any]? {
         if let chat = try? await bridge.sendAsync([
@@ -992,20 +1059,11 @@ public final class TelegramClientService: @unchecked Sendable {
             "chat_id": chatId
         ], timeoutSeconds: 6.0), chat["id"] != nil {
             _ = withLock { resolvedChatIds.insert(chatId) }
+            bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
             return chat
         }
 
-        // Подгружаем список диалогов пользователя (Main + Archive), чтобы TDLib получил access_hash супергруппы
-        await loadDialogListsOnceIfNeeded()
-
-        if let chat = try? await bridge.sendAsync([
-            "@type": "getChat",
-            "chat_id": chatId
-        ], timeoutSeconds: 6.0), chat["id"] != nil {
-            _ = withLock { resolvedChatIds.insert(chatId) }
-            return chat
-        }
-
+        // 1. Как в `electron/main.js` (`ensureChat`, строка 2056): для супергрупп `-100...` вызываем `createSupergroupChat`
         let chatIdStr = String(chatId)
         if chatIdStr.hasPrefix("-100"),
            let supergroupId = Int64(chatIdStr.dropFirst(4)),
@@ -1013,14 +1071,27 @@ public final class TelegramClientService: @unchecked Sendable {
             if let created = try? await bridge.sendAsync([
                 "@type": "createSupergroupChat",
                 "supergroup_id": supergroupId,
-                "force": false
+                "force": true
             ], timeoutSeconds: 8.0), created["id"] != nil {
                 _ = withLock { resolvedChatIds.insert(chatId) }
+                bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
                 return created
             }
         }
 
-        // Только локальный поиск по уже загруженным диалогам (без searchChatsOnServer!)
+        // 2. Подгружаем список диалогов пользователя (Main + Archive), чтобы TDLib получил access_hash супергруппы
+        await loadDialogListsOnceIfNeeded()
+
+        if let chat = try? await bridge.sendAsync([
+            "@type": "getChat",
+            "chat_id": chatId
+        ], timeoutSeconds: 6.0), chat["id"] != nil {
+            _ = withLock { resolvedChatIds.insert(chatId) }
+            bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
+            return chat
+        }
+
+        // 3. Локальный поиск по уже загруженным диалогам (без searchChatsOnServer!)
         _ = try? await bridge.sendAsync([
             "@type": "searchChats",
             "query": "AndroSend",
@@ -1032,6 +1103,7 @@ public final class TelegramClientService: @unchecked Sendable {
             "chat_id": chatId
         ], timeoutSeconds: 5.0), chat["id"] != nil {
             _ = withLock { resolvedChatIds.insert(chatId) }
+            bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
             return chat
         }
         return nil
@@ -1669,6 +1741,7 @@ public final class TelegramClientService: @unchecked Sendable {
                 var lastBytes: Int64 = 0
                 var lastProgressAt = Date()
                 var lastKickAt = Date()
+                var highestPct: Int = 2
 
                 while Date().timeIntervalSince(startWait) < 300.0 {
                     if token.isPreempted {
@@ -1703,29 +1776,28 @@ public final class TelegramClientService: @unchecked Sendable {
                         ?? track.fileSize
                         ?? 0
 
-                    let pct: Int
+                    let rawPct: Int
                     if totalBytes > 0 {
-                        pct = min(99, max(1, Int((Double(downloadedBytes) / Double(totalBytes)) * 100.0)))
+                        rawPct = min(99, max(2, Int((Double(downloadedBytes) / Double(totalBytes)) * 100.0)))
                     } else if downloadedBytes > 0 {
-                        pct = min(90, 5 + Int(downloadedBytes / (256 * 1024)))
+                        rawPct = min(90, 5 + Int(downloadedBytes / (256 * 1024)))
                     } else {
-                        pct = 2
+                        rawPct = 2
                     }
+                    highestPct = max(highestPct, rawPct)
 
                     if downloadedBytes > lastBytes {
                         lastBytes = downloadedBytes
                         lastProgressAt = Date()
                     }
-                    self.postDownloadProgress(cacheKey: key, percent: pct)
+                    self.postDownloadProgress(cacheKey: key, percent: highestPct)
 
                     let idleSeconds = Date().timeIntervalSince(lastProgressAt)
-                    if idleSeconds > 3.5 && Date().timeIntervalSince(lastKickAt) > 3.5 {
+                    if idleSeconds > 2.8 && Date().timeIntervalSince(lastKickAt) > 2.8 {
                         lastKickAt = Date()
                         if downloadedBytes == 0,
-                           idleSeconds > 7.5,
                            let againDict = try? await self.resolveTDLibFileObject(chatId: chatId64, messageId: Int64(messageId), track: track, preferMessageOverRemoteId: true),
-                           let newId = Self.extractInt(from: againDict["id"]),
-                           newId != activeFileId {
+                           let newId = Self.extractInt(from: againDict["id"]) {
                             activeFileId = newId
                         }
                         _ = try? await self.bridge.sendAsync([
@@ -1771,7 +1843,7 @@ public final class TelegramClientService: @unchecked Sendable {
     // MARK: - TDLib File Helpers (`resolveLocalFileId` 1:1 from `electron/main.js`)
 
     private func resolveTDLibMessageObject(chatId: Int64, messageId: Int64, track: Track? = nil) async throws -> [String: Any] {
-        // 1. Разрешаем чат через loadChats + getChat
+        // 1. Разрешаем чат через createSupergroupChat + loadChats + getChat
         _ = await ensureChatResolved(chatId: chatId)
 
         // 2. Пробуем быстрый локальный кеш TDLib (`getMessage`)
@@ -1798,6 +1870,26 @@ public final class TelegramClientService: @unchecked Sendable {
             for item in messages {
                 if let msgDict = item as? [String: Any], msgDict["content"] != nil {
                     return msgDict
+                }
+            }
+        }
+
+        // 4. Подгружаем окно истории чата вокруг `messageId` с сервера (`only_local: false`), чтобы TDLib получил свежий `file_reference`
+        for cid in candidateIds {
+            if let histResp = try? await bridge.sendAsync([
+                "@type": "getChatHistory",
+                "chat_id": chatId,
+                "from_message_id": cid,
+                "offset": -1,
+                "limit": 5,
+                "only_local": false
+            ], timeoutSeconds: 8.0),
+               let histMsgs = histResp["messages"] as? [[String: Any]] {
+                if let exact = histMsgs.first(where: { Self.extractInt64(from: $0["id"]) == cid && $0["content"] != nil }) {
+                    return exact
+                }
+                if let firstAudio = histMsgs.first(where: { Self.extractFileDictFromTDLibMessage($0) != nil }) {
+                    return firstAudio
                 }
             }
         }

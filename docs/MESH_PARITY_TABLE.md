@@ -1,10 +1,10 @@
 # Таблица 1:1 сверки `HarmonoidMeshBackground.jsx` ↔ `HarmonoidMeshEngine.swift`
 
-Проверка выполнена автоматически скриптом `scripts/verify-mesh-fixtures.mjs` (кросс-языковой запуск JS ↔ `swiftc` `scripts/dump-mesh-swift.swift`) на 7 эталонных буферах `64×64 RGBA` при `width = 430`, `height = 932`, `t = 0.0, 3.5, 7.0, 10.0s`.
+Проверка выполнена автоматически скриптом `ios/scripts/verify-mesh-fixtures.mjs` на 7 эталонных буферах `64×64 RGBA` при `width = 430`, `height = 932`, `t = 10.0s`.
 
 ## 1. Сверка констант и математических формул
 
-| Параметр / Формула | Эталон (`HarmonoidMeshBackground.jsx`) | iOS (`Bebranoid/MeshBackground/HarmonoidMeshEngine.swift`) | Статус |
+| Параметр / Формула | Windows (`src/components/HarmonoidMeshBackground.jsx`) | iOS (`ios/Bebranoid/MeshBackground/HarmonoidMeshEngine.swift`) | Статус |
 |---|---|---|---|
 | Downscale обложки | `64 × 64` (`w = 64, h = 64`) | `analysisDimension = 64` (`64 × 64`) | 1:1 (Δ = 0) |
 | Фильтрация пикселей | `a < 32`, `lum < 0.025 \|\| lum > 0.985`, `sat < 0.035` | `a < 32`, `lum < 0.025 \|\| lum > 0.985`, `sat < 0.035` | 1:1 (Δ = 0) |

@@ -13,15 +13,9 @@ let package = Package(
             targets: ["BebranoidCore"]
         )
     ],
-    dependencies: [
-        .package(url: "https://github.com/Swiftgram/TDLibFramework", exact: "1.8.68-18c8f7a0")
-    ],
     targets: [
         .target(
             name: "BebranoidCore",
-            dependencies: [
-                .product(name: "TDLibFramework", package: "TDLibFramework")
-            ],
             path: "Bebranoid",
             exclude: [
                 "Info.plist",

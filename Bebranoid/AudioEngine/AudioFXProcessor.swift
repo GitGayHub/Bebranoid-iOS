@@ -103,6 +103,15 @@ public final class DeckAudioFXChain {
         }
     }
 
+    /// Мгновенно очищает внутренние буферы задержки реверберации, эквалайзера и питч-шифтера,
+    /// чтобы при паузе, перемотке (`seek`) или смене трека в режиме `Slowed + Reverb` не оставалось эха.
+    public func resetDSPState() {
+        varispeedUnit.reset()
+        timePitchUnit.reset()
+        eqUnit.reset()
+        reverbUnit.reset()
+    }
+
     /// Генератор буфера стерео импульсного отклика 2.8s (1:1 порт `createImpulseResponse` из `src/App.jsx`)
     public static func generateSyntheticImpulseResponse(
         sampleRate: Double = 44100.0,

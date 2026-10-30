@@ -37,7 +37,7 @@ public struct LyricsScreenView: View {
                 currentPalette: appState.currentPalette,
                 nextPalette: appState.nextTrackPalette,
                 crossfadeProgress: appState.crossfadeProgress,
-                isReducedMotion: appState.isReducedMotionEnabled,
+                isReducedMotion: appState.isReducedMotionEnabled || dragDismissOffset > 1,
                 fixedAnimationTime: fixedTime
             )
 
@@ -247,30 +247,36 @@ public struct LyricsScreenView: View {
             }
             .padding(32)
         } else {
-            switch appState.lyricsEngine {
-            case .beautiful:
-                BeautifulLyricsView(
-                    document: appState.currentLyricsDocument,
-                    nodes: appState.currentBeautifulNodes,
-                    currentTime: appState.currentTime,
-                    accentColor: appState.accentSwiftUIColor,
-                    fontSizePreset: appState.lyricsFontSize,
-                    showTranslation: appState.showLyricsTranslation,
-                    onSeekToTime: { targetSec in
-                        appState.seek(to: targetSec)
-                    }
-                )
-            case .classic:
-                ClassicKaraokeLyricsView(
-                    document: appState.currentLyricsDocument,
-                    currentTime: appState.currentTime,
-                    accentColor: appState.accentSwiftUIColor,
-                    fontSizePreset: appState.lyricsFontSize,
-                    showTranslation: appState.showLyricsTranslation,
-                    onSeekToTime: { targetSec in
-                        appState.seek(to: targetSec)
-                    }
-                )
+            TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !appState.isPlaying)) { context in
+                let liveTime = isDraggingSlider
+                    ? draggedTime
+                    : (appState.isPlaying ? appState.audioEngine.smoothClock.interpolatedTime() : appState.currentTime)
+                let _ = context.date
+                switch appState.lyricsEngine {
+                case .beautiful:
+                    BeautifulLyricsView(
+                        document: appState.currentLyricsDocument,
+                        nodes: appState.currentBeautifulNodes,
+                        currentTime: liveTime,
+                        accentColor: appState.accentSwiftUIColor,
+                        fontSizePreset: appState.lyricsFontSize,
+                        showTranslation: appState.showLyricsTranslation,
+                        onSeekToTime: { targetSec in
+                            appState.seek(to: targetSec)
+                        }
+                    )
+                case .classic:
+                    ClassicKaraokeLyricsView(
+                        document: appState.currentLyricsDocument,
+                        currentTime: liveTime,
+                        accentColor: appState.accentSwiftUIColor,
+                        fontSizePreset: appState.lyricsFontSize,
+                        showTranslation: appState.showLyricsTranslation,
+                        onSeekToTime: { targetSec in
+                            appState.seek(to: targetSec)
+                        }
+                    )
+                }
             }
         }
     }

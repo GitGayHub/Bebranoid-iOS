@@ -174,11 +174,12 @@ private struct BeautifulVocalLineRow: View {
         return group.lineIndex < activeLineIndex
     }
 
-    private var distanceBlurRadius: CGFloat {
-        guard !isUserBrowsing, syncKind != .plain, activeLineIndex >= 0 else { return 0 }
+    private var nonActiveLineOpacity: Double {
+        guard syncKind != .plain, activeLineIndex >= 0 else { return 0.92 }
+        if isUserBrowsing { return 0.72 }
         let dist = min(4, abs(group.lineIndex - activeLineIndex))
-        if dist == 0 { return 0 }
-        return CGFloat(Double(dist) * 0.85)
+        let base = isLinePast ? 0.42 : 0.28
+        return max(0.16, base - Double(dist) * 0.03)
     }
 
     var body: some View {
@@ -196,7 +197,7 @@ private struct BeautifulVocalLineRow: View {
                         .foregroundStyle(
                             isLineActive
                                 ? Color.white
-                                : Color.white.opacity(isLinePast ? 0.34 : 0.42)
+                                : Color.white.opacity(nonActiveLineOpacity)
                         )
                         .multilineTextAlignment(.leading)
                 }
@@ -221,12 +222,63 @@ private struct BeautifulVocalLineRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .scaleEffect(isLineActive ? 1.0 : 0.96, anchor: .leading)
-            .blur(radius: distanceBlurRadius)
+            .scaleEffect(isLineActive ? 1.0 : 0.94, anchor: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .animation(.spring(response: 0.36, dampingFraction: 0.82), value: isLineActive)
+    }
+}
+
+/// Поточный контейнер слов (`SyllableVocals.js`), автоматически переносящий слова по строкам
+/// и отрисовывающий плавное слева-направо заполнение каждого слова при 120 FPS.
+private struct SyllableWrappingFlowLayout: Layout {
+    var horizontalSpacing: CGFloat
+    var verticalSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? 340
+        var currentX: CGFloat = 0
+        var currentY: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if currentX > 0 && currentX + size.width > maxWidth {
+                usedWidth = max(usedWidth, currentX - horizontalSpacing)
+                currentX = 0
+                currentY += lineHeight + verticalSpacing
+                lineHeight = 0
+            }
+            currentX += size.width + horizontalSpacing
+            lineHeight = max(lineHeight, size.height)
+            usedWidth = max(usedWidth, min(maxWidth, currentX - horizontalSpacing))
+        }
+
+        return CGSize(width: max(usedWidth, min(maxWidth, currentX)), height: currentY + lineHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var currentX = bounds.minX
+        var currentY = bounds.minY
+        var lineHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if currentX > bounds.minX && currentX + size.width > bounds.maxX {
+                currentX = bounds.minX
+                currentY += lineHeight + verticalSpacing
+                lineHeight = 0
+            }
+            subview.place(
+                at: CGPoint(x: currentX, y: currentY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(size)
+            )
+            currentX += size.width + horizontalSpacing
+            lineHeight = max(lineHeight, size.height)
+        }
     }
 }
 
@@ -236,67 +288,31 @@ private struct SyllableFlowLineView: View {
     let scaleFactor: CGFloat
 
     var body: some View {
-        WrappingHStackView(syllables: syllables, currentTime: currentTime, scaleFactor: scaleFactor)
-    }
-}
-
-private struct WrappingHStackView: View {
-    let syllables: [BeautifulSyllableMetadata]
-    let currentTime: Double
-    let scaleFactor: CGFloat
-
-    var body: some View {
-        let hasActiveEmphasis = syllables.contains { $0.isEmphasized && currentTime >= $0.startTime && currentTime <= $0.endTime + 0.3 }
-
-        if hasActiveEmphasis {
-            HStack(spacing: 6) {
-                ForEach(Array(syllables.enumerated()), id: \.element.id) { index, syl in
-                    if syl.isEmphasized {
-                        EmphasizedWordLettersView(syllable: syl, currentTime: currentTime, scaleFactor: scaleFactor)
-                    } else {
-                        SyllableWordSpanView(
-                            syllable: syl,
-                            fadePeer: (index + 2 < syllables.count) ? syllables[index + 2] : nil,
-                            currentTime: currentTime,
-                            scaleFactor: scaleFactor
-                        )
-                    }
+        SyllableWrappingFlowLayout(
+            horizontalSpacing: 7.0 * scaleFactor,
+            verticalSpacing: 4.0 * scaleFactor
+        ) {
+            ForEach(Array(syllables.enumerated()), id: \.element.id) { index, syl in
+                if syl.isEmphasized {
+                    EmphasizedWordLettersView(
+                        syllable: syl,
+                        currentTime: currentTime,
+                        scaleFactor: scaleFactor
+                    )
+                } else {
+                    SyllableWordSpanView(
+                        syllable: syl,
+                        fadePeer: (index + 2 < syllables.count) ? syllables[index + 2] : nil,
+                        currentTime: currentTime,
+                        scaleFactor: scaleFactor
+                    )
                 }
             }
-        } else {
-            Text(buildAttributedSyllableLine())
-                .font(.system(size: 27 * scaleFactor, weight: .bold, design: .rounded))
-                .shadow(color: Color.white.opacity(0.28), radius: 10, x: 0, y: 2)
         }
-    }
-
-    private func buildAttributedSyllableLine() -> AttributedString {
-        var result = AttributedString()
-        for (idx, syl) in syllables.enumerated() {
-            let fadePeer = (idx + 2 < syllables.count) ? syllables[idx + 2] : nil
-            let progress = HarmonoidMeshEngine.clamp((currentTime - syl.startTime) / syl.duration, 0.0, 1.0)
-            let isSung = progress >= 1.0
-            let isPeerFinished = fadePeer != nil && currentTime >= fadePeer!.endTime
-
-            let alpha: Double
-            if progress <= 0.0 {
-                alpha = 0.38
-            } else if !isSung {
-                alpha = 0.45 + 0.55 * progress
-            } else if isPeerFinished {
-                alpha = 0.76
-            } else {
-                alpha = 1.0
-            }
-
-            var wordAttr = AttributedString(syl.text + (idx < syllables.count - 1 ? " " : ""))
-            wordAttr.foregroundColor = Color.white.opacity(alpha)
-            result.append(wordAttr)
-        }
-        return result
     }
 }
 
+/// Одиночное слово с плавным горизонтальным заполнением слева направо (`--gradient-progress` + `20%` мягкий градиентный край из `SyllableVocals.js` и `BeautifulLyrics.css`).
 private struct SyllableWordSpanView: View {
     let syllable: BeautifulSyllableMetadata
     let fadePeer: BeautifulSyllableMetadata?
@@ -304,16 +320,45 @@ private struct SyllableWordSpanView: View {
     let scaleFactor: CGFloat
 
     var body: some View {
-        let progress = HarmonoidMeshEngine.clamp((currentTime - syllable.startTime) / syllable.duration, 0.0, 1.0)
-        let isActive = progress > 0.0 && progress < 1.0
-        let yLift: CGFloat = isActive ? -3.0 * CGFloat(sin(progress * .pi)) : 0.0
-        let alpha: Double = progress <= 0 ? 0.38 : (progress < 1.0 ? (0.48 + 0.52 * progress) : 0.92)
+        let rawProgress = HarmonoidMeshEngine.clamp((currentTime - syllable.startTime) / syllable.duration, 0.0, 1.0)
+        let smoothCubic = rawProgress * rawProgress * (3.0 - 2.0 * rawProgress)
+        let progress = 0.35 * rawProgress + 0.65 * smoothCubic
+        let isActive = rawProgress > 0.001 && rawProgress < 0.999
+        let isPast = rawProgress >= 0.999
+
+        let fadeAt = fadePeer?.startTime ?? (syllable.endTime + 0.45)
+        let fadeOut = isPast ? HarmonoidMeshEngine.clamp((currentTime - fadeAt) / 0.70, 0.0, 1.0) : 0.0
+        let restAlpha = 1.0 - 0.18 * fadeOut
+
+        let wipeLead = -0.18 + 1.18 * progress
+        let wipeTrail = wipeLead + 0.24
+        let yLift: CGFloat = isActive ? -1.8 * CGFloat(sin(rawProgress * .pi)) : 0.0
+        let glowAlpha: Double = isActive ? (0.42 * sin(rawProgress * .pi)) : (isPast ? 0.14 * (1.0 - fadeOut) : 0.0)
+        let font = Font.system(size: 27 * scaleFactor, weight: .bold, design: .rounded)
 
         Text(syllable.text)
-            .font(.system(size: 27 * scaleFactor, weight: .bold, design: .rounded))
-            .foregroundStyle(Color.white.opacity(alpha))
+            .font(font)
+            .foregroundStyle(Color.white.opacity(isPast ? restAlpha : 0.34))
+            .overlay {
+                if isActive {
+                    Text(syllable.text)
+                        .font(font)
+                        .foregroundStyle(Color.white)
+                        .mask(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .white, location: 0.0),
+                                    .init(color: .white, location: max(0.0, min(1.0, wipeLead))),
+                                    .init(color: .clear, location: max(0.001, min(1.0, wipeTrail)))
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                }
+            }
             .offset(y: yLift)
-            .shadow(color: Color.white.opacity(isActive ? 0.45 : 0.0), radius: 8)
+            .shadow(color: Color.white.opacity(glowAlpha), radius: 7, x: 0, y: 0)
     }
 }
 
@@ -326,20 +371,42 @@ private struct EmphasizedWordLettersView: View {
         let chars = Array(syllable.text)
         let count = max(1, chars.count)
         let overallProgress = HarmonoidMeshEngine.clamp((currentTime - syllable.startTime) / syllable.duration, 0.0, 1.0)
+        let font = Font.system(size: 27 * scaleFactor, weight: .heavy, design: .rounded)
 
-        HStack(spacing: 0.5) {
+        HStack(spacing: 0.4) {
             ForEach(0..<chars.count, id: \.self) { charIdx in
                 let charStart = Double(charIdx) / Double(count)
                 let charEnd = Double(charIdx + 1) / Double(count)
                 let charProgress = HarmonoidMeshEngine.clamp((overallProgress - charStart) / max(0.05, charEnd - charStart), 0.0, 1.0)
                 let pulse = sin(charProgress * .pi)
+                let lead = -0.15 + 1.15 * charProgress
+                let trail = lead + 0.30
+                let chStr = String(chars[charIdx])
 
-                Text(String(chars[charIdx]))
-                    .font(.system(size: 27 * scaleFactor, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.42 + 0.58 * charProgress))
-                    .scaleEffect(CGFloat(1.0 + 0.12 * pulse))
-                    .offset(y: CGFloat(-4.5 * pulse))
-                    .shadow(color: Color.white.opacity(0.65 * pulse), radius: CGFloat(10.0 * pulse))
+                Text(chStr)
+                    .font(font)
+                    .foregroundStyle(Color.white.opacity(charProgress >= 0.999 ? 1.0 : 0.34))
+                    .overlay {
+                        if charProgress > 0.001 && charProgress < 0.999 {
+                            Text(chStr)
+                                .font(font)
+                                .foregroundStyle(Color.white)
+                                .mask(
+                                    LinearGradient(
+                                        stops: [
+                                            .init(color: .white, location: 0.0),
+                                            .init(color: .white, location: max(0.0, min(1.0, lead))),
+                                            .init(color: .clear, location: max(0.001, min(1.0, trail)))
+                                        ],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                        }
+                    }
+                    .scaleEffect(CGFloat(1.0 + 0.09 * pulse))
+                    .offset(y: CGFloat(-3.2 * pulse))
+                    .shadow(color: Color.white.opacity(0.55 * pulse), radius: CGFloat(8.0 * pulse))
             }
         }
     }

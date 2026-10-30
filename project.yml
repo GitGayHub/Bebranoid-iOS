@@ -72,6 +72,7 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIDesignRequiresCompatibility: false
+        CADisableMinimumFrameDurationOnPhone: true
 
   BebranoidTests:
     type: bundle.unit-test

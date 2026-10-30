@@ -145,7 +145,9 @@ public final class DualStreamAudioEngine: ObservableObject {
             duration = computedDuration > 0.5 ? computedDuration : max(computedDuration, track.duration)
 
             ensureEngineRunning()
+            primaryDeck.deckMixerNode.outputVolume = 0.0
             primaryDeck.playerNode.stop()
+            primaryDeck.resetDSPState()
 
             let clampedStart = max(0.0, min(timeSec, max(0.0, duration - 0.05)))
             let startFrame = AVAudioFramePosition(clampedStart * sr)
@@ -192,6 +194,7 @@ public final class DualStreamAudioEngine: ObservableObject {
     public func play() {
         guard primaryAudioFile != nil else { return }
         ensureEngineRunning()
+        updateDeckVolumes()
         if !primaryDeck.playerNode.isPlaying {
             primaryDeck.playerNode.play()
         }
@@ -200,14 +203,19 @@ public final class DualStreamAudioEngine: ObservableObject {
         smoothClock.start()
     }
 
-    /// Пауза. Если пауза нажата во время кроссфейда — отменяет кроссфейд и возвращает полный уровень основному деку (`src/App.jsx`).
+    /// Пауза. Мгновенно глушит микшер и сбрасывает буферы реверберации (`resetDSPState`), чтобы в `Slowed + Reverb` не звучало эхо после паузы.
     public func pause() {
         if isCrossfading {
             cancelActiveCrossfade()
         }
+        primaryDeck.deckMixerNode.outputVolume = 0.0
+        secondaryDeck.deckMixerNode.outputVolume = 0.0
         primaryDeck.playerNode.pause()
         secondaryDeck.playerNode.stop()
+        primaryDeck.resetDSPState()
+        secondaryDeck.resetDSPState()
         isPlaying = false
+        smoothClock.stop()
     }
 
     public func togglePlayPause() {
@@ -233,7 +241,9 @@ public final class DualStreamAudioEngine: ObservableObject {
         let wasPlaying = isPlaying
         scheduleGeneration &+= 1
         let currentGen = scheduleGeneration
+        primaryDeck.deckMixerNode.outputVolume = 0.0
         primaryDeck.playerNode.stop()
+        primaryDeck.resetDSPState()
         primaryStartTimeOffset = clamped
 
         if remainingFrames > 0 {
@@ -262,6 +272,7 @@ public final class DualStreamAudioEngine: ObservableObject {
 
         if wasPlaying {
             ensureEngineRunning()
+            updateDeckVolumes()
             primaryDeck.playerNode.play()
         }
     }
