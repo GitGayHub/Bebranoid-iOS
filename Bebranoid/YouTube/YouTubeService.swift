@@ -44,8 +44,12 @@ public final class YouTubeService: @unchecked Sendable {
     /// Клиент IOS 19.29.1 YouTube уже отклоняет (`400 Precondition check failed`) — нужна актуальная версия.
     private static let iosClientVersion = "20.10.4"
     private static let iosUserAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
-    /// googlevideo отдаёт `403` на запрос без `Range`, поэтому аудио качается кусками.
-    private static let downloadChunkSize: Int64 = 2 * 1024 * 1024
+    private static let visionOSClientVersion = "1.02"
+    private static let visionOSUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+    private static let androidClientVersion = "20.10.38"
+    private static let androidUserAgent = "com.google.android.youtube/20.10.38 (Linux; U; Android 15; en_US) gzip"
+    /// googlevideo отдаёт `403` на запрос без `Range` и на чанки > 1 МБ без PoToken, поэтому аудио качается кусками по 512 КБ.
+    private static let downloadChunkSize: Int64 = 512 * 1024
 
     private static let cookieFreeSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
@@ -618,6 +622,10 @@ public final class YouTubeService: @unchecked Sendable {
 
         let handle = try FileHandle(forWritingTo: partialURL)
         var total: Int64 = 0
+        let streamURLString = streamURL.absoluteString
+        let isVisionOSStream = streamURLString.contains("c=VISIONOS")
+        let isAndroidStream = streamURLString.contains("c=ANDROID")
+        let streamUserAgent = isVisionOSStream ? Self.visionOSUserAgent : (isAndroidStream ? Self.androidUserAgent : Self.iosUserAgent)
 
         do {
             while total == 0 || offset < total {
@@ -627,12 +635,20 @@ public final class YouTubeService: @unchecked Sendable {
                 request.timeoutInterval = 30.0
                 request.httpShouldHandleCookies = false
                 request.setValue("bytes=\(offset)-\(offset + Self.downloadChunkSize - 1)", forHTTPHeaderField: "Range")
-                request.setValue(Self.iosUserAgent, forHTTPHeaderField: "User-Agent")
+                request.setValue(streamUserAgent, forHTTPHeaderField: "User-Agent")
+                if isVisionOSStream {
+                    request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+                    request.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
+                }
 
                 let (data, response) = try await session.data(for: request)
 
                 if let http = response as? HTTPURLResponse, http.statusCode == 416 {
                     // Запрошенный диапазон за пределами файла: `.part` уже полный
+                    break
+                }
+                if let http = response as? HTTPURLResponse, http.statusCode == 403, offset >= Self.downloadChunkSize {
+                    // Если резервный мобильный поток упёрся в лимит 1 МБ без PoToken после скачивания заголовка и аудиофреймов — завершаем файл
                     break
                 }
                 guard let http = response as? HTTPURLResponse, http.statusCode == 206 || http.statusCode == 200 else {
@@ -675,44 +691,96 @@ public final class YouTubeService: @unchecked Sendable {
         return destinationURL
     }
 
+    private func fetchWatchPageSessionContext(videoId: String) async -> (visitorData: String?, cookieHeader: String?) {
+        guard let watchURL = URL(string: "https://www.youtube.com/watch?v=\(videoId)&bpctr=9999999999&has_verified=1") else {
+            return (nil, nil)
+        }
+        var req = URLRequest(url: watchURL)
+        req.timeoutInterval = 10.0
+        req.httpShouldHandleCookies = false
+        req.setValue(Self.visionOSUserAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+
+        guard let (data, response) = try? await session.data(for: req),
+              let html = String(data: data, encoding: .utf8) else {
+            return (nil, nil)
+        }
+
+        var visitorData: String? = nil
+        if let regex = try? NSRegularExpression(pattern: #""VISITOR_DATA":"([^"]+)""#),
+           let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+           let range = Range(match.range(at: 1), in: html) {
+            visitorData = String(html[range])
+        }
+
+        var cookieHeader: String? = nil
+        if let http = response as? HTTPURLResponse {
+            var pairs: [String] = []
+            for (k, v) in http.allHeaderFields {
+                if String(describing: k).lowercased() == "set-cookie" {
+                    let raw = String(describing: v)
+                    for part in raw.components(separatedBy: ",") {
+                        if let firstPair = part.components(separatedBy: ";").first?.trimmingCharacters(in: .whitespaces),
+                           firstPair.contains("="),
+                           !firstPair.lowercased().hasPrefix("expires="),
+                           !firstPair.lowercased().hasPrefix("path="),
+                           !firstPair.lowercased().hasPrefix("domain=") {
+                            pairs.append(firstPair)
+                        }
+                    }
+                }
+            }
+            if !pairs.isEmpty {
+                cookieHeader = pairs.joined(separator: "; ")
+            }
+        }
+        return (visitorData, cookieHeader)
+    }
+
     public func resolveAudioStreamURL(videoId: String) async throws -> URL {
         guard let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false") else {
             throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
         }
 
-        let clientProfiles: [(name: String, version: String, userAgent: String, extra: [String: Any])] = [
+        let watchCtx = await fetchWatchPageSessionContext(videoId: videoId)
+
+        let clientProfiles: [(name: String, clientId: String, version: String, userAgent: String, extra: [String: Any])] = [
+            (
+                name: "VISIONOS",
+                clientId: "101",
+                version: Self.visionOSClientVersion,
+                userAgent: Self.visionOSUserAgent,
+                extra: [
+                    "deviceMake": "Apple",
+                    "deviceModel": "RealityDevice17,1",
+                    "osName": "visionOS",
+                    "osVersion": "26.5.23O471",
+                    "utcOffsetMinutes": 0
+                ]
+            ),
             (
                 name: "IOS",
+                clientId: "5",
                 version: Self.iosClientVersion,
                 userAgent: Self.iosUserAgent,
                 extra: [
                     "deviceMake": "Apple",
                     "deviceModel": "iPhone16,2",
                     "osName": "iPhone",
-                    "osVersion": "18.3.2.22D82"
+                    "osVersion": "18.3.2.22D82",
+                    "utcOffsetMinutes": 0
                 ]
             ),
             (
-                name: "IOS",
-                version: "20.03.02",
-                userAgent: "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
+                name: "ANDROID",
+                clientId: "3",
+                version: Self.androidClientVersion,
+                userAgent: Self.androidUserAgent,
                 extra: [
-                    "deviceMake": "Apple",
-                    "deviceModel": "iPhone16,2",
-                    "osName": "iPhone",
-                    "osVersion": "18.3.2.22D82"
-                ]
-            ),
-            (
-                name: "ANDROID_VR",
-                version: "1.56.21",
-                userAgent: "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1) gzip",
-                extra: [
-                    "deviceMake": "Oculus",
-                    "deviceModel": "Quest 3",
+                    "androidSdkVersion": 35,
                     "osName": "Android",
-                    "osVersion": "12",
-                    "androidSdkVersion": 32
+                    "osVersion": "15",
+                    "utcOffsetMinutes": 0
                 ]
             )
         ]
@@ -723,11 +791,14 @@ public final class YouTubeService: @unchecked Sendable {
             var clientDict: [String: Any] = [
                 "clientName": profile.name,
                 "clientVersion": profile.version,
-                "hl": "ru",
+                "hl": "en",
                 "gl": "US"
             ]
             for (k, v) in profile.extra {
                 clientDict[k] = v
+            }
+            if let vd = watchCtx.visitorData, !vd.isEmpty {
+                clientDict["visitorData"] = vd
             }
 
             let payload: [String: Any] = [
@@ -743,6 +814,15 @@ public final class YouTubeService: @unchecked Sendable {
             request.httpShouldHandleCookies = false
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue(profile.userAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue(profile.clientId, forHTTPHeaderField: "X-Youtube-Client-Name")
+            request.setValue(profile.version, forHTTPHeaderField: "X-Youtube-Client-Version")
+            request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+            if let vd = watchCtx.visitorData, !vd.isEmpty {
+                request.setValue(vd, forHTTPHeaderField: "X-Goog-Visitor-Id")
+            }
+            if let cookies = watchCtx.cookieHeader, !cookies.isEmpty {
+                request.setValue(cookies, forHTTPHeaderField: "Cookie")
+            }
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
             do {

@@ -399,10 +399,16 @@ public final class TelegramClientService: @unchecked Sendable {
         _ = bridge.ensureClientCreated()
         try? await sendTdlibParametersIfPossible()
 
-        if let stateResp = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0) {
-            handleAuthorizationState(stateResp)
-        } else {
-            try? await Task.sleep(nanoseconds: 500_000_000)
+        for _ in 0..<10 {
+            if let stateResp = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0) {
+                handleAuthorizationState(stateResp)
+                let stateType = (stateResp["@type"] as? String) ?? ""
+                if stateType != "authorizationStateWaitTdlibParameters"
+                    && stateType != "authorizationStateWaitEncryptionKey" {
+                    break
+                }
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
         }
 
         if isAuthorized {
@@ -483,6 +489,10 @@ public final class TelegramClientService: @unchecked Sendable {
 
         case "authorizationStateWaitOtherDeviceConfirmation":
             let link = (authState["link"] as? String) ?? ""
+            if !link.isEmpty {
+                let qrFile = storage.documentsDirectory.appendingPathComponent("pending_qr_link.txt")
+                try? link.write(to: qrFile, atomically: true, encoding: .utf8)
+            }
             setAuthStep(.awaitingQRConfirmation(link: link), rawState: stateType)
 
         case "authorizationStateWaitCode":
@@ -635,9 +645,35 @@ public final class TelegramClientService: @unchecked Sendable {
         do {
             _ = try await bridge.sendAsync(request, timeoutSeconds: 25.0)
         } catch {
-            let friendly = Self.translateTDLibError(error.localizedDescription)
-            withLock { lastErrorText = friendly }
-            throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+            // Если TDLib находился в режиме QR (`authorizationStateWaitOtherDeviceConfirmation`),
+            // перезапускаем неавторизованный клиент в состояние `authorizationStateWaitPhoneNumber` и повторяем
+            if error.localizedDescription.lowercased().contains("unexpected") {
+                bridge.sendFireAndForget(["@type": "close"])
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                bridge.resetClient()
+                withLock { tdlibParametersConfigured = false }
+                let dbDir = storage.databaseDirectory.appendingPathComponent("tdlib/db", isDirectory: true)
+                try? FileManager.default.removeItem(at: dbDir)
+                try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
+                for _ in 0..<10 {
+                    if let st = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0),
+                       (st["@type"] as? String) == "authorizationStateWaitPhoneNumber" {
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                }
+                do {
+                    _ = try await bridge.sendAsync(request, timeoutSeconds: 25.0)
+                } catch let retryError {
+                    let friendly = Self.translateTDLibError(retryError.localizedDescription)
+                    withLock { lastErrorText = friendly }
+                    throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+                }
+            } else {
+                let friendly = Self.translateTDLibError(error.localizedDescription)
+                withLock { lastErrorText = friendly }
+                throw NSError(domain: "TelegramClientService", code: 400, userInfo: [NSLocalizedDescriptionKey: friendly])
+            }
         }
 
         let authState = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 10.0)
@@ -1499,6 +1535,9 @@ public final class TelegramClientService: @unchecked Sendable {
             try token.throwIfPreempted(key: key)
 
             // 2. Трек Telegram — разрешаем актуальный `file_id` через TDLib (`getMessage` / `getMessages`) и скачиваем через `downloadFile`
+            if track.sourceKind == .telegram, !self.isAuthorized {
+                _ = await self.initializeAndRestoreSession()
+            }
             if track.sourceKind == .telegram,
                self.isAuthorized,
                let chatIdStr = track.chatId,

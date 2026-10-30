@@ -290,9 +290,8 @@ public struct SettingsView: View {
 public struct TelegramAuthView: View {
     @ObservedObject var appState: BebranoidAppState
     @StateObject private var authVM = TelegramAuthViewModel()
-    @State private var showPhoneLogin: Bool = false
+    @State private var showPhoneLogin: Bool = true
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
@@ -324,7 +323,11 @@ public struct TelegramAuthView: View {
                         case .awaitingCode:
                             codeStepView
                         case .awaitingQRConfirmation(let link):
-                            qrConfirmationStepView(link: link)
+                            if showPhoneLogin {
+                                phoneStepView
+                            } else {
+                                qrConfirmationStepView(link: link)
+                            }
                         case .awaiting2FAPassword:
                             twoFactorStepView
                         case .authorized:
@@ -370,33 +373,19 @@ public struct TelegramAuthView: View {
 
     private var phoneStepView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Вход по номеру телефона")
+            Label("Быстрый вход в Telegram (без API-ключей)", systemImage: "paperplane.fill")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white)
 
-            Button {
-                showPhoneLogin = false
-                Task { await authVM.requestQRLogin() }
-            } label: {
-                HStack(spacing: 8) {
-                    if authVM.isLoading {
-                        ProgressView().tint(Color(red: 0.08, green: 0.06, blue: 0.14))
-                    }
-                    Label("Вернуться к быстрому входу по QR-коду", systemImage: "qrcode")
-                        .font(.system(size: 15, weight: .bold))
-                }
-                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
-            }
-            .disabled(authVM.isLoading)
+            Text("Введите номер телефона — код придёт прямо в пуш-уведомлении приложения Telegram на этом iPhone (или отсканируйте QR-код с другого устройства).")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.75))
 
-            Text("Или получите код в Telegram по номеру телефона:")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
-
-            TextField("Номер телефона (+7... / +380...)", text: $authVM.phoneNumber)
+            TextField("Номер телефона (+380... / +7...)", text: $authVM.phoneNumber)
+                #if os(iOS)
+                .keyboardType(.phonePad)
+                .textContentType(.telephoneNumber)
+                #endif
                 .padding(14)
                 .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
                 .foregroundStyle(.white)
@@ -408,13 +397,28 @@ public struct TelegramAuthView: View {
                     if authVM.isLoading {
                         ProgressView().tint(Color(red: 0.08, green: 0.06, blue: 0.14))
                     }
-                    Text("Отправить код подтверждения через TDLib")
+                    Label("Получить код в Telegram", systemImage: "message.badge.filled.fill")
                         .font(.system(size: 15, weight: .bold))
                 }
                 .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
                 .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
+            }
+            .disabled(authVM.isLoading)
+
+            Button {
+                showPhoneLogin = false
+                Task { await authVM.requestQRLogin() }
+            } label: {
+                HStack(spacing: 8) {
+                    Label("Показать QR-код (для сканирования с другого телефона)", systemImage: "qrcode")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
             }
             .disabled(authVM.isLoading)
 
@@ -452,11 +456,15 @@ public struct TelegramAuthView: View {
 
     private var codeStepView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Введите код из приложения Telegram")
+            Text("Введите 5-значный код из уведомления Telegram")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white)
 
             TextField("Код подтверждения", text: $authVM.verificationCode)
+                #if os(iOS)
+                .keyboardType(.numberPad)
+                .textContentType(.oneTimeCode)
+                #endif
                 .padding(14)
                 .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
                 .foregroundStyle(.white)
@@ -481,50 +489,37 @@ public struct TelegramAuthView: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white)
 
-            Text("Никаких API-ключей вводить не нужно: после подтверждения входа приложение само подтянет ваш профиль, облачные чаты AndroSend, топики и все треки.")
+            Text("Отсканируйте этот QR-код камерой другого устройства (Telegram → Настройки → Устройства → Подключить устройство). Если Telegram установлен на этом же iPhone — войдите по номеру телефона (код придёт в пуш-уведомлении).")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.75))
 
-            if let url = URL(string: link), !link.isEmpty {
-                Button {
-                    openURL(url)
-                } label: {
-                    Label("Открыть Telegram на этом iPhone и подтвердить", systemImage: "paperplane.fill")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
-                }
-            } else if !authVM.isLoading {
-                Button {
-                    Task { await authVM.requestQRLogin() }
-                } label: {
-                    Label("Обновить QR-код", systemImage: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
-                }
+            Button {
+                showPhoneLogin = true
+            } label: {
+                Label("Войти по номеру телефона на этом iPhone", systemImage: "phone.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
             }
 
             TelegramQRCodeView(link: link)
                 .frame(maxWidth: 260)
                 .frame(maxWidth: .infinity)
 
-            Text("Отсканируйте QR с другого устройства (Telegram → Настройки → Устройства → Подключить устройство) или нажмите кнопку выше. Код обновляется автоматически.")
-                .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.55))
-
-            Button("Войти по номеру телефона") {
-                showPhoneLogin = true
+            if !authVM.isLoading {
+                Button {
+                    Task { await authVM.requestQRLogin() }
+                } label: {
+                    Label("Обновить QR-код", systemImage: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+                }
             }
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
         }
     }
 

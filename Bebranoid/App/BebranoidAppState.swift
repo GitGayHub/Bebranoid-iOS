@@ -99,6 +99,7 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var isLyricsScreenPresented: Bool = false
     @Published public var isQueueSheetPresented: Bool = false
     @Published public var isAudioFXSheetPresented: Bool = false
+    @Published public var isTelegramAuthPresented: Bool = false
     @Published public var inspectedTrackForInfo: Track? = nil
     @Published public var statusBannerMessage: String? = nil
     @Published public var availableTelegramChats: [TelegramChatSummary] = []
@@ -473,6 +474,9 @@ public final class BebranoidAppState: ObservableObject {
             } catch {
                 if currentTrack?.id == track.id {
                     statusBannerMessage = error.localizedDescription
+                    if track.sourceKind == .telegram && !telegramClient.isAuthorized {
+                        isTelegramAuthPresented = true
+                    }
                 }
             }
         }
@@ -896,9 +900,14 @@ public final class BebranoidAppState: ObservableObject {
     // MARK: - Persistence & Restoration
 
     public func handleTelegramAuthorized() async {
+        statusBannerMessage = nil
+        isTelegramAuthPresented = false
         await telegramClient.refreshAuthorizedUserProfile()
         let hasExistingTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
         await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
+        if let pendingTrack = currentTrack, pendingTrack.sourceKind == .telegram, !isPlaying {
+            startPlayingCurrentIndex(autoPlay: true)
+        }
     }
 
     public func refreshTelegramChats(autoSyncIfNeeded: Bool = false) async {
