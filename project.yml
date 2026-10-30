@@ -69,6 +69,8 @@ targets:
         UIViewControllerBasedStatusBarAppearance: NO
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: "Bebranoid использует локальную сеть для мгновенной загрузки вашей медиатеки с ПК."
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIDesignRequiresCompatibility: false

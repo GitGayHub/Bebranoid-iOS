@@ -33,7 +33,11 @@
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Bebranoid использует локальную сеть для мгновенной загрузки вашей медиатеки с ПК.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Bebranoid использует доступ к медиатеке для выбора пользовательских обложек альбомов.</string>
 	<key>NSSupportsLiveActivities</key>

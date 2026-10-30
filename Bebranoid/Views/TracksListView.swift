@@ -151,7 +151,7 @@ public struct TracksListView: View {
 
 public struct TrackRowView: View {
     public let track: Track
-    @ObservedObject var appState: BebranoidAppState
+    public let appState: BebranoidAppState
     public let contextQueue: [Track]
 
     public var body: some View {

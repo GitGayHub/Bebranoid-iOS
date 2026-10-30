@@ -259,11 +259,11 @@ public final class BebranoidAppState: ObservableObject {
                 guard let self else { return }
                 let minDelta: Double
                 if self.isLyricsScreenPresented {
-                    minDelta = 0.032 // ~30 Hz для караоке-лирики
+                    minDelta = 0.025 // ~40 Hz для плавного пословного караоке Beautiful Lyrics
                 } else if self.isFullScreenPlayerPresented {
-                    minDelta = 0.10 // 10 Hz для плавного слайдера в полноэкранном плеере
+                    minDelta = 0.08 // 12 Hz для плавного слайдера в полноэкранном плеере
                 } else {
-                    minDelta = 0.25 // 4 Hz для мини-плеера (ноль лагов при 120 Hz скролле списков)
+                    minDelta = 1.0 // 1 Hz для мини-плеера (ноль перерисовок списков при 120 Hz скролле)
                 }
                 if abs(time - self.currentTime) >= minDelta || time < 0.05 {
                     self.currentTime = time
@@ -689,6 +689,9 @@ public final class BebranoidAppState: ObservableObject {
         if disabled {
             currentLyricsDocument = ParsedLyricsDocument(kind: .plain, lines: [])
             currentBeautifulNodes = []
+            if isLyricsScreenPresented {
+                isLyricsScreenPresented = false
+            }
             return
         }
 
@@ -705,6 +708,9 @@ public final class BebranoidAppState: ObservableObject {
             currentLyricsDocument = resolved.document
             currentBeautifulNodes = BeautifulLyricsTransform.transform(document: resolved.document)
             isLoadingLyrics = false
+            if resolved.document.lines.isEmpty && isLyricsScreenPresented {
+                isLyricsScreenPresented = false
+            }
 
             if showLyricsTranslation {
                 await ensureCurrentLyricsTranslated()

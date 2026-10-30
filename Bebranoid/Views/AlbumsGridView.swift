@@ -61,7 +61,7 @@ public struct AlbumsGridView: View {
 
 private struct AlbumGridCard: View {
     let album: Album
-    @ObservedObject var appState: BebranoidAppState
+    let appState: BebranoidAppState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

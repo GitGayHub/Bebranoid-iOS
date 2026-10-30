@@ -85,6 +85,7 @@ public final class ArtworkService: @unchecked Sendable {
     private var dataCache = NSCache<NSString, NSData>()
     #if canImport(CoreGraphics)
     private var cgImageCache = NSCache<NSString, CGImage>()
+    private var trackTierImageCache = NSCache<NSString, CGImage>()
     #endif
 
     private var _loadedArtworkCount: Int = 0
@@ -240,21 +241,6 @@ public final class ArtworkService: @unchecked Sendable {
                 _ = self.withLock { self.inFlightTasks.removeValue(forKey: dedupKey) }
             }
 
-            // Priority 4: Telegram coverFileId / message thumbnail via TDLib
-            if track.sourceKind == .telegram || !(track.coverFileId ?? "").isEmpty {
-                if let downloadedPath = await TelegramClientService.shared.downloadCoverForTrack(track),
-                   self.isValidImageFile(atPath: downloadedPath) {
-                    let url = URL(fileURLWithPath: downloadedPath)
-                    let data = self.loadCachedData(from: url)
-                    if let data, self.isNamedAlbum(track.album) {
-                        self.saveAlbumCoverIfMissing(imageData: data, albumName: track.album)
-                    }
-                    self.recordArtworkLoaded()
-                    self.notifyArtworkResolved(trackId: track.id, albumName: track.album, fileURL: url)
-                    return ResolvedArtworkResult(fileURL: url, imageData: data, source: .telegramMessageThumbnail)
-                }
-            }
-
             // Priority 6: YouTube thumbnail (maxresdefault -> hqdefault -> remoteArtworkURL) with 16:9 / 4:3 -> 1:1 center crop
             if track.sourceKind == .youtube || !(track.youtubeVideoId ?? "").isEmpty || !(track.remoteArtworkURL ?? "").isEmpty {
                 if let ytResult = await self.downloadAndCropRemoteArtwork(for: track) {
@@ -367,6 +353,16 @@ public final class ArtworkService: @unchecked Sendable {
     }
 
     #if canImport(CoreGraphics)
+    public func memoryCachedImage(forKey key: String, tier: ArtworkSizeTier) -> CGImage? {
+        let cacheKey = "\(key)|\(tier.rawValue)" as NSString
+        return trackTierImageCache.object(forKey: cacheKey)
+    }
+
+    public func storeMemoryCachedImage(_ image: CGImage, forKey key: String, tier: ArtworkSizeTier) {
+        let cacheKey = "\(key)|\(tier.rawValue)" as NSString
+        trackTierImageCache.setObject(image, forKey: cacheKey)
+    }
+
     /// Декодирует и масштабирует изображение под нужный уровень размера (`listThumbnail`, `albumGrid`, `fullPlayer`, `meshAnalysis`)
     public func loadCGImage(from fileURL: URL, tier: ArtworkSizeTier = .albumGrid) -> CGImage? {
         let cacheKey = "\(fileURL.path)|\(tier.rawValue)" as NSString

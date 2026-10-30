@@ -90,7 +90,7 @@ public struct PlaylistsGridView: View {
 
 private struct PlaylistGridCard: View {
     let playlist: Playlist
-    @ObservedObject var appState: BebranoidAppState
+    let appState: BebranoidAppState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

@@ -23,8 +23,7 @@ public struct ArtworkThumbnailView: View {
     public var showFavoriteOverlay: Bool
     public var sizeTier: ArtworkSizeTier
 
-    @State private var resolvedLocalPath: String?
-    @State private var refreshTrigger: Int = 0
+    @State private var asyncLoadedCGImage: CGImage?
 
     public init(
         track: Track? = nil,
@@ -44,24 +43,10 @@ public struct ArtworkThumbnailView: View {
         self.sizeTier = sizeTier
     }
 
-    private var effectiveLocalPath: String? {
-        if let resolvedLocalPath, !resolvedLocalPath.isEmpty {
-            return resolvedLocalPath
-        }
-        if let localPath, !localPath.isEmpty, ArtworkService.shared.isValidImageFile(atPath: localPath) {
-            return localPath
-        }
-        if let track,
-           let syncHit = ArtworkService.shared.resolveLocalCoverURLSync(for: track) {
-            return syncHit.url.path
-        }
-        return nil
-    }
-
     private var taskIdentifier: String {
         if let id = track?.id { return id }
-        if let lp = localPath { return lp }
-        if let ru = remoteURL { return ru }
+        if let lp = localPath, !lp.isEmpty { return lp }
+        if let ru = remoteURL, !ru.isEmpty { return ru }
         return fallbackSeed
     }
 
@@ -75,33 +60,16 @@ public struct ArtworkThumbnailView: View {
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay(borderOverlay)
         .task(id: taskIdentifier) {
-            await resolveArtworkIfNeeded()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .artworkDidResolve)) { note in
-            handleArtworkNotification(note)
+            await loadArtworkOffMainThreadIfNeeded()
         }
     }
 
     @ViewBuilder
     private var artworkImageLayer: some View {
-        let _ = refreshTrigger
-        if let path = effectiveLocalPath,
-           let cgImage = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: path), tier: sizeTier) {
+        if let cgImage = asyncLoadedCGImage ?? ArtworkService.shared.memoryCachedImage(forKey: taskIdentifier, tier: sizeTier) {
             Image(decorative: cgImage, scale: 1.0, orientation: .up)
                 .resizable()
                 .scaledToFill()
-        } else if let remoteStr = remoteURL ?? track?.remoteArtworkURL,
-                  let url = URL(string: remoteStr) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                default:
-                    fallbackCover
-                }
-            }
         } else {
             fallbackCover
         }
@@ -122,24 +90,43 @@ public struct ArtworkThumbnailView: View {
             .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
     }
 
-    private func resolveArtworkIfNeeded() async {
-        guard effectiveLocalPath == nil, let track else { return }
-        if let resolved = await ArtworkService.shared.resolveArtwork(for: track),
-           let fileURL = resolved.fileURL {
-            resolvedLocalPath = fileURL.path
-        }
-    }
-
-    private func handleArtworkNotification(_ note: Notification) {
-        guard let info = note.userInfo else { return }
-        let noteTrackId = info["trackId"] as? String
-        let notePath = info["path"] as? String
-        if let currentTrack = track {
-            guard noteTrackId == currentTrack.id else { return }
-            if let notePath, !notePath.isEmpty {
-                resolvedLocalPath = notePath
+    private func loadArtworkOffMainThreadIfNeeded() async {
+        let key = taskIdentifier
+        let tier = sizeTier
+        if let cached = ArtworkService.shared.memoryCachedImage(forKey: key, tier: tier) {
+            if asyncLoadedCGImage !== cached {
+                asyncLoadedCGImage = cached
             }
-            refreshTrigger &+= 1
+            return
+        }
+
+        let capturedTrack = track
+        let capturedLocalPath = localPath
+        let cgResult: CGImage? = await Task.detached(priority: .utility) {
+            if let lp = capturedLocalPath, !lp.isEmpty, ArtworkService.shared.isValidImageFile(atPath: lp) {
+                if let cg = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: lp), tier: tier) {
+                    ArtworkService.shared.storeMemoryCachedImage(cg, forKey: key, tier: tier)
+                    return cg
+                }
+            }
+            if let tr = capturedTrack {
+                if let syncHit = ArtworkService.shared.resolveLocalCoverURLSync(for: tr),
+                   let cg = ArtworkService.shared.loadCGImage(from: syncHit.url, tier: tier) {
+                    ArtworkService.shared.storeMemoryCachedImage(cg, forKey: key, tier: tier)
+                    return cg
+                }
+                if let resolved = await ArtworkService.shared.resolveArtwork(for: tr),
+                   let fileURL = resolved.fileURL,
+                   let cg = ArtworkService.shared.loadCGImage(from: fileURL, tier: tier) {
+                    ArtworkService.shared.storeMemoryCachedImage(cg, forKey: key, tier: tier)
+                    return cg
+                }
+            }
+            return nil
+        }.value
+
+        if !Task.isCancelled, let cgResult {
+            asyncLoadedCGImage = cgResult
         }
     }
 

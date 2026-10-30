@@ -32,8 +32,8 @@ public final class TelegramAuthViewModel: ObservableObject {
         self.client = client
         self.keychain = keychain
         client.importBundledCredentialsIfPresent()
-        self.apiId = keychain.readString(for: .telegramApiId) ?? ""
-        self.apiHash = keychain.readString(for: .telegramApiHash) ?? ""
+        self.apiId = client.configuredApiId
+        self.apiHash = client.configuredApiHash
         self.phoneNumber = keychain.readString(for: .telegramAuthorizedPhone) ?? ""
         self.step = client.authStep
         self.connectionState = client.connectionState

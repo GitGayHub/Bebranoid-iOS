@@ -44,7 +44,7 @@ public struct ArtistsGridView: View {
 
 private struct ArtistGridCard: View {
     let artist: ArtistSummary
-    @ObservedObject var appState: BebranoidAppState
+    let appState: BebranoidAppState
 
     var body: some View {
         VStack(spacing: 10) {

@@ -55,10 +55,12 @@ public struct FullScreenPlayerView: View {
                     topHeaderBar
                         .padding(.top, 8)
                         .padding(.horizontal, 24)
+                        .contentShape(Rectangle())
+                        .gesture(headerDismissGesture)
 
                     Spacer(minLength: 12)
 
-                    // Большая квадратная обложка альбома (свайп влево/вправо переключает треки, свайп вниз сворачивает плеер)
+                    // Большая квадратная обложка альбома (ТОЛЬКО по обложке: свайп влево/вправо переключает треки, свайп вниз закрывает плеер)
                     let coverSide = min(geo.size.width - 48, geo.size.height * 0.43)
                     ZStack(alignment: .bottom) {
                         ArtworkThumbnailView(
@@ -91,11 +93,14 @@ public struct FullScreenPlayerView: View {
                             .padding(.bottom, 14)
                         }
                     }
+                    .frame(width: coverSide, height: coverSide)
+                    .contentShape(Rectangle())
                     .offset(x: coverHorizontalOffset)
                     .rotationEffect(.degrees(Double(coverHorizontalOffset) * 0.035))
                     .scaleEffect(appState.isPlaying ? 1.0 : 0.93)
                     .shadow(color: Color.black.opacity(0.48), radius: 28, x: 0, y: 16)
-                    .animation(.spring(response: 0.42, dampingFraction: 0.78), value: appState.isPlaying)
+                    .animation(.spring(response: 0.36, dampingFraction: 0.80), value: appState.isPlaying)
+                    .highPriorityGesture(coverOnlyInteractiveGesture(coverWidth: coverSide))
 
                     Spacer(minLength: 20)
 
@@ -124,8 +129,6 @@ public struct FullScreenPlayerView: View {
                 }
                 .scaleEffect(max(0.92, 1.0 - (dragDismissOffset / 1800.0)))
                 .offset(y: dragDismissOffset)
-                .contentShape(Rectangle())
-                .simultaneousGesture(playerInteractiveGesture(coverWidth: geo.size.width))
             }
         }
         .sheet(isPresented: $appState.isQueueSheetPresented) {
@@ -148,19 +151,44 @@ public struct FullScreenPlayerView: View {
         }
     }
 
-    private func playerInteractiveGesture(coverWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+    private var headerDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .onChanged { value in
+                let dy = value.translation.height
+                let dx = abs(value.translation.width)
+                if dy > 0 && dy > dx * 0.8 {
+                    dragDismissOffset = dy * 0.88
+                }
+            }
+            .onEnded { value in
+                let dy = value.translation.height
+                let predictedY = value.predictedEndTranslation.height
+                if dy > 42 || predictedY > 95 {
+                    dragDismissOffset = 0
+                    appState.haptics.softSelection()
+                    appState.isFullScreenPlayerPresented = false
+                    dismiss()
+                } else {
+                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.84)) {
+                        dragDismissOffset = 0
+                    }
+                }
+            }
+    }
+
+    private func coverOnlyInteractiveGesture(coverWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .onChanged { value in
                 guard !isDraggingSlider else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
 
                 if lockedGestureAxis == nil {
-                    if abs(dx) > 10 || abs(dy) > 10 {
-                        if abs(dx) > abs(dy) * 1.12 {
-                            lockedGestureAxis = .horizontal
-                        } else if dy > 0 && dy > abs(dx) * 1.05 {
+                    if abs(dx) > 7 || abs(dy) > 7 {
+                        if dy > 6 && dy >= abs(dx) * 0.85 {
                             lockedGestureAxis = .vertical
+                        } else if abs(dx) > abs(dy) * 1.15 {
+                            lockedGestureAxis = .horizontal
                         }
                     }
                 }
@@ -169,7 +197,7 @@ public struct FullScreenPlayerView: View {
                 case .horizontal:
                     coverHorizontalOffset = dx * 0.88
                 case .vertical:
-                    dragDismissOffset = max(0, dy)
+                    dragDismissOffset = max(0, dy * 0.88)
                 case .none:
                     break
                 }
@@ -189,44 +217,53 @@ public struct FullScreenPlayerView: View {
 
                 switch lockedGestureAxis {
                 case .horizontal:
-                    if dx < -52 || predictedX < -125 {
-                        withAnimation(.easeOut(duration: 0.14)) {
-                            coverHorizontalOffset = -coverWidth * 0.42
+                    if dx < -46 || predictedX < -110 {
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            coverHorizontalOffset = -coverWidth * 0.38
                         }
                         appState.skipToNext(isManualUserAction: true)
-                        coverHorizontalOffset = coverWidth * 0.28
-                        withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.82)) {
+                        coverHorizontalOffset = coverWidth * 0.24
+                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.84)) {
                             coverHorizontalOffset = 0
                         }
-                    } else if dx > 52 || predictedX > 125 {
-                        withAnimation(.easeOut(duration: 0.14)) {
-                            coverHorizontalOffset = coverWidth * 0.42
+                    } else if dx > 46 || predictedX > 110 {
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            coverHorizontalOffset = coverWidth * 0.38
                         }
                         appState.skipToPrevious()
-                        coverHorizontalOffset = -coverWidth * 0.28
-                        withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.82)) {
+                        coverHorizontalOffset = -coverWidth * 0.24
+                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.84)) {
                             coverHorizontalOffset = 0
                         }
                     } else {
-                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.82)) {
+                        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.84)) {
                             coverHorizontalOffset = 0
                         }
                     }
 
                 case .vertical:
-                    if dy > 78 || predictedY > 150 {
+                    if dy > 42 || predictedY > 95 {
+                        dragDismissOffset = 0
                         appState.haptics.softSelection()
+                        appState.isFullScreenPlayerPresented = false
                         dismiss()
                     } else {
-                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.84)) {
+                        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.84)) {
                             dragDismissOffset = 0
                         }
                     }
 
                 case .none:
-                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.84)) {
+                    if dy > 42 || predictedY > 95 {
                         dragDismissOffset = 0
-                        coverHorizontalOffset = 0
+                        appState.haptics.softSelection()
+                        appState.isFullScreenPlayerPresented = false
+                        dismiss()
+                    } else {
+                        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.84)) {
+                            dragDismissOffset = 0
+                            coverHorizontalOffset = 0
+                        }
                     }
                 }
             }
@@ -237,6 +274,7 @@ public struct FullScreenPlayerView: View {
     private var topHeaderBar: some View {
         HStack {
             Button {
+                appState.isFullScreenPlayerPresented = false
                 dismiss()
             } label: {
                 Image(systemName: "chevron.down")
@@ -342,22 +380,25 @@ public struct FullScreenPlayerView: View {
     }
 
     private var centerModePillRow: some View {
-        HStack(spacing: 10) {
-            Button {
-                appState.haptics.lightTap()
-                appState.isLyricsScreenPresented = true
-            } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "music.note")
-                        .font(.system(size: 14, weight: .bold))
-                    Text("Текст")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
+        let hasAvailableLyrics = !appState.currentLyricsDocument.lines.isEmpty && !(track.map { appState.isLyricsDisabled(for: $0) } ?? false)
+        return HStack(spacing: 10) {
+            if hasAvailableLyrics {
+                Button {
+                    appState.haptics.lightTap()
+                    appState.isLyricsScreenPresented = true
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 14, weight: .bold))
+                        Text("Текст")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.14), in: Capsule())
+                    .overlay(Capsule().stroke(Color.white.opacity(0.16), lineWidth: 1))
                 }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(Color.white.opacity(0.14), in: Capsule())
-                .overlay(Capsule().stroke(Color.white.opacity(0.16), lineWidth: 1))
             }
 
             Button {
@@ -439,23 +480,17 @@ public struct FullScreenPlayerView: View {
         let clampedPos = min(maxDur, max(0.0, displayedTime))
 
         return VStack(spacing: 8) {
-            Slider(
-                value: Binding(
-                    get: { clampedPos },
-                    set: { newVal in
-                        isDraggingSlider = true
-                        draggedTime = newVal
-                    }
-                ),
-                in: 0...maxDur,
-                onEditingChanged: { editing in
-                    if !editing {
-                        appState.seek(to: draggedTime)
-                        isDraggingSlider = false
-                    }
+            InteractiveSeekBarView(
+                currentTime: clampedPos,
+                duration: maxDur,
+                accentColor: appState.accentSwiftUIColor,
+                isDragging: $isDraggingSlider,
+                draggedTime: $draggedTime,
+                onCommitSeek: { targetSec in
+                    appState.haptics.softSelection()
+                    appState.seek(to: targetSec)
                 }
             )
-            .tint(appState.accentSwiftUIColor)
 
             HStack(alignment: .center) {
                 Text(Self.formatSeconds(clampedPos))
@@ -531,5 +566,80 @@ public struct FullScreenPlayerView: View {
         let mins = whole / 60
         let secs = whole % 60
         return String(format: "%d:%02d", mins, secs)
+    }
+}
+
+/// Плавная 120 Гц полоса перемотки, работающая как по одиночному тыку в любое место, так и перетаскиванием пальцем.
+public struct InteractiveSeekBarView: View {
+    public let currentTime: Double
+    public let duration: Double
+    public let accentColor: Color
+    @Binding public var isDragging: Bool
+    @Binding public var draggedTime: Double
+    public let onCommitSeek: (Double) -> Void
+
+    public init(
+        currentTime: Double,
+        duration: Double,
+        accentColor: Color,
+        isDragging: Binding<Bool>,
+        draggedTime: Binding<Double>,
+        onCommitSeek: @escaping (Double) -> Void
+    ) {
+        self.currentTime = currentTime
+        self.duration = duration
+        self.accentColor = accentColor
+        self._isDragging = isDragging
+        self._draggedTime = draggedTime
+        self.onCommitSeek = onCommitSeek
+    }
+
+    public var body: some View {
+        GeometryReader { geo in
+            let width = max(1.0, geo.size.width)
+            let safeDur = max(1.0, duration)
+            let activeTime = isDragging ? draggedTime : currentTime
+            let progress = min(1.0, max(0.0, activeTime / safeDur))
+            let barHeight: CGFloat = isDragging ? 9.0 : 6.0
+            let thumbSize: CGFloat = isDragging ? 18.0 : 13.0
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.20))
+                    .frame(width: width, height: barHeight)
+
+                Capsule()
+                    .fill(accentColor)
+                    .frame(width: max(barHeight, width * progress), height: barHeight)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: thumbSize, height: thumbSize)
+                    .shadow(color: accentColor.opacity(0.65), radius: isDragging ? 8 : 4, x: 0, y: 2)
+                    .offset(x: min(width - thumbSize, max(0, width * progress - thumbSize * 0.5)))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { value in
+                        let ratio = min(1.0, max(0.0, Double(value.location.x / width)))
+                        let target = ratio * safeDur
+                        if !isDragging {
+                            isDragging = true
+                        }
+                        draggedTime = target
+                    }
+                    .onEnded { value in
+                        let ratio = min(1.0, max(0.0, Double(value.location.x / width)))
+                        let target = ratio * safeDur
+                        draggedTime = target
+                        isDragging = false
+                        onCommitSeek(target)
+                    }
+            )
+            .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.82), value: isDragging)
+        }
+        .frame(height: 32)
     }
 }

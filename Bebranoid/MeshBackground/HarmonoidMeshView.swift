@@ -68,24 +68,34 @@ public struct HarmonoidMeshView: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: isReducedMotion ? (1.0 / 12.0) : (1.0 / 24.0), paused: fixedAnimationTime != nil)) { timeline in
-            Canvas(opaque: true, rendersAsynchronously: true) { context, size in
-                let elapsedSec = SharedMeshMotionClock.shared.sampleSeconds(
-                    at: timeline.date,
-                    paused: false,
-                    fixedOverrideSeconds: fixedAnimationTime
-                )
-                let activeColors = resolveActivePalettePure(at: timeline.date)
-
-                drawMesh(
-                    in: &context,
-                    size: size,
-                    palette: activeColors,
-                    timeSec: elapsedSec
-                )
+        Group {
+            if let fixedTime = fixedAnimationTime {
+                Canvas(opaque: true, rendersAsynchronously: true) { context, size in
+                    let activeColors = resolveActivePalettePure(at: Date())
+                    drawMesh(
+                        in: &context,
+                        size: size,
+                        palette: activeColors,
+                        timeSec: fixedTime
+                    )
+                }
+            } else {
+                // В реальном рантайме на iPhone рендерим статичный GPU-холст без 24 Hz TimelineView-таймера и без drawingGroup,
+                // чтобы ProMotion на iPhone 17 Pro Max всегда работал в честных 120 Hz без просадки частоты экрана до 24–30 FPS.
+                Canvas(opaque: true, rendersAsynchronously: true) { context, size in
+                    let activeColors = (crossfadeProgress > 0.001 && (nextPalette?.count ?? 0) >= 4)
+                        ? HarmonoidMeshEngine.lerpPalette(currentPalette, nextPalette!, progress: crossfadeProgress)
+                        : currentPalette
+                    drawMesh(
+                        in: &context,
+                        size: size,
+                        palette: activeColors,
+                        timeSec: 1.25
+                    )
+                }
+                .animation(.easeInOut(duration: 0.85), value: currentPalette)
             }
         }
-        .drawingGroup(opaque: true)
         .ignoresSafeArea()
         .onAppear {
             if !hasInitialized {
@@ -93,19 +103,6 @@ public struct HarmonoidMeshView: View {
                 transitionTargetPalette = currentPalette
                 hasInitialized = true
             }
-        }
-        .onChange(of: currentPalette) { _, newVal in
-            let now = Date()
-            let currentDisplayed = resolveActivePalettePure(at: now)
-            if HarmonoidMeshEngine.colorsNearlyEqual(currentDisplayed, newVal) {
-                transitionFromPalette = newVal
-                transitionTargetPalette = newVal
-                transitionStartTime = .distantPast
-                return
-            }
-            transitionFromPalette = currentDisplayed
-            transitionTargetPalette = newVal
-            transitionStartTime = now
         }
     }
 

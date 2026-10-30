@@ -78,26 +78,40 @@ public struct LyricsScreenView: View {
             }
             .offset(y: dragDismissOffset)
         }
+        .onChange(of: appState.currentLyricsDocument.lines.isEmpty) { isEmpty in
+            if isEmpty && !appState.isLoadingLyrics {
+                appState.isLyricsScreenPresented = false
+                dismiss()
+            }
+        }
+        .onChange(of: appState.isLoadingLyrics) { loading in
+            if !loading && appState.currentLyricsDocument.lines.isEmpty {
+                appState.isLyricsScreenPresented = false
+                dismiss()
+            }
+        }
     }
 
     private var swipeDownDismissGesture: some Gesture {
-        DragGesture(minimumDistance: 14, coordinateSpace: .global)
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .onChanged { value in
                 guard !isDraggingSlider else { return }
                 let dy = value.translation.height
                 let dx = abs(value.translation.width)
-                if dy > 0 && dy > dx * 1.1 {
+                if dy > 0 && dy > dx * 0.85 {
                     dragDismissOffset = dy * 0.85
                 }
             }
             .onEnded { value in
                 let dy = value.translation.height
                 let predictedY = value.predictedEndTranslation.height
-                if dy > 85 || predictedY > 160 {
+                if dy > 42 || predictedY > 95 {
+                    dragDismissOffset = 0
                     appState.haptics.softSelection()
+                    appState.isLyricsScreenPresented = false
                     dismiss()
                 } else {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                    withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
                         dragDismissOffset = 0
                     }
                 }
@@ -109,6 +123,7 @@ public struct LyricsScreenView: View {
     private var compactHeaderBar: some View {
         HStack(spacing: 12) {
             Button {
+                appState.isLyricsScreenPresented = false
                 dismiss()
             } label: {
                 Image(systemName: "chevron.down")
@@ -118,27 +133,37 @@ public struct LyricsScreenView: View {
                     .background(Color.white.opacity(0.10), in: Circle())
             }
 
-            ArtworkThumbnailView(
-                track: track,
-                localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
-                remoteURL: track?.remoteArtworkURL,
-                fallbackSeed: "\(track?.album ?? "")|\(track?.artist ?? "")",
-                cornerRadius: 10,
-                sizeTier: .listThumbnail
-            )
-            .frame(width: 44, height: 44)
+            Button {
+                appState.haptics.softSelection()
+                appState.isLyricsScreenPresented = false
+                dismiss()
+            } label: {
+                HStack(spacing: 12) {
+                    ArtworkThumbnailView(
+                        track: track,
+                        localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
+                        remoteURL: track?.remoteArtworkURL,
+                        fallbackSeed: "\(track?.album ?? "")|\(track?.artist ?? "")",
+                        cornerRadius: 10,
+                        sizeTier: .listThumbnail
+                    )
+                    .frame(width: 44, height: 44)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(track?.title ?? "Трек не выбран")
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(track?.title ?? "Трек не выбран")
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
 
-                Text(track?.artist ?? "")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.68))
-                    .lineLimit(1)
+                        Text(track?.artist ?? "")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .lineLimit(1)
+                    }
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
             Spacer(minLength: 4)
 
@@ -284,28 +309,23 @@ public struct LyricsScreenView: View {
     // MARK: - Bottom Compact Transport Bar (Reference Screenshot 2)
 
     private var bottomCompactTransportBar: some View {
-        let maxDur = max(1.0, appState.duration)
+        let effectiveDuration = appState.duration > 0 ? appState.duration : (track?.duration ?? 0.0)
+        let maxDur = max(1.0, effectiveDuration)
         let clampedPos = min(maxDur, max(0.0, displayedTime))
 
         return VStack(spacing: 12) {
             VStack(spacing: 6) {
-                Slider(
-                    value: Binding(
-                        get: { clampedPos },
-                        set: { newVal in
-                            isDraggingSlider = true
-                            draggedTime = newVal
-                        }
-                    ),
-                    in: 0...maxDur,
-                    onEditingChanged: { editing in
-                        if !editing {
-                            appState.seek(to: draggedTime)
-                            isDraggingSlider = false
-                        }
+                InteractiveSeekBarView(
+                    currentTime: clampedPos,
+                    duration: maxDur,
+                    accentColor: appState.accentSwiftUIColor,
+                    isDragging: $isDraggingSlider,
+                    draggedTime: $draggedTime,
+                    onCommitSeek: { targetSec in
+                        appState.haptics.softSelection()
+                        appState.seek(to: targetSec)
                     }
                 )
-                .tint(appState.accentSwiftUIColor)
 
                 HStack {
                     Text(FullScreenPlayerView.formatSeconds(clampedPos))
