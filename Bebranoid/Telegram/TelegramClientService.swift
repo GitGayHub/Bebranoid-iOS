@@ -533,7 +533,7 @@ public final class TelegramClientService: @unchecked Sendable {
                 hasLoadedInitialChatLists = false
             }
             setAuthStep(.unauthorized, rawState: stateType)
-            bridge.resetAfterClosed()
+            bridge.resetClient()
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 await self?.initializeAndRestoreSession()
@@ -846,9 +846,10 @@ public final class TelegramClientService: @unchecked Sendable {
     }
 
     public func resetTDLibSession() async {
-        bridge.resetAfterClosed()
-        try? FileManager.default.removeItem(at: storage.tdlibDatabaseDirectory)
-        try? FileManager.default.createDirectory(at: storage.tdlibDatabaseDirectory, withIntermediateDirectories: true)
+        bridge.resetClient()
+        let tdlibDir = storage.databaseDirectory.appendingPathComponent("tdlib", isDirectory: true)
+        try? FileManager.default.removeItem(at: tdlibDir)
+        try? FileManager.default.createDirectory(at: tdlibDir, withIntermediateDirectories: true)
         let qrFile = storage.databaseDirectory.appendingPathComponent("pending_qr_link.txt")
         try? FileManager.default.removeItem(at: qrFile)
         withLock {

@@ -486,7 +486,7 @@ public final class ArtworkService: @unchecked Sendable {
     }
 
     private func notifyArtworkResolved(trackId: String, albumName: String, fileURL: URL?) {
-        withLock { syncCoverPathCache.removeValue(forKey: trackId) }
+        _ = withLock { syncCoverPathCache.removeValue(forKey: trackId) }
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: .artworkDidResolve,
