@@ -311,7 +311,22 @@ public struct TelegramAuthView: View {
                             Text("TDLib: \(authVM.connectionState.rawValue)")
                                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                                 .foregroundStyle(.white.opacity(0.75))
+                            Spacer()
+                            Label("Anti-Ban защита активна", systemImage: "shield.lefthalf.filled.badge.checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.green)
                         }
+
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "network.badge.shield.half.filled")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(appState.accentSwiftUIColor)
+                            Text("Безопасный вход: сессия использует реальный профиль вашего iPhone без фонового спама запросов. Чтобы Telegram не сбрасывал новую сессию из-за подозрительного IP, рекомендуем отключить VPN на время входа.")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.white.opacity(0.78))
+                        }
+                        .padding(12)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
 
                         switch authVM.step {
                         case .unauthorized:
@@ -341,6 +356,24 @@ public struct TelegramAuthView: View {
                                 .padding(12)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.red.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+                        }
+
+                        if authVM.step != .authorized {
+                            Button {
+                                Task {
+                                    await appState.telegramClient.resetTDLibSession()
+                                    if !showPhoneLogin {
+                                        await authVM.requestQRLogin()
+                                    }
+                                }
+                            } label: {
+                                Label("Сбросить локальную базу TDLib (чистый вход)", systemImage: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.72))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 10)
+                                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                            }
                         }
                     }
                     .padding(20)

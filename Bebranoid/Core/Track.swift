@@ -15,7 +15,9 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
     public var messageId: Int?
     public var chatId: String?
     public var messageThreadId: Int?
+    public var fileId: String?
     public var fileUniqueId: String?
+    public var fileType: String?
     public var title: String
     public var artist: String
     public var album: String
@@ -40,7 +42,9 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
         messageId: Int? = nil,
         chatId: String? = nil,
         messageThreadId: Int? = nil,
+        fileId: String? = nil,
         fileUniqueId: String? = nil,
+        fileType: String? = nil,
         title: String,
         artist: String,
         album: String,
@@ -64,7 +68,9 @@ public struct Track: Identifiable, Codable, Hashable, Sendable {
         self.messageId = messageId
         self.chatId = chatId
         self.messageThreadId = messageThreadId
+        self.fileId = fileId
         self.fileUniqueId = fileUniqueId
+        self.fileType = fileType
         self.title = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Без названия" : title
         self.artist = artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Неизвестный исполнитель" : artist
         self.album = album.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Без альбома" : album

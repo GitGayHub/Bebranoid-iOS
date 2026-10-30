@@ -156,6 +156,7 @@ public struct TrackRowView: View {
 
     public var body: some View {
         let isCurrent = appState.currentTrack?.id == track.id
+        let downloadPct = appState.downloadProgress(for: track)
         let isCached = appState.cacheIndex.isCached(track)
         let isLiked = appState.isFavorite(track)
 
@@ -186,7 +187,14 @@ public struct TrackRowView: View {
                             .foregroundStyle(isCurrent ? appState.accentSwiftUIColor : .white)
                             .lineLimit(1)
 
-                        if isCached {
+                        if let pct = downloadPct {
+                            Text("⏳ \(pct)%")
+                                .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(appState.accentSwiftUIColor.opacity(0.24), in: Capsule())
+                                .foregroundStyle(appState.accentSwiftUIColor)
+                        } else if isCached {
                             Image(systemName: "arrow.down.circle.fill")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.white.opacity(0.50))
@@ -202,10 +210,17 @@ public struct TrackRowView: View {
                         }
                     }
 
-                    Text("\(track.artist) • \(track.album)")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.62))
-                        .lineLimit(1)
+                    if let pct = downloadPct {
+                        Text("Загрузка аудио: \(pct)% • \(track.artist)")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(appState.accentSwiftUIColor)
+                            .lineLimit(1)
+                    } else {
+                        Text("\(track.artist) • \(track.album)")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.62))
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer(minLength: 4)

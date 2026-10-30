@@ -68,8 +68,8 @@ public struct HarmonoidMeshView: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: isReducedMotion ? (1.0 / 15.0) : (1.0 / 30.0), paused: fixedAnimationTime != nil)) { timeline in
-            Canvas { context, size in
+        TimelineView(.animation(minimumInterval: isReducedMotion ? (1.0 / 12.0) : (1.0 / 24.0), paused: fixedAnimationTime != nil)) { timeline in
+            Canvas(opaque: true, rendersAsynchronously: true) { context, size in
                 let elapsedSec = SharedMeshMotionClock.shared.sampleSeconds(
                     at: timeline.date,
                     paused: false,
@@ -85,6 +85,7 @@ public struct HarmonoidMeshView: View {
                 )
             }
         }
+        .drawingGroup(opaque: true)
         .ignoresSafeArea()
         .onAppear {
             if !hasInitialized {

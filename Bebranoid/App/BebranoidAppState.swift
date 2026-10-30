@@ -86,12 +86,42 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var isTranslatingLyrics: Bool = false
 
     // MARK: - Library & Collections State
-    @Published public var libraryState: UserLibraryPersistentState
-    @Published public var trackSortField: TrackSortField = .recent
-    @Published public var trackSortAscending: Bool = false
-    @Published public var showOnlyCachedTracks: Bool = false
-    @Published public var showHiddenAlbums: Bool = false
-    @Published public var searchQuery: String = ""
+    @Published public var libraryState: UserLibraryPersistentState {
+        didSet { invalidateLibraryCaches() }
+    }
+    @Published public var trackSortField: TrackSortField = .recent {
+        didSet { _cachedFilteredTracks = nil }
+    }
+    @Published public var trackSortAscending: Bool = false {
+        didSet { _cachedFilteredTracks = nil }
+    }
+    @Published public var showOnlyCachedTracks: Bool = false {
+        didSet { _cachedFilteredTracks = nil }
+    }
+    @Published public var showHiddenAlbums: Bool = false {
+        didSet { _cachedAlbums = nil }
+    }
+    @Published public var searchQuery: String = "" {
+        didSet { _cachedFilteredTracks = nil }
+    }
+    @Published public var trackDownloadProgress: [String: Int] = [:]
+
+    private var _cachedFilteredTracks: [Track]?
+    private var _cachedAlbums: [Album]?
+    private var _cachedArtists: [ArtistSummary]?
+    private var _cachedPlaylists: [Playlist]?
+
+    public func invalidateLibraryCaches() {
+        _cachedFilteredTracks = nil
+        _cachedAlbums = nil
+        _cachedArtists = nil
+        _cachedPlaylists = nil
+    }
+
+    public func downloadProgress(for track: Track?) -> Int? {
+        guard let track else { return nil }
+        return trackDownloadProgress[track.cacheKey] ?? trackDownloadProgress[track.id]
+    }
 
     // MARK: - Navigation & Modal Presentation State
     @Published public var selectedTab: Int = 0
@@ -179,6 +209,22 @@ public final class BebranoidAppState: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .trackDownloadProgressDidChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let self,
+                      let cacheKey = note.userInfo?["cacheKey"] as? String else { return }
+                if let pct = note.userInfo?["percent"] as? Int {
+                    if self.trackDownloadProgress[cacheKey] != pct {
+                        self.trackDownloadProgress[cacheKey] = pct
+                    }
+                } else {
+                    self.trackDownloadProgress.removeValue(forKey: cacheKey)
+                    self.invalidateLibraryCaches()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     public var accentSwiftUIColor: Color {
@@ -209,7 +255,18 @@ public final class BebranoidAppState: ObservableObject {
             .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] time in
-                self?.currentTime = time
+                guard let self else { return }
+                let minDelta: Double
+                if self.isLyricsScreenPresented {
+                    minDelta = 0.032 // ~30 Hz для караоке-лирики
+                } else if self.isFullScreenPlayerPresented {
+                    minDelta = 0.10 // 10 Hz для плавного слайдера в полноэкранном плеере
+                } else {
+                    minDelta = 0.25 // 4 Hz для мини-плеера (ноль лагов при 120 Hz скролле списков)
+                }
+                if abs(time - self.currentTime) >= minDelta || time < 0.05 {
+                    self.currentTime = time
+                }
             }
             .store(in: &cancellables)
 
@@ -689,6 +746,9 @@ public final class BebranoidAppState: ObservableObject {
     }
 
     public var filteredAndSortedTracks: [Track] {
+        if let cached = _cachedFilteredTracks {
+            return cached
+        }
         var result = libraryState.tracks
 
         if showOnlyCachedTracks {
@@ -728,10 +788,14 @@ public final class BebranoidAppState: ObservableObject {
             return trackSortAscending ? !comparison : comparison
         }
 
+        _cachedFilteredTracks = result
         return result
     }
 
     public var computedAlbums: [Album] {
+        if let cached = _cachedAlbums {
+            return cached
+        }
         var albums: [Album] = []
 
         // 1. Виртуальный альбом «Любимые» всегда первый (`src/views/Albums.jsx`)
@@ -787,17 +851,26 @@ public final class BebranoidAppState: ObservableObject {
             )
         }
 
+        _cachedAlbums = albums
         return albums
     }
 
     public var computedArtists: [ArtistSummary] {
-        ArtistSplitter.buildArtistSummaries(
+        if let cached = _cachedArtists {
+            return cached
+        }
+        let result = ArtistSplitter.buildArtistSummaries(
             tracks: libraryState.tracks,
             favoriteArtistKeys: libraryState.favoriteArtistKeys
         )
+        _cachedArtists = result
+        return result
     }
 
     public var allPlaylistsWithRecent30: [Playlist] {
+        if let cached = _cachedPlaylists {
+            return cached
+        }
         let recentTracks = Array(
             libraryState.tracks
                 .sorted { ($0.messageId ?? 0) > ($1.messageId ?? 0) }
@@ -811,7 +884,9 @@ public final class BebranoidAppState: ObservableObject {
             tracksSnapshot: recentTracks,
             customCoverPath: recentTracks.first?.coverPath
         )
-        return [recentAuto] + libraryState.playlists
+        let result = [recentAuto] + libraryState.playlists
+        _cachedPlaylists = result
+        return result
     }
 
     public func toggleAlbumHidden(_ albumName: String) {
@@ -904,7 +979,10 @@ public final class BebranoidAppState: ObservableObject {
         isTelegramAuthPresented = false
         await telegramClient.refreshAuthorizedUserProfile()
         let hasExistingTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
-        await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
+        let hasConfiguredChat = !libraryState.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !hasExistingTelegramTracks || !hasConfiguredChat {
+            await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
+        }
         if let pendingTrack = currentTrack, pendingTrack.sourceKind == .telegram, !isPlaying {
             startPlayingCurrentIndex(autoPlay: true)
         }

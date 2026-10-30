@@ -48,8 +48,8 @@ public final class DualStreamAudioEngine: ObservableObject {
 
     private var primaryAudioFile: AVAudioFile?
     private var secondaryAudioFile: AVAudioFile?
-    private var primaryStartFrameOffset: AVAudioFramePosition = 0
-    private var secondaryStartFrameOffset: AVAudioFramePosition = 0
+    private var primaryStartTimeOffset: Double = 0
+    private var secondaryStartTimeOffset: Double = 0
 
     private var activeTrack: Track?
     private var crossfadingNextTrack: Track?
@@ -142,14 +142,14 @@ public final class DualStreamAudioEngine: ObservableObject {
             let sr = audioFile.processingFormat.sampleRate
             let totalFrames = audioFile.length
             let computedDuration = sr > 0 ? Double(totalFrames) / sr : inspected.duration
-            duration = max(computedDuration, track.duration)
+            duration = computedDuration > 0.5 ? computedDuration : max(computedDuration, track.duration)
 
             ensureEngineRunning()
             primaryDeck.playerNode.stop()
 
             let clampedStart = max(0.0, min(timeSec, max(0.0, duration - 0.05)))
             let startFrame = AVAudioFramePosition(clampedStart * sr)
-            primaryStartFrameOffset = startFrame
+            primaryStartTimeOffset = clampedStart
             let remainingFrames = AVAudioFrameCount(max(0, totalFrames - startFrame))
 
             if remainingFrames > 0 {
@@ -158,8 +158,19 @@ public final class DualStreamAudioEngine: ObservableObject {
                     startingFrame: startFrame,
                     frameCount: remainingFrames,
                     at: nil,
-                    completionHandler: nil
-                )
+                    completionCallbackType: .dataPlayedBack
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self,
+                              self.scheduleGeneration == currentGen,
+                              self.isPlaying,
+                              !self.isCrossfading else { return }
+                        if self.duration > 0 && (self.duration - self.currentTime) < max(4.0, self.duration * 0.08) {
+                            self.isPlaying = false
+                            self.onTrackNaturallyEnded?()
+                        }
+                    }
+                }
             }
 
             applyFXToBothDecks()
@@ -220,8 +231,10 @@ public final class DualStreamAudioEngine: ObservableObject {
         let remainingFrames = AVAudioFrameCount(max(0, audioFile.length - startFrame))
 
         let wasPlaying = isPlaying
+        scheduleGeneration &+= 1
+        let currentGen = scheduleGeneration
         primaryDeck.playerNode.stop()
-        primaryStartFrameOffset = startFrame
+        primaryStartTimeOffset = clamped
 
         if remainingFrames > 0 {
             primaryDeck.playerNode.scheduleSegment(
@@ -229,8 +242,19 @@ public final class DualStreamAudioEngine: ObservableObject {
                 startingFrame: startFrame,
                 frameCount: remainingFrames,
                 at: nil,
-                completionHandler: nil
-            )
+                completionCallbackType: .dataPlayedBack
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.scheduleGeneration == currentGen,
+                          self.isPlaying,
+                          !self.isCrossfading else { return }
+                    if self.duration > 0 && (self.duration - self.currentTime) < max(4.0, self.duration * 0.08) {
+                        self.isPlaying = false
+                        self.onTrackNaturallyEnded?()
+                    }
+                }
+            }
         }
 
         smoothClock.forceSetTime(clamped)
@@ -261,7 +285,7 @@ public final class DualStreamAudioEngine: ObservableObject {
         }
 
         secondaryAudioFile = nextFile
-        secondaryStartFrameOffset = 0
+        secondaryStartTimeOffset = 0
         crossfadingNextTrack = nextItem.track
         crossfadeStartWallTime = ProcessInfo.processInfo.systemUptime
         isCrossfading = true
@@ -300,7 +324,7 @@ public final class DualStreamAudioEngine: ObservableObject {
         activeDeckIsA.toggle()
 
         primaryAudioFile = promotedFile
-        primaryStartFrameOffset = 0
+        primaryStartTimeOffset = 0
         secondaryAudioFile = nil
         crossfadingNextTrack = nil
         isCrossfading = false
@@ -354,18 +378,18 @@ public final class DualStreamAudioEngine: ObservableObject {
 
     private func readHardwareTime(forPrimary: Bool) -> Double {
         let deck = forPrimary ? primaryDeck : secondaryDeck
-        let file = forPrimary ? primaryAudioFile : secondaryAudioFile
-        let offset = forPrimary ? primaryStartFrameOffset : secondaryStartFrameOffset
+        let offsetSec = forPrimary ? primaryStartTimeOffset : secondaryStartTimeOffset
 
-        guard let audioFile = file,
-              let nodeTime = deck.playerNode.lastRenderTime,
-              let playerTime = deck.playerNode.playerTime(forNodeTime: nodeTime) else {
+        guard let nodeTime = deck.playerNode.lastRenderTime,
+              let playerTime = deck.playerNode.playerTime(forNodeTime: nodeTime),
+              playerTime.sampleRate > 0 else {
             return currentTime
         }
-        let sr = audioFile.processingFormat.sampleRate
-        guard sr > 0 else { return currentTime }
-        let framePos = offset + playerTime.sampleTime
-        return max(0.0, Double(framePos) / sr)
+        let playedSeconds = Double(playerTime.sampleTime) / playerTime.sampleRate
+        guard playedSeconds.isFinite && playedSeconds >= 0 else {
+            return max(0.0, offsetSec)
+        }
+        return max(0.0, offsetSec + playedSeconds)
     }
 
     private func handleClockTick(_ time: Double) {

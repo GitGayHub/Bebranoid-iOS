@@ -45,10 +45,10 @@ public struct ArtworkThumbnailView: View {
     }
 
     private var effectiveLocalPath: String? {
-        if let resolvedLocalPath, ArtworkService.shared.isValidImageFile(atPath: resolvedLocalPath) {
+        if let resolvedLocalPath, !resolvedLocalPath.isEmpty {
             return resolvedLocalPath
         }
-        if let localPath, ArtworkService.shared.isValidImageFile(atPath: localPath) {
+        if let localPath, !localPath.isEmpty, ArtworkService.shared.isValidImageFile(atPath: localPath) {
             return localPath
         }
         if let track,

@@ -597,15 +597,18 @@ public final class YouTubeService: @unchecked Sendable {
         for track: Track,
         destinationURL: URL,
         partialURL: URL,
-        preemptionToken: DownloadPreemptionToken
+        preemptionToken: DownloadPreemptionToken,
+        onProgress: (@Sendable (Int) -> Void)? = nil
     ) async throws -> URL {
         guard let videoId = track.youtubeVideoId, !videoId.isEmpty else {
             throw NSError(domain: "YouTubeService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Отсутствует videoId у YouTube-трека"])
         }
 
+        onProgress?(1)
         try preemptionToken.throwIfPreempted(key: track.cacheKey)
         let streamURL = try await resolveAudioStreamURL(videoId: videoId)
         try preemptionToken.throwIfPreempted(key: track.cacheKey)
+        onProgress?(3)
 
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: partialURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -671,8 +674,13 @@ public final class YouTubeService: @unchecked Sendable {
                 try handle.seek(toOffset: UInt64(offset))
                 try handle.write(contentsOf: data)
                 offset += Int64(data.count)
+                if total > 0 {
+                    let pct = min(99, max(1, Int((Double(offset) / Double(total)) * 100.0)))
+                    onProgress?(pct)
+                }
             }
             try handle.close()
+            onProgress?(100)
         } catch {
             try? handle.close()
             if offset == 0 {

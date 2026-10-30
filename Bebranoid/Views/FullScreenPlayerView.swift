@@ -15,6 +15,7 @@ public struct FullScreenPlayerView: View {
 
     @State private var isDraggingSlider: Bool = false
     @State private var draggedTime: Double = 0.0
+    @State private var dragDismissOffset: CGFloat = 0.0
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
@@ -26,6 +27,10 @@ public struct FullScreenPlayerView: View {
 
     private var displayedTime: Double {
         isDraggingSlider ? draggedTime : appState.currentTime
+    }
+
+    private var activeDownloadPercent: Int? {
+        appState.downloadProgress(for: track)
     }
 
     public var body: some View {
@@ -53,15 +58,37 @@ public struct FullScreenPlayerView: View {
 
                     // Большая квадратная обложка альбома
                     let coverSide = min(geo.size.width - 48, geo.size.height * 0.43)
-                    ArtworkThumbnailView(
-                        track: track,
-                        localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
-                        remoteURL: track?.remoteArtworkURL,
-                        fallbackSeed: "\(track?.album ?? "")|\(track?.artist ?? "")",
-                        cornerRadius: 28,
-                        sizeTier: .fullPlayer
-                    )
-                    .frame(width: coverSide, height: coverSide)
+                    ZStack(alignment: .bottom) {
+                        ArtworkThumbnailView(
+                            track: track,
+                            localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
+                            remoteURL: track?.remoteArtworkURL,
+                            fallbackSeed: "\(track?.album ?? "")|\(track?.artist ?? "")",
+                            cornerRadius: 28,
+                            sizeTier: .fullPlayer
+                        )
+                        .frame(width: coverSide, height: coverSide)
+
+                        if let pct = activeDownloadPercent {
+                            VStack(spacing: 6) {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                        .tint(.white)
+                                    Text("Загрузка трека: \(pct)%")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.white)
+                                }
+                                ProgressView(value: Double(max(1, min(100, pct))), total: 100.0)
+                                    .tint(appState.accentSwiftUIColor)
+                                    .frame(width: coverSide * 0.68)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .padding(.bottom, 14)
+                        }
+                    }
                     .scaleEffect(appState.isPlaying ? 1.0 : 0.93)
                     .shadow(color: Color.black.opacity(0.48), radius: 28, x: 0, y: 16)
                     .animation(.spring(response: 0.45, dampingFraction: 0.78), value: appState.isPlaying)
@@ -92,6 +119,9 @@ public struct FullScreenPlayerView: View {
                         .padding(.horizontal, 24)
                         .padding(.bottom, max(18, geo.safeAreaInsets.bottom > 0 ? 12 : 22))
                 }
+                .offset(y: dragDismissOffset)
+                .contentShape(Rectangle())
+                .simultaneousGesture(swipeDownDismissGesture)
             }
         }
         .sheet(isPresented: $appState.isQueueSheetPresented) {
@@ -112,6 +142,34 @@ public struct FullScreenPlayerView: View {
         .fullScreenCover(isPresented: $appState.isLyricsScreenPresented) {
             LyricsScreenView(appState: appState)
         }
+    }
+
+    private var swipeDownDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 16, coordinateSpace: .global)
+            .onChanged { value in
+                guard !isDraggingSlider else { return }
+                let dy = value.translation.height
+                let dx = abs(value.translation.width)
+                if dy > 0 && dy > dx * 1.15 {
+                    dragDismissOffset = dy * 0.85
+                }
+            }
+            .onEnded { value in
+                guard !isDraggingSlider else {
+                    dragDismissOffset = 0
+                    return
+                }
+                let dy = value.translation.height
+                let predictedY = value.predictedEndTranslation.height
+                if dy > 80 || predictedY > 150 {
+                    appState.haptics.softSelection()
+                    dismiss()
+                } else {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                        dragDismissOffset = 0
+                    }
+                }
+            }
     }
 
     // MARK: - Subviews

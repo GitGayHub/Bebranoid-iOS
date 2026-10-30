@@ -12,6 +12,7 @@ public struct LyricsScreenView: View {
 
     @State private var isDraggingSlider: Bool = false
     @State private var draggedTime: Double = 0.0
+    @State private var dragDismissOffset: CGFloat = 0.0
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
@@ -41,10 +42,18 @@ public struct LyricsScreenView: View {
             )
 
             VStack(spacing: 0) {
+                Capsule()
+                    .fill(Color.white.opacity(0.32))
+                    .frame(width: 40, height: 5)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+
                 compactHeaderBar
                     .padding(.horizontal, 20)
-                    .padding(.top, 10)
+                    .padding(.top, 6)
                     .padding(.bottom, 10)
+                    .contentShape(Rectangle())
+                    .gesture(swipeDownDismissGesture)
 
                 // Основная область текстов
                 lyricsContentBody
@@ -67,7 +76,32 @@ public struct LyricsScreenView: View {
                         )
                     )
             }
+            .offset(y: dragDismissOffset)
         }
+    }
+
+    private var swipeDownDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 14, coordinateSpace: .global)
+            .onChanged { value in
+                guard !isDraggingSlider else { return }
+                let dy = value.translation.height
+                let dx = abs(value.translation.width)
+                if dy > 0 && dy > dx * 1.1 {
+                    dragDismissOffset = dy * 0.85
+                }
+            }
+            .onEnded { value in
+                let dy = value.translation.height
+                let predictedY = value.predictedEndTranslation.height
+                if dy > 85 || predictedY > 160 {
+                    appState.haptics.softSelection()
+                    dismiss()
+                } else {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                        dragDismissOffset = 0
+                    }
+                }
+            }
     }
 
     // MARK: - Compact Header
@@ -85,10 +119,12 @@ public struct LyricsScreenView: View {
             }
 
             ArtworkThumbnailView(
+                track: track,
                 localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
                 remoteURL: track?.remoteArtworkURL,
                 fallbackSeed: "\(track?.album ?? "")|\(track?.artist ?? "")",
-                cornerRadius: 10
+                cornerRadius: 10,
+                sizeTier: .listThumbnail
             )
             .frame(width: 44, height: 44)
 

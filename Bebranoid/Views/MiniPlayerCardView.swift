@@ -12,7 +12,13 @@ public struct MiniPlayerCardView: View {
 
     public var body: some View {
         if let track = appState.currentTrack {
-            let progress = appState.duration > 0 ? min(1.0, max(0.0, appState.currentTime / appState.duration)) : 0.0
+            let downloadPct = appState.downloadProgress(for: track)
+            let progress: Double = {
+                if let pct = downloadPct {
+                    return min(1.0, max(0.02, Double(pct) / 100.0))
+                }
+                return appState.duration > 0 ? min(1.0, max(0.0, appState.currentTime / appState.duration)) : 0.0
+            }()
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
@@ -33,21 +39,37 @@ public struct MiniPlayerCardView: View {
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
 
-                            let badge = appState.currentQualityBadge
-                            if badge.tier == .hiRes || badge.tier == .lossless {
-                                Text(badge.tier == .hiRes ? "Hi-Res" : "Lossless")
-                                    .font(.system(size: 9, weight: .heavy, design: .rounded))
-                                    .padding(.horizontal, 5)
+                            if let pct = downloadPct {
+                                Text("\(pct)%")
+                                    .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                                    .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(appState.accentSwiftUIColor.opacity(0.24), in: Capsule())
+                                    .background(appState.accentSwiftUIColor.opacity(0.28), in: Capsule())
                                     .foregroundStyle(appState.accentSwiftUIColor)
+                            } else {
+                                let badge = appState.currentQualityBadge
+                                if badge.tier == .hiRes || badge.tier == .lossless {
+                                    Text(badge.tier == .hiRes ? "Hi-Res" : "Lossless")
+                                        .font(.system(size: 9, weight: .heavy, design: .rounded))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(appState.accentSwiftUIColor.opacity(0.24), in: Capsule())
+                                        .foregroundStyle(appState.accentSwiftUIColor)
+                                }
                             }
                         }
 
-                        Text(track.artist)
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.68))
-                            .lineLimit(1)
+                        if let pct = downloadPct {
+                            Text("Загрузка \(pct)% • \(track.artist)")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundStyle(appState.accentSwiftUIColor)
+                                .lineLimit(1)
+                        } else {
+                            Text(track.artist)
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.68))
+                                .lineLimit(1)
+                        }
                     }
 
                     Spacer(minLength: 4)
@@ -62,15 +84,21 @@ public struct MiniPlayerCardView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        appState.togglePlayPause()
-                    } label: {
-                        Image(systemName: appState.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 19, weight: .bold))
-                            .foregroundStyle(.white)
+                    if downloadPct != nil {
+                        ProgressView()
+                            .tint(appState.accentSwiftUIColor)
                             .frame(width: 36, height: 36)
+                    } else {
+                        Button {
+                            appState.togglePlayPause()
+                        } label: {
+                            Image(systemName: appState.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 19, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 36, height: 36)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
 
                     Button {
                         appState.skipToNext(isManualUserAction: true)
