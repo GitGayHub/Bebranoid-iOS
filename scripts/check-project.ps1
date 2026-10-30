@@ -1,24 +1,11 @@
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
-$iosRoot = Join-Path $repoRoot "ios"
+$repoRoot = Resolve-Path (Join-Path $scriptDir "..")
 
-Write-Host "=== Bebranoid iOS -- Local Project and Swift Static Check ===" -ForegroundColor Cyan
+Write-Host "=== Bebranoid iOS -- Standalone Project & Swift Static Check ===" -ForegroundColor Cyan
 
-# 1. Verify Windows/Electron files are untouched relative to master commit d98c88d14a1c66f5d9907551521347d52aa187a6
-Push-Location $repoRoot
-try {
-    $changedOutsideIos = git diff --name-only d98c88d14a1c66f5d9907551521347d52aa187a6 -- src electron package.json
-    if ($changedOutsideIos) {
-        Write-Error "Windows/Electron files were modified: $changedOutsideIos"
-    }
-    Write-Host "  [PASS] Windows/Electron source tree (src/, electron/, package.json) is 100% untouched." -ForegroundColor Green
-} finally {
-    Pop-Location
-}
-
-# 2. Check all Swift files for balanced braces, non-empty content, and single unguarded @main
-$swiftFiles = Get-ChildItem -Path (Join-Path $iosRoot "Bebranoid"), (Join-Path $iosRoot "Tests") -Recurse -Filter "*.swift"
+# 1. Check all Swift files for non-empty content and single unguarded @main
+$swiftFiles = Get-ChildItem -Path (Join-Path $repoRoot "Bebranoid"), (Join-Path $repoRoot "Tests") -Recurse -Filter "*.swift"
 $unguardedMainFiles = @()
 
 foreach ($file in $swiftFiles) {
@@ -36,13 +23,13 @@ if ($unguardedMainFiles.Count -ne 1) {
 }
 Write-Host ("  [PASS] Checked {0} Swift files (single @main entry point verified)." -f $swiftFiles.Count) -ForegroundColor Green
 
-# 3. Run Cross-Platform Parity and Integrity Suite
+# 2. Run Standalone Parity and Security Suite
 node (Join-Path $scriptDir "verify-parity.mjs")
 if ($LASTEXITCODE -ne 0) {
     Write-Error "verify-parity.mjs failed."
 }
 
-# 4. Run 7-Fixture HarmonoidMeshBackground Parity Suite
+# 3. Run 7-Fixture HarmonoidMeshBackground Parity Suite
 node (Join-Path $scriptDir "verify-mesh-fixtures.mjs")
 if ($LASTEXITCODE -ne 0) {
     Write-Error "verify-mesh-fixtures.mjs failed."

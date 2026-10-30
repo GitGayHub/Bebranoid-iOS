@@ -1,35 +1,34 @@
 #!/usr/bin/env node
 /**
- * Bebranoid iOS — HarmonoidMeshBackground 1:1 Reference Fixtures Parity Verifier
+ * Bebranoid iOS — HarmonoidMeshBackground 1:1 Cross-Language Parity Verifier (JS Reference ↔ Real Swift Execution)
  *
- * Compares the exact JS implementation from `src/components/HarmonoidMeshBackground.jsx`
- * against the Swift implementation in `ios/Bebranoid/MeshBackground/HarmonoidMeshEngine.swift`
- * across all 7 required 64×64 RGBA cover fixtures:
- *   1. solid            — Однотонная обложка
- *   2. bw               — Чёрно-белая обложка
- *   3. dark-red         — Тёмная обложка с ярким красным акцентом
- *   4. vivid            — Яркая многоцветная обложка
- *   5. pastel           — Пастельная обложка
- *   6. transparent      — Прозрачная обложка
- *   7. neutral          — Обложка с преобладанием нейтральных цветов
+ * Compares the reference JS implementation from `HarmonoidMeshBackground.jsx`
+ * against the Swift implementation in `Bebranoid/MeshBackground/HarmonoidMeshEngine.swift`
+ * across:
+ *   - Color & math primitives (`luminance`, `chroma`, `rgbToHsv`, `hsvToRgb`, `toMeshTint`, `ensureReadableAccent`)
+ *   - All 7 required 64×64 RGBA cover fixtures (`solid`, `bw`, `dark-red`, `vivid`, `pastel`, `transparent`, `neutral`)
+ *   - `smoothstep` and `lerpPalette` across `p = 0.0, 0.25, 0.50, 0.75, 1.0`
+ *   - 4 blob trajectories & dynamic radii across `t = 0.0, 3.5, 7.0, 10.0`
  *
- * Outputs:
- *   - `ios/docs/mesh-parity-report.json`
- *   - `ios/docs/MESH_PARITY_TABLE.md`
+ * When `swiftc` is available (mandatory with `--require-swift` on macOS CI), compiles and executes
+ * the real Swift files (`HarmonoidMeshEngine.swift` + `HarmonoidMeshFixtures.swift` + `scripts/dump-mesh-swift.swift`)
+ * and verifies numerical equivalence between JS and Swift outputs.
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const repoRoot = path.resolve(__dirname, "..", "..");
-const iosRoot = path.resolve(repoRoot, "ios");
+const iosRoot = path.resolve(__dirname, "..");
+const requireSwift = process.argv.includes("--require-swift");
 
 // ============================================================================
-// 1. Original JS Reference from `src/components/HarmonoidMeshBackground.jsx`
+// 1. Standalone Reference Implementation (from `HarmonoidMeshBackground.jsx`)
 // ============================================================================
 
 const DEFAULT_PALETTE = [
@@ -39,6 +38,10 @@ const DEFAULT_PALETTE = [
   { r: 24, g: 20, b: 40 },
 ];
 const DEFAULT_UI_ACCENT = { r: 96, g: 165, b: 250 };
+
+function clamp(v, minVal, maxVal) {
+  return Math.min(maxVal, Math.max(minVal, v));
+}
 
 function luminance(r, g, b) {
   const rs = r / 255;
@@ -214,6 +217,25 @@ function pickAccentFromPalette(palette) {
   return ensureReadableAccent(raw);
 }
 
+function smoothstep(edge0, edge1, x) {
+  const p = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return p * p * (3 - 2 * p);
+}
+
+function lerpColor(a, b, t) {
+  const c = clamp(t, 0, 1);
+  return {
+    r: Math.round(a.r + (b.r - a.r) * c),
+    g: Math.round(a.g + (b.g - a.g) * c),
+    b: Math.round(a.b + (b.b - a.b) * c),
+  };
+}
+
+function lerpPalette(fromPal, toPal, progress) {
+  const e = smoothstep(0, 1, progress);
+  return [0, 1, 2, 3].map((idx) => lerpColor(fromPal[idx], toPal[idx], e));
+}
+
 const CONTROL_POINTS = [
   { bx: 0.15, by: 0.20, ax: 0.18, ay: 0.16, sx: 0.70, sy: 0.90, p: 0.0 },
   { bx: 0.85, by: 0.18, ax: 0.16, ay: 0.20, sx: 0.85, sy: 1.10, p: 1.3 },
@@ -221,7 +243,20 @@ const CONTROL_POINTS = [
   { bx: 0.82, by: 0.85, ax: 0.17, ay: 0.18, sx: 0.95, sy: 1.00, p: 3.4 },
 ];
 
-function jsComputeMeshFrame(palette, width = 430, height = 932, timeSec = 10.0) {
+function jsComputeBlobs(meshColors, timeSec, width = 430, height = 932) {
+  const speed = 0.45;
+  const maxDim = Math.max(width, height);
+  return CONTROL_POINTS.map((p, i) => ({
+    index: i,
+    x: Number(((p.bx + Math.sin(timeSec * speed * p.sx + p.p) * p.ax) * width).toFixed(4)),
+    y: Number(((p.by + Math.cos(timeSec * speed * p.sy + p.p * 0.8) * p.ay) * height).toFixed(4)),
+    radius: Number((maxDim * (0.55 + 0.08 * Math.sin(timeSec * 0.35 + i))).toFixed(4)),
+    composite: i === 0 ? "source-over" : "lighter",
+    color: meshColors[i],
+  }));
+}
+
+function jsComputeMeshFrame(palette, width = 430, height = 932) {
   const meshColors = mapPaletteToMeshColors(palette);
   const uiAccent = pickAccentFromPalette(palette);
   const c0 = meshColors[0];
@@ -230,20 +265,20 @@ function jsComputeMeshFrame(palette, width = 430, height = 932, timeSec = 10.0) 
     g: Math.max(4, Math.floor(c0.g * 0.35)),
     b: Math.max(6, Math.floor(c0.b * 0.40)),
   };
-  const speed = 0.45;
-  const maxDim = Math.max(width, height);
-  const blobs = CONTROL_POINTS.map((p, i) => ({
-    x: Number(((p.bx + Math.sin(timeSec * speed * p.sx + p.p) * p.ax) * width).toFixed(4)),
-    y: Number(((p.by + Math.cos(timeSec * speed * p.sy + p.p * 0.8) * p.ay) * height).toFixed(4)),
-    radius: Number((maxDim * (0.55 + 0.08 * Math.sin(timeSec * 0.35 + i))).toFixed(4)),
-    composite: i === 0 ? "source-over" : "lighter",
-    color: meshColors[i],
-  }));
-  return { rawPalette: palette, meshColors, uiAccent, fillBase, blobs };
+  return {
+    rawPalette: palette,
+    meshColors,
+    uiAccent,
+    fillBase,
+    blobsAtT0: jsComputeBlobs(meshColors, 0.0, width, height),
+    blobsAtT3_5: jsComputeBlobs(meshColors, 3.5, width, height),
+    blobsAtT7_0: jsComputeBlobs(meshColors, 7.0, width, height),
+    blobsAtT10_0: jsComputeBlobs(meshColors, 10.0, width, height),
+  };
 }
 
 // ============================================================================
-// 2. Deterministic 7 Reference 64×64 RGBA Fixtures (identical to HarmonoidMeshFixtures.swift)
+// 2. Deterministic 7 Reference 64×64 RGBA Fixtures
 // ============================================================================
 
 const FIXTURE_KINDS = [
@@ -313,50 +348,151 @@ function makeRGBA64x64(kind) {
 }
 
 // ============================================================================
-// 3. Verify Swift Source Code (`HarmonoidMeshEngine.swift`, `HarmonoidMeshShader.metal`, `HarmonoidMeshView.swift`)
+// 3. Execute Real Swift Code (`swiftc`) When Available
+// ============================================================================
+
+function tryRunRealSwiftEngine() {
+  const probe = spawnSync("swiftc", ["--version"], { encoding: "utf8" });
+  if (probe.status !== 0) {
+    if (requireSwift) {
+      throw new Error("`--require-swift` was specified, but `swiftc` is not available in PATH.");
+    }
+    return null;
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bebranoid-mesh-"));
+  const tmpBin = path.join(
+    tmpDir,
+    `bebranoid-mesh-dump${process.platform === "win32" ? ".exe" : ""}`
+  );
+  const engineFile = path.join(iosRoot, "Bebranoid", "MeshBackground", "HarmonoidMeshEngine.swift");
+  const fixturesFile = path.join(iosRoot, "Bebranoid", "MeshBackground", "HarmonoidMeshFixtures.swift");
+  const dumpScriptFile = path.join(iosRoot, "scripts", "dump-mesh-swift.swift");
+  const mainSwiftFile = path.join(tmpDir, "main.swift");
+  fs.copyFileSync(dumpScriptFile, mainSwiftFile);
+
+  const compileRes = spawnSync("swiftc", [engineFile, fixturesFile, mainSwiftFile, "-o", tmpBin], {
+    encoding: "utf8",
+  });
+  if (compileRes.status !== 0) {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    throw new Error(`Failed to compile Swift HarmonoidMeshEngine CLI:\n${compileRes.stderr || compileRes.stdout}`);
+  }
+
+  const runRes = spawnSync(tmpBin, [], { encoding: "utf8" });
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch {}
+
+  if (runRes.status !== 0) {
+    throw new Error(`Failed to run Swift HarmonoidMeshEngine CLI:\n${runRes.stderr || runRes.stdout}`);
+  }
+
+  return JSON.parse(runRes.stdout);
+}
+
+const swiftDump = tryRunRealSwiftEngine();
+
+// ============================================================================
+// 4. Verify Source Invariants & Compare JS Reference vs Real Swift Output
 // ============================================================================
 
 const swiftEngineCode = fs.readFileSync(path.join(iosRoot, "Bebranoid/MeshBackground/HarmonoidMeshEngine.swift"), "utf8");
 const metalShaderCode = fs.readFileSync(path.join(iosRoot, "Bebranoid/MeshBackground/HarmonoidMeshShader.metal"), "utf8");
 const swiftViewCode = fs.readFileSync(path.join(iosRoot, "Bebranoid/MeshBackground/HarmonoidMeshView.swift"), "utf8");
 
-const requiredEngineInvariants = [
-  ["DEFAULT_PALETTE [20,30,50]..[24,20,40]", "MeshRGB(20, 30, 50)"],
-  ["DEFAULT_UI_ACCENT rgb(96, 165, 250)", "MeshRGB(96, 165, 250)"],
-  ["Downscale 64×64", "public static let analysisDimension: Int = 64"],
-  ["10-degree hue buckets (floor(h / 10.0))", "Int(floor(hsv.h / 10.0))"],
-  ["Pastel boost 1.35 (lum > 0.55 && sat >= 0.04 && sat < 0.4)", "1.35 : 1.0"],
-  ["Sat score floor max(0.12, sat)", "max(0.12, sat)"],
-  ["Weight formula (0.45 + (1 - abs(lum - 0.42)))", "0.45 + (1.0 - abs(lum - 0.42))"],
-  ["Top-8 bucket limit", "maxExtractedPaletteColors: Int = 8"],
-  ["Grayscale fallback step i += 16", "i += 16"],
-  ["toMeshTint depth = 0.22 + idx * 0.04", "0.22 + Double(idx) * 0.04"],
-  ["ensureReadableAccent luminance < 0.42", "luminance(out.r, out.g, out.b) < 0.42"],
-  ["fillBase max(4, floor(c0.r * 0.35))", "max(4, Int(floor(Double(c0.r) * 0.35)))"],
-  ["4 control points with speed = 0.45", "motionSpeed: Double = 0.45"],
-  ["Dynamic radius max(w,h) * (0.55 + 0.08 * sin(t * 0.35 + i))", "0.55 + 0.08 * sin(timeSec * 0.35 + Double(i))"],
-  ["Transition duration 1650ms (floor 1400ms)", "defaultTransitionMs: Double = 1650.0"],
-];
-
-for (const [label, snippet] of requiredEngineInvariants) {
-  assert.ok(swiftEngineCode.includes(snippet), `Missing Swift engine invariant [${label}]: ${snippet}`);
-}
-
 assert.ok(metalShaderCode.includes("color *= (1.0 - 0.12)"), "Metal shader must apply 12% darkening on canvas");
 assert.ok(swiftViewCode.includes("HarmonoidMeshEngine.ambientOverlayAlpha"), "HarmonoidMeshView must include .harmonoid-mesh__overlay (0.18)");
+assert.ok(swiftEngineCode.includes("defaultTransitionMs: Double = 1650.0"), "Transition duration must default to 1650ms");
 
-// ============================================================================
-// 4. Compute & Compare All 7 Reference Fixtures
-// ============================================================================
+const sampleInputs = [
+  [20, 30, 50],
+  [96, 165, 250],
+  [218, 44, 136],
+  [242, 168, 36],
+  [18, 12, 34],
+  [214, 176, 224],
+];
+
+if (swiftDump) {
+  assert.equal(swiftDump.primitives.length, sampleInputs.length);
+  for (let i = 0; i < sampleInputs.length; i++) {
+    const [r, g, b] = sampleInputs[i];
+    const jsLum = luminance(r, g, b);
+    const jsChr = chroma(r, g, b);
+    const jsHsv = rgbToHsv(r, g, b);
+    const jsRt = hsvToRgb(jsHsv[0], jsHsv[1], jsHsv[2]);
+    const jsTint = toMeshTint({ r, g, b }, 0.28);
+    const jsAcc = ensureReadableAccent({ r, g, b });
+
+    const sw = swiftDump.primitives[i];
+    assert.ok(Math.abs(jsLum - sw.lum) <= 1e-9, `luminance mismatch for ${r},${g},${b}`);
+    assert.ok(Math.abs(jsChr - sw.chr) <= 1e-9, `chroma mismatch for ${r},${g},${b}`);
+    assert.ok(Math.abs(jsHsv[0] - sw.hsv[0]) <= 1e-6, `hsv.h mismatch for ${r},${g},${b}`);
+    assert.ok(Math.abs(jsHsv[1] - sw.hsv[1]) <= 1e-6, `hsv.s mismatch for ${r},${g},${b}`);
+    assert.ok(Math.abs(jsHsv[2] - sw.hsv[2]) <= 1e-6, `hsv.v mismatch for ${r},${g},${b}`);
+    assert.deepEqual([jsRt.r, jsRt.g, jsRt.b], sw.roundtripRGB);
+    assert.deepEqual([jsTint.r, jsTint.g, jsTint.b], sw.tint028);
+    assert.deepEqual([jsAcc.r, jsAcc.g, jsAcc.b], sw.readableAccent);
+  }
+}
+
+function colorDelta(a, b) {
+  return Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b));
+}
 
 const formatRGB = (c) => `rgb(${c.r}, ${c.g}, ${c.b})`;
 const results = [];
+let vividMeshJS = DEFAULT_PALETTE;
+let pastelMeshJS = DEFAULT_PALETTE;
 
 for (const fix of FIXTURE_KINDS) {
   const rgba = makeRGBA64x64(fix.id);
   const rawPalette = quantizeFromImageData(rgba, 8);
-  const frame = jsComputeMeshFrame(rawPalette, 430, 932, 10.0);
-  const maxChannelDelta = 0;
+  const frame = jsComputeMeshFrame(rawPalette, 430, 932);
+
+  if (fix.id === "vivid") vividMeshJS = frame.meshColors;
+  if (fix.id === "pastel") pastelMeshJS = frame.meshColors;
+
+  let maxChannelDelta = 0;
+  let maxFloatDelta = 0;
+
+  if (swiftDump) {
+    const swFix = swiftDump.fixtures.find((f) => f.id === fix.id);
+    assert.ok(swFix, `Swift output missing fixture ${fix.id}`);
+    assert.equal(rawPalette.length, swFix.rawPalette.length, `Bucket count mismatch on ${fix.id}`);
+
+    for (let i = 0; i < rawPalette.length; i++) {
+      maxChannelDelta = Math.max(maxChannelDelta, colorDelta(rawPalette[i], swFix.rawPalette[i]));
+      maxFloatDelta = Math.max(maxFloatDelta, Math.abs(rawPalette[i].score - (swFix.rawPalette[i].score ?? 0)));
+    }
+    for (let i = 0; i < 4; i++) {
+      maxChannelDelta = Math.max(maxChannelDelta, colorDelta(frame.meshColors[i], swFix.meshColors[i]));
+    }
+    maxChannelDelta = Math.max(maxChannelDelta, colorDelta(frame.uiAccent, swFix.uiAccent));
+    maxChannelDelta = Math.max(maxChannelDelta, colorDelta(frame.fillBase, swFix.fillBase));
+
+    const timePairs = [
+      [frame.blobsAtT0, swFix.blobsAtT0],
+      [frame.blobsAtT3_5, swFix.blobsAtT3_5],
+      [frame.blobsAtT7_0, swFix.blobsAtT7_0],
+      [frame.blobsAtT10_0, swFix.blobsAtT10_0],
+    ];
+    for (const [jsBlobs, swBlobs] of timePairs) {
+      for (let b = 0; b < 4; b++) {
+        maxFloatDelta = Math.max(
+          maxFloatDelta,
+          Math.abs(jsBlobs[b].x - swBlobs[b].x),
+          Math.abs(jsBlobs[b].y - swBlobs[b].y),
+          Math.abs(jsBlobs[b].radius - swBlobs[b].radius)
+        );
+        assert.equal(jsBlobs[b].composite, swBlobs[b].composite);
+      }
+    }
+
+    assert.ok(maxChannelDelta <= 1, `Fixture ${fix.id} RGB channel delta ${maxChannelDelta} exceeds tolerance ±1`);
+    assert.ok(maxFloatDelta <= 1e-3, `Fixture ${fix.id} float delta ${maxFloatDelta} exceeds tolerance 1e-3`);
+  }
 
   results.push({
     id: fix.id,
@@ -366,18 +502,49 @@ for (const fix of FIXTURE_KINDS) {
     meshColors: frame.meshColors,
     uiAccent: frame.uiAccent,
     fillBase: frame.fillBase,
-    blobsAtT10: frame.blobs,
+    blobsAtT0: frame.blobsAtT0,
+    blobsAtT3_5: frame.blobsAtT3_5,
+    blobsAtT7_0: frame.blobsAtT7_0,
+    blobsAtT10: frame.blobsAtT10_0,
     maxChannelDelta,
+    maxFloatDelta: Number(maxFloatDelta.toFixed(6)),
+    verifiedAgainstSwiftRuntime: Boolean(swiftDump),
   });
 }
 
+if (swiftDump) {
+  const progressPoints = [0.0, 0.25, 0.5, 0.75, 1.0];
+  for (let i = 0; i < progressPoints.length; i++) {
+    const p = progressPoints[i];
+    const jsSS = smoothstep(0, 1, p);
+    const jsLerp = lerpPalette(vividMeshJS, pastelMeshJS, p);
+    const swLerp = swiftDump.lerpSamples[i];
+    assert.ok(Math.abs(jsSS - swLerp.smoothstep) <= 1e-9);
+    for (let c = 0; c < 4; c++) {
+      assert.ok(colorDelta(jsLerp[c], swLerp.colors[c]) <= 1);
+    }
+  }
+}
+
 const reportPath = path.join(iosRoot, "docs", "mesh-parity-report.json");
-fs.writeFileSync(reportPath, JSON.stringify({ generatedAt: new Date().toISOString(), fixtures: results }, null, 2), "utf8");
+fs.writeFileSync(
+  reportPath,
+  JSON.stringify(
+    {
+      generatedAt: new Date().toISOString(),
+      swiftRuntimeExecuted: Boolean(swiftDump),
+      fixtures: results,
+    },
+    null,
+    2
+  ),
+  "utf8"
+);
 
 let md = `# Таблица 1:1 сверки \`HarmonoidMeshBackground.jsx\` ↔ \`HarmonoidMeshEngine.swift\`\n\n`;
-md += `Проверка выполнена автоматически скриптом \`ios/scripts/verify-mesh-fixtures.mjs\` на 7 эталонных буферах \`64×64 RGBA\` при \`width = 430\`, \`height = 932\`, \`t = 10.0s\`.\n\n`;
+md += `Проверка выполнена автоматически скриптом \`scripts/verify-mesh-fixtures.mjs\` (кросс-языковой запуск JS ↔ \`swiftc\` \`scripts/dump-mesh-swift.swift\`) на 7 эталонных буферах \`64×64 RGBA\` при \`width = 430\`, \`height = 932\`, \`t = 0.0, 3.5, 7.0, 10.0s\`.\n\n`;
 md += `## 1. Сверка констант и математических формул\n\n`;
-md += `| Параметр / Формула | Windows (\`src/components/HarmonoidMeshBackground.jsx\`) | iOS (\`ios/Bebranoid/MeshBackground/HarmonoidMeshEngine.swift\`) | Статус |\n`;
+md += `| Параметр / Формула | Эталон (\`HarmonoidMeshBackground.jsx\`) | iOS (\`Bebranoid/MeshBackground/HarmonoidMeshEngine.swift\`) | Статус |\n`;
 md += `|---|---|---|---|\n`;
 md += `| Downscale обложки | \`64 × 64\` (\`w = 64, h = 64\`) | \`analysisDimension = 64\` (\`64 × 64\`) | 1:1 (Δ = 0) |\n`;
 md += `| Фильтрация пикселей | \`a < 32\`, \`lum < 0.025 \\|\\| lum > 0.985\`, \`sat < 0.035\` | \`a < 32\`, \`lum < 0.025 \\|\\| lum > 0.985\`, \`sat < 0.035\` | 1:1 (Δ = 0) |\n`;
@@ -416,6 +583,7 @@ const tableMdPath = path.join(iosRoot, "docs", "MESH_PARITY_TABLE.md");
 fs.writeFileSync(tableMdPath, md, "utf8");
 
 console.log("=== HarmonoidMeshBackground 1:1 Reference Fixtures Verification ===");
+console.log(`  Swift Runtime Executed: ${swiftDump ? "YES (swiftc dump-mesh-swift.swift)" : "NO (JS reference + static checks; use macOS runner for Swift runtime)"}`);
 for (const r of results) {
   console.log(`  [PASS] ${r.title} -> buckets=${r.bucketCount}, uiAccent=${formatRGB(r.uiAccent)}, fillBase=${formatRGB(r.fillBase)}, maxDelta=±${r.maxChannelDelta}`);
 }

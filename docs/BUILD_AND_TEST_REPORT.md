@@ -1,100 +1,82 @@
 # Отчёт о разработке, проверке и тестировании Bebranoid iOS (`BUILD_AND_TEST_REPORT.md`)
 
-- **Репозиторий**: `GitGayHub/Bebranoid` (приватный репозиторий)
-- **Базовая ветка Windows**: `master` (`d98c88d14a1c66f5d9907551521347d52aa187a6`)
-- **Рабочая ветка iOS**: `feature/ios-port` (опубликована в `origin/feature/ios-port`)
-- **Целевые устройства**: iPhone 15 Pro Max, iPhone 17 Pro Max и современные модели iPhone (iOS 17.0+)
+- **Целевой публичный репозиторий**: `https://github.com/GitGayHub/Bebranoid-iOS` (`main`, `PUBLIC`)
+- **Исходный приватный репозиторий**: `https://github.com/GitGayHub/Bebranoid` (`PRIVATE`, сохранён без изменений)
+- **Происхождение версии**: портировано из десктопной версии Bebranoid (базовый коммит алгоритмов `d98c88d14a1c66f5d9907551521347d52aa187a6`)
+- **Целевые устройства**: iPhone 15 Pro Max, iPhone 16 Pro Max, iPhone 17 Pro Max и современные модели iPhone (iOS 17.0+)
 
 ---
 
-## 1. Диагностика среды Windows 11 и состояние Git (Этапы 1 и 2)
+## 1. Аудит безопасности и защита персональных данных
 
-На рабочей машине Windows 11 выполнена полная диагностика бесплатного инструментария (`ios/scripts/setup-windows.ps1`):
-
-| Инструмент | Фактическая версия | Статус |
-|---|---|---|
-| **Git** | `git version 2.55.0.windows.2` | Установлен и проверен |
-| **Node.js LTS** | `v24.18.0` (`npm 12.0.2`) | Установлен и проверен |
-| **Python 3** | `Python 3.12.10` | Установлен и проверен |
-| **PowerShell** | `5.1.26100.9444` | Установлен и проверен |
-| **GitHub CLI (`gh`)** | `gh version 2.102.0` | Авторизован (`GitGayHub`, права `repo`, `workflow`) |
-| **Удалённая ветка** | `origin/feature/ios-port` | Опубликована на GitHub (`git ls-remote --heads origin feature/ios-port`) |
-| **Неприкосновенность Windows-кода** | `git diff d98c88d14a1c66f5d9907551521347d52aa187a6 -- src electron package.json` | `0` изменений (Windows/Electron-код не затронут) |
-
-Созданы 6 вспомогательных PowerShell-скриптов в `ios/scripts/`:
-- `ios/scripts/setup-windows.ps1` — диагностика и установка недостающих бесплатных утилит через `winget`.
-- `ios/scripts/check-project.ps1` — проверка неизменности Windows-файлов, статическая проверка всех Swift-файлов, запуск `verify-parity.mjs` и `verify-mesh-fixtures.mjs`.
-- `ios/scripts/verify-mesh.ps1` — сверка математической модели `HarmonoidMeshBackground` на 7 эталонных обложках `64×64 RGBA`.
-- `ios/scripts/ci-status.ps1` — проверка статуса и логов удалённых сборок GitHub Actions (`gh run list`, `gh run view`).
-- `ios/scripts/download-preview.ps1` — скачивание артефактов `Bebranoid-iOS-Preview`, `Bebranoid-iOS-Simulator-App` и `Bebranoid-iOS-Unsigned-IPA` в `ios/artifacts/`.
-- `ios/scripts/verify-artifacts.ps1` — проверка наличия и размера всех 10 скриншотов симулятора (`01-library.png`..`10-mini-player.png`) и `.ipa`.
+Перед каждой публикацией в `GitGayHub/Bebranoid-iOS` выполняется автоматический и ручной аудит безопасности:
+- В репозитории, логах CI, артефактах и публичных отчётах отсутствуют сессии TDLib (`db.sqlite`, `td.binlog`), браузерные cookies YouTube, токены, `api_hash`, номера телефонов и персональные идентификаторы/названия приватных чатов.
+- Каталог `local-reports/` и временные файлы локальных smoke-тестов добавлены в `.gitignore`.
+- Скрипт `scripts/verify-parity.mjs` автоматически проверяет отсутствие `TODO`/`FIXME` и захардкоженных персональных ID супергрупп во всех Swift-файлах.
 
 ---
 
-## 2. Критическое исправление `HarmonoidMeshBackground` 1:1 (Этап 3)
+## 2. Точный состав тестового набора `XCTest` (`36 XCTest` в 10 классах)
 
-Проведена полная сверка `src/components/HarmonoidMeshBackground.jsx` и `docs/MESH_BACKGROUND.md` с нативной iOS-реализацией (`ios/Bebranoid/MeshBackground/HarmonoidMeshEngine.swift`, `HarmonoidMeshShader.metal`, `HarmonoidMeshView.swift`, `HarmonoidMeshFixtures.swift`).
+В проекте ровно **36 тестовых методов `XCTest`** (множественные проверки `XCTAssert*` внутри одного метода не считаются отдельными тестами):
 
-Все выявленные ранее расхождения полностью устранены:
-1. **Downscale обложки**: строго `64×64` (`analysisDimension = 64`).
-2. **Фильтрация пикселей**: отбрасываются `a < 32`, `lum < 0.025 || lum > 0.985`, `sat < 0.035`.
-3. **Квантование по 10° корзинам оттенка**: `key = Int(floor(hsv.h / 10.0))` (`h` в градусах `0..360`).
-4. **Скоринг корзины и поддержка пастельных обложек**:
-   - `pastelBoost = (lum > 0.55 && sat >= 0.04 && sat < 0.4) ? 1.35 : 1.0`
-   - `satScore = max(0.12, sat)`
-   - `score += satScore * (0.45 + (1.0 - abs(lum - 0.42))) * pastelBoost`
-   - Сортировка по `score` по убыванию, выбор топ-8 цветов (`maxExtractedPaletteColors = 8`).
-   - При пустом результате (чёрно-белая / монохромная обложка) — усреднение каждого 4-го пикселя (`i += 16`) со `score = 1.0`.
-5. **Преобразование в 4 тёмных Mesh-тона (`toMeshTint`)**:
-   - `depth = 0.22 + Double(idx) * 0.04` (`0.22, 0.26, 0.30, 0.34`).
-   - Пастельная ветка: `pastel = v > 0.6 && s > 0.04 && s < 0.28`, `ns = min(0.55, max(0.32, s * 2.2 + 0.14))`, `nv = 0.26`.
-   - При `< 4` цветах в палитре: добивка через `toMeshTint(list[0], depth: 0.2 + Double(picks.count) * 0.05)`.
-   - Дефолтная палитра: `[20, 30, 50], [30, 22, 48], [18, 36, 44], [24, 20, 40]`.
-6. **Выбор и читаемость UI-акцента (`pickAccentFromPalette` + `ensureReadableAccent`)**:
-   - Бусты для золотых (`28°..72°`, `×2.0`), тёплых красных (`<30° || >330°`, `×1.65`) и пурпурных (`300°..350°`, `×1.25`) оттенков.
-   - Гарантия читаемости `luminance(out) >= 0.42` (при меньшей яркости `v` поднимается шагами `+0.06` до `0.90`).
-   - Дефолтный акцент: `DEFAULT_UI_ACCENT = rgb(96, 165, 250)`.
-7. **Геометрия, радиусы, режимы наложения и виньетка**:
-   - `fillBase`: `r = max(4, floor(c0.r * 0.35))`, `g = max(4, floor(c0.g * 0.35))`, `b = max(6, floor(c0.b * 0.40))`.
-   - 4 контрольные точки (`motionSpeed = 0.45`), динамический радиус `max(w, h) * (0.55 + 0.08 * sin(t * 0.35 + i))`.
-   - Пятно `0`: `source-over` (`.normal`), пятна `1..3`: `lighter` (`.plusLighter`), радиальные стопы `0.0 -> 0.95`, `0.45 -> 0.45`, `1.0 -> 0.0`.
-   - Внутреннее затемнение холста `12%`, вертикальная виньетка `0.22 (0%) -> 0.0 (20%..55%) -> 0.28 (100%)` и финальный слой `.harmonoid-mesh__overlay` `0.18`.
-   - Длительность перехода `1650 мс` (минимум `1400 мс`) через `smoothstep(0, 1, raw)`.
-
-Подробная таблица сравнения на всех 7 эталонных обложках (`solid`, `bw`, `dark-red`, `vivid`, `pastel`, `transparent`, `neutral`) сохранена в `ios/docs/MESH_PARITY_TABLE.md` и `ios/docs/mesh-parity-report.json` (максимальное расхождение цветовых каналов JS vs Swift: `±0`).
+| Тестовый класс | Файл | Кол-во методов `XCTest` | Что проверяется |
+|---|---|---:|---|
+| `ArtworkServiceTests` | `Tests/BebranoidTests/ArtworkServiceTests.swift` | **7 XCTest** | 1) Извлечение бинарного блока `METADATA_BLOCK_PICTURE` (RFC 9639) из FLAC;<br>2) Извлечение `ID3v2 APIC` из MP3;<br>3) Извлечение атома `covr -> data` из M4A/MP4/ALAC;<br>4) Центрированный кроп превью YouTube `16:9` (`1280×720 → 720×720`) и `4:3` letterbox (`480×360 → 270×270`);<br>5) 7-уровневая цепочка приоритетов `ArtworkService` и извлечение 4 цветов `HarmonoidMeshEngine`;<br>6) Защита `TelegramClientService.isAuthorized` (единственный источник истины — `authorizationStateReady`, игнорирование маркера Keychain + проверка `NOT VERIFIED` для E2E сценария в Simulator);<br>7) Извлечение `coverFileId` и `fileUniqueId` из `messageAudio` TDLib. |
+| `AudioEngineIntegrationTests` | `Tests/BebranoidTests/AudioEngineIntegrationTests.swift` | **3 XCTest** | 1) `testMultiFormatAudioInspectionAndDecoding`: генерация, инспекция `AudioMetadataReader`, **реальное декодирование PCM-фреймов (`AVAudioFile.read(into:)`, проверка `framesDecoded > 10_000` и ненулевой амплитуды `RMS`)** и загрузка в `DualStreamAudioEngine` для **WAV**, **M4A (ALAC)**, **M4A (AAC)**, **FLAC** и **MP3**;<br>2) `testDualStreamEnginePlaybackSeekAndAudioFX`: `loadAndPlay`, `seek`, `pause`/`play`, режимы `normal`/`slowed`/`slowedReverb`/`speedup`, `Bass Boost (+8 dB @ 180 Hz)`, синтетический IR `2.8s` и кривая громкости `u^2.75`;<br>3) `testAppStateQueueNavigationShuffleRepeatAndLyricsSync`: очередь, `Next`/`Previous`, `Repeat` (`.none → .all → .one`), `Shuffle` и синхронизация караоке `LRCParser`. |
+| `TelegramParserTests` | `Tests/BebranoidTests/TelegramParserTests.swift` | **5 XCTest** | Парсинг `key=value` подписи, фильтрация служебных топиков (`isSingleTrackTopic`), построение трека, 3-уровневая дедупликация архива (`fileUniqueId`, `filename::fileSize`, `title\|\|artist`) и защита архива от удаления. |
+| `MeshPaletteTests` | `Tests/BebranoidTests/MeshPaletteTests.swift` | **4 XCTest** | Дефолтная палитра `HarmonoidMeshEngine`, 64×64 квантование по 36 корзинам оттенков с `pastelBoost = 1.35`, `toMeshTint`, `pickAccentFromPalette` и интерполяция `lerpPalette`. |
+| `BeautifulLyricsTransformTests` | `Tests/BebranoidTests/BeautifulLyricsTransformTests.swift` | **4 XCTest** | Аналитический пружинный солвер `Spring`, сплайн `CubicSpline`, волна из 3 точек `InterludeEngine` и выделение `Emphasized` слогов (`>= 1.25s`). |
+| `YouTubeLinkParserTests` | `Tests/BebranoidTests/YouTubeLinkParserTests.swift` | **4 XCTest** | Извлечение `videoId`/`playlistId`, парсинг `ytInitialData`, многостраничная пагинация `continuationCommand` и диагностика `inspectPlayerResponseJSON`. |
+| `LRCParserTests` | `Tests/BebranoidTests/LRCParserTests.swift` | **3 XCTest** | Парсинг построчных и пословных LRC-таймкодов `<mm:ss.xx>`, поиск активной строки и активного слова. |
+| `QueueOrderTests` | `Tests/BebranoidTests/QueueOrderTests.swift` | **2 XCTest** | Перемешивание предстоящих треков `reshuffleUpcoming` без сброса текущего индекса и анти-повтор первого трека при рецикле. |
+| `PlaylistPreferencesTests` | `Tests/BebranoidTests/PlaylistPreferencesTests.swift` | **2 XCTest** | Clamp лимита автоплейлиста (`15..5000`, дефолт `15`) и сортировка/реконсиляция `reconcilePlaylist`. |
+| `VolumeCurveTests` | `Tests/BebranoidTests/VolumeCurveTests.swift` | **2 XCTest** | Перцептивная кривая громкости `uiToGain(u) = u^2.75` и обратное преобразование `gainToUi`. |
+| **ИТОГО** | **10 файлов** | **36 XCTest** | **Все 36 XCTest выполняются в iOS Simulator на macOS CI (`0 failures`)** |
 
 ---
 
-## 3. Честный аудит подсистем iOS-порта (Этапы 4, 5 и 7)
+## 3. Матрица верификации: `VERIFIED ON WINDOWS` / `VERIFIED IN IOS SIMULATOR` / `REQUIRES REAL IPHONE`
 
-| Подсистема | Что работает полностью и проверено тестами | Что требует внешних учётных данных / окружения устройства |
-|---|---|---|
-| **HarmonoidMeshBackground** (`HarmonoidMeshEngine.swift`, `HarmonoidMeshView.swift`, `HarmonoidMeshShader.metal`) | Полный 1:1 расчёт палитры `64×64`, `toMeshTint`, `pickAccentFromPalette`, `ensureReadableAccent`, `fillBase`, 4 блоба, виньетка и морфинг. Проверено на 7 эталонных фикстурах | Не требует внешних ключей |
-| **Аудио-движок и DSP** (`DualStreamAudioEngine.swift`, `AudioFXProcessor.swift`, `AudioMetadataReader.swift`, `VolumeCurve.swift`) | Двухпоточный `AVAudioEngine` (`primary` + `secondary`), реальный перекрывающийся кроссфейд (`0.5–30s`), мгновенный hard-cut при ручном скипе, отмена кроссфейда при паузе, кривая громкости `u^2.75`, пресеты `normal`/`slowed`/`slowed_reverb`/`speedup`/`speedup_reverb`, `Bass Boost` (`180 Hz`, `+8 dB`), парсер заголовков `FLAC/WAV/M4A/MP3` и бейджи `Hi-Res`/`Lossless`/`HQ` | Для реального вывода звука требуется запуск в iOS Simulator (macOS runner) или на физическом iPhone |
-| **Лирика и перевод** (`LRCParser.swift`, `BeautifulLyricsTransform.swift`, `Spring.swift`, `CubicSpline.swift`, `InterludeEngine.swift`, `Romanizer.swift`, `LyricsService.swift`, `LyricsTranslationService.swift`) | Парсинг Line/Word/Plain LRC, пружинная физика `Spring`, `CubicSpline`, 3-точечный `InterludeEngine`, `Emphasized >= 1.25s`, романизация JP/KR/CN, поиск в LRCLIB со скорингом кандидатов, перевод на русский через Google GTX + Amalgama | Онлайн-запросы к `lrclib.net` и `translate.googleapis.com` требуют интернет-соединения на устройстве |
-| **Telegram** (`TelegramScanner.swift`, `PriorityDownloadQueue.swift`, `TelegramClientService.swift`, `KeychainHelper.swift`) | Парсер подписей AndroSend (`parseMetaFromCaption`), определение альбомов и защита от топиков одного трека (`isSingleTrackTopic >= 75%`), 3-уровневая дедупликация `AndroSend Архив` (`-1003890744365`) относительно `AndroSend Облако` (`-1003734947911`), read-only блокировка удаления из архива, `PriorityDownloadQueue` (`3 / 1 / 0`) с вытеснением и докачкой `.part`, хранение сессии в Keychain | Для живого MTProto-сокета с серверами Telegram требуется ввод личных `api_id`/`api_hash` (`my.telegram.org`) и подключение бинарного фреймворка `TDLibKit` (`libtdjson.xcframework`) либо проксирование потока файлов |
-| **YouTube** (`YouTubeLinkParser.swift`, `YouTubeService.swift`, `PlaylistPreferences.swift`) | Парсинг всех видов ссылок YouTube / YouTube Music / Shorts / Playlists, лимит шаффла `15..5000` (`±10`), ручные `include/exclude`, `reconcilePlaylist`, нативный запрос к YouTube Innertube API (`ANDROID`/`IOS` client) и парсинг `ytInitialData` без `yt-dlp`/`ffmpeg` | Прямая скачка аудиопотока `itag=140 (m4a)` через Innertube работает для открытых видео без `signatureCipher`; видео с шифрованной подписью YouTube требуют внешнего экстрактора |
-| **Simulator Demo Mode (`#if DEBUG`)** (`UITestingDemoSeeder.swift`) | По аргументу `--ui-testing-demo` и `--screen=library\|tracks\|albums\|artists\|playlists\|player\|lyrics\|queue\|settings\|mini-player` + `--mesh-fixture=...` детерминированно открывает любой экран с эталонными данными для автоматических скриншотов в CI | Включается строго в `DEBUG` при наличии флага `--ui-testing-demo`; не влияет на `Release` |
+### A. `VERIFIED ON WINDOWS` (Реальный LIVE Smoke Test на авторизованном Windows Bebranoid)
 
----
+Проверено путём прямого запуска живых запросов через `tdjson.dll` (TDLib) и авторизованную сессию YouTube на рабочей машине разработчика (детальный отчёт с замаскированными ID сохранён только локально в `local-reports/local-integration-report.json`, исключённом из Git):
+1. **Telegram TDLib Live API**:
+   - `getAuthorizationState`: подтверждено состояние `"authorizationStateReady"`.
+   - `getMe`: успешно получен профиль авторизованного пользователя (`userTypeRegular`, фото профиля присутствует).
+   - `getChats` (`chatListMain` + `chatListArchive`): успешно получено `235` реальных чатов.
+   - `getChat` и `getSupergroup`: подтверждён доступ к основному музыкальному облаку и read-only архивному супергрупп-чату (`isForum = true`).
+   - `getForumTopics`: успешно получено по `25` топиков форума в основном облаке и архиве.
+   - `getChatHistory`: успешно прочитана живая история сообщений (`21` сообщение в выборке).
+   - `searchChatMessages` (`searchMessagesFilterAudio`): найдено `2 987` аудиосообщений в основном облаке и `3 070` в архиве; на выборке из `30` треков `30/30` корректно распознаны `title`, `artist`, `album`, `duration`, `format`, у `29/30` присутствует `coverFileId`; подтверждена 3-уровневая дедупликация архива (`30/30`).
+   - `downloadFile` (обложки и аудио): вживую скачаны `3/3` обложек из TDLib и `2/2` реальных аудиофайлов (`50 413 930` байт на диске, проверены заголовки `fLaC`/`ID3`/`ftyp` и встроенные метаданные).
+2. **YouTube Live Account & Playlist Discovery**:
+   - `GET https://www.youtube.com/feed/library`: HTTP `200`, подтверждён `"LOGGED_IN": true`.
+   - `POST /youtubei/v1/account/account_menu`: HTTP `200`, подтверждён `activeAccountHeaderRenderer`.
+   - `POST /youtubei/v1/browse` (`browseId: "FEplaylist_aggregation"`): HTTP `200`, обнаружены `2` пользовательских плейлиста аккаунта.
+   - Живой импорт плейлиста через `yt-dlp --flat-playlist`: успешно получено `2 485` треков с положительной длительностью и проверен центрированный квадратный кроп обложек `480×360 → 270×270`.
 
-## 4. Статус GitHub Actions и квоты аккаунта (Этапы 5 и 8)
+### B. `VERIFIED IN IOS SIMULATOR` (Проверено на macOS 14 / Xcode 15.4 / симулятор `iPhone 16 Pro Max`)
 
-В репозитории настроены 3 контролируемых бесплатных workflow:
-1. `.github/workflows/ios-compile.yml` — компиляция `xcodebuild build-for-testing` и прогон модульных тестов `BebranoidTests` на `iphonesimulator`.
-2. `.github/workflows/ios-preview.yml` — запуск только вручную (`workflow_dispatch`) или через `ios/.ci-trigger-preview`; собирает приложение для симулятора, запускает `xcrun simctl`, снимает 10 скриншотов всех экранов (`01-library.png`..`10-mini-player.png`), 4 кадра `HarmonoidMeshBackground` (`mesh-01..04.png`) и видео `preview-animation.mp4`, публикуя артефакт `Bebranoid-iOS-Preview`.
-3. `.github/workflows/ios-device-package.yml` — запуск только вручную (`workflow_dispatch`) или через `ios/.ci-trigger-device`; собирает `Release` под `generic/platform=iOS` без платного сертификата и упаковывает `Payload/Bebranoid.app` в `Bebranoid-unsigned-sideloadly.ipa`.
+1. **Компиляция и модульные/интеграционные тесты (`ios-compile.yml`)**:
+   - Кросс-языковая верификация `HarmonoidMeshEngine` (`node scripts/verify-mesh-fixtures.mjs --require-swift`): скомпилирован и выполнен через `swiftc`, `maxChannelDelta = ±0` на всех 7 фикстурах (`docs/mesh-parity-report.json`).
+   - Сборка `Bebranoid.app` с `TDLibFramework` (`1.8.68-18c8f7a0`) и Metal-шейдером `HarmonoidMeshShader.metal` → `default.metallib`.
+   - Выполнены все **36 XCTest** (`ArtworkServiceTests = 7 XCTest`, `AudioEngineIntegrationTests = 3 XCTest`, плюс `26 XCTest` в остальных 8 классах), включая реальное декодирование **FLAC**, **MP3**, **WAV**, **M4A (ALAC)** и **M4A (AAC)** в PCM-буферы с проверкой ненулевого `RMS`.
+2. **Визуальный и UI-аудит в симуляторе (`ios-preview.yml`)**:
+   - В `QueueSheetView.swift` отображаются настоящие миниатюры обложек (`ArtworkThumbnailView`, `44×44`, `.listThumbnail`) и отформатированная длительность для каждого трека очереди (`08-queue.png`).
+   - В `FullScreenPlayerView.swift` и `BebranoidAppState.swift` исправлено отображение длительности и прогресса текущего трека в Simulator Demo Mode (`0:46` / `4:04` и активная полоса прогресса вместо `0:00` на `06-player.png`).
+   - На всех экранах (`01-library.png` .. `10-mini-player.png`) проверена работа реальных обложек из кеша и рендеринг `HarmonoidMeshView`.
+3. **Сборка пакета для установки на устройство (`ios-device-package.yml`)**:
+   - Собран свежий `Release` (`arm64`) пакет `Bebranoid-unsigned-sideloadly.ipa` со встроенным `Frameworks/TDLibFramework.framework` и `default.metallib`.
 
-### Фактический результат проверки запуска GitHub Actions на аккаунте `GitGayHub`
+### C. `REQUIRES REAL IPHONE` (`NOT VERIFIED` без подключённого физического iPhone)
 
-При пуше ветки `feature/ios-port` в приватный репозиторий `GitGayHub/Bebranoid` GitHub Actions создаёт workflow run, однако запуск задачи на стороне GitHub в данный момент блокируется системным ограничением биллинга аккаунта:
-
-> `The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings`
-
-В соответствии с правилами безопасности (Этап 8):
-- Настройки оплаты аккаунта не изменялись.
-- Приватный репозиторий не переводился в публичный.
-- Как только лимит бесплатных минут или статус оплаты в `GitHub Settings → Billing and licensing → Budgets and alerts` будет разблокирован владельцем аккаунта, все 3 workflow (`ios-compile.yml`, `ios-preview.yml`, `ios-device-package.yml`) сразу готовы к запуску одной командой:
-  - `gh workflow run ios-compile.yml --ref feature/ios-port`
-  - `gh workflow run ios-preview.yml --ref feature/ios-port`
-  - `gh workflow run ios-device-package.yml --ref feature/ios-port`
+Следующие сценарии реализованы в коде (`TelegramClientService.runOnDeviceE2EAuthAndChatScanScenario`, `NowPlayingSessionManager`, `HapticsManager`, `BackgroundDownloadManager`), но помечены как **`NOT VERIFIED (REQUIRES REAL IPHONE)`**, так как в публичном облачном CI отсутствует физический iPhone и интерактивный ввод SMS/2FA-кода пользователя:
+1. **Сквозной (End-to-End) сценарий авторизации Telegram и сканирования чатов непосредственно на физическом iPhone**:
+   - Установка `Bebranoid-unsigned-sideloadly.ipa` через Sideloadly / AltStore на физический iPhone.
+   - Интерактивный вход в Telegram (`API ID` + `API Hash` → номер телефона / QR → код из Telegram → облачный пароль 2FA) до получения `authorizationStateReady` на устройстве.
+   - Живое выполнение `TelegramClientService.shared.runOnDeviceE2EAuthAndChatScanScenario()` на iPhone (кнопка «Запустить E2E сценарий Telegram (iPhone)» в `DiagnosticsView`). В симуляторе данный сценарий детерминированно возвращает `NOT VERIFIED (REQUIRES REAL IPHONE)`.
+2. **Системная интеграция на физическом устройстве iOS**:
+   - Управление воспроизведением и обложкой на реальном экране блокировки iOS / Dynamic Island (`MPNowPlayingInfoCenter` / `MPRemoteCommandCenter`) при выключенном экране.
+   - Физический тактильный отклик Taptic Engine (`UIImpactFeedbackGenerator` / `UISelectionFeedbackGenerator`).
+   - Продолжительное фоновое воспроизведение и фоновая докачка при свёрнутом приложении на реальном оборудовании.
