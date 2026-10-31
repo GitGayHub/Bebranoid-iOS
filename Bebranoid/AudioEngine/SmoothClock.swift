@@ -45,7 +45,7 @@ public final class SmoothClock: ObservableObject {
         guard isRunning, effectiveRate > 0 else {
             return currentTime
         }
-        let dt = max(0.0, min(0.25, uptime - anchorWallTime))
+        let dt = max(0.0, min(0.50, uptime - anchorWallTime))
         return max(0.0, anchorAudioTime + dt * effectiveRate)
     }
 
@@ -87,12 +87,15 @@ public final class SmoothClock: ObservableObject {
         let extrapolated = anchorAudioTime + dt * sample.rate
         let drift = abs(extrapolated - sample.time)
 
-        // Если расхождение с аппаратным временем больше 90 мс — пересинхронизируем якорь
-        if drift > 0.090 {
+        // Если расхождение с аппаратным временем больше 85 мс — пересинхронизируем по аппаратному сэмплу,
+        // иначе плавно двигаем якорь вперёд на каждом тике, чтобы `interpolatedTime()` никогда не застревал!
+        if drift > 0.085 {
             anchorAudioTime = sample.time
             anchorWallTime = now
             currentTime = sample.time
         } else {
+            anchorAudioTime = extrapolated
+            anchorWallTime = now
             currentTime = extrapolated
         }
 

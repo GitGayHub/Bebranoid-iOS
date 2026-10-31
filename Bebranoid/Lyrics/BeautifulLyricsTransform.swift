@@ -218,17 +218,19 @@ public enum BeautifulLyricsTransform {
             return []
         }
 
-        let lineDuration = max(0.4, line.endTime - line.time)
-        let totalWeight = Double(max(1, rawWords.reduce(0) { $0 + max(1, $1.count) }))
+        let rawSpan = max(0.45, line.endTime - line.time)
+        let naturalCap = max(1.15, Double(rawWords.count) * 0.44 + 0.35)
+        let lineDuration = min(max(0.40, rawSpan - 0.10), naturalCap)
+        let totalWeight = Double(max(1, rawWords.reduce(0) { $0 + max(2, $1.count) }))
 
         var cursor = line.time
         var result: [BeautifulSyllableMetadata] = []
 
         for (idx, word) in rawWords.enumerated() {
-            let weight = Double(max(1, word.count))
-            let wordDur = lineDuration * (weight / totalWeight)
+            let weight = Double(max(2, word.count))
+            let wordDur = max(0.12, lineDuration * (weight / totalWeight))
             let start = cursor
-            let end = (idx == rawWords.count - 1) ? max(start + 0.08, line.endTime) : (start + wordDur)
+            let end = start + wordDur
             cursor = end
 
             let emph = shouldEmphasizeWord(text: word, duration: end - start, allowEmphasis: allowEmphasis && syncKind == .word)

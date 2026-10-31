@@ -19,6 +19,7 @@ public final class TelegramAuthViewModel: ObservableObject {
     @Published public var isLoading: Bool = false
     @Published public var errorMessage: String? = nil
     @Published public var twoFactorHint: String? = nil
+    @Published public var codeDeliveryHint: String? = nil
 
     private let client: TelegramClientService
     private let keychain: KeychainHelper
@@ -58,6 +59,8 @@ public final class TelegramAuthViewModel: ObservableObject {
     private func applyStep(_ newStep: TelegramAuthStepState) {
         self.step = newStep
         switch newStep {
+        case .awaitingCode:
+            self.codeDeliveryHint = client.codeDeliveryHint
         case .awaiting2FAPassword(let hint):
             self.twoFactorHint = hint
         case .awaitingQRConfirmation(let link):
@@ -140,6 +143,30 @@ public final class TelegramAuthViewModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    public func resendCode() async {
+        errorMessage = nil
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let nextStep = try await client.resendAuthenticationCode()
+            applyStep(nextStep)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func resetToPhoneInput() async {
+        errorMessage = nil
+        verificationCode = ""
+        twoFactorPassword = ""
+        qrCodeConfirmLink = nil
+        isLoading = true
+        defer { isLoading = false }
+        await client.resetTDLibSession()
+        self.step = .unauthorized
     }
 
     public func submit2FAPassword() async {

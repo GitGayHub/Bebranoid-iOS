@@ -272,11 +272,17 @@ public struct LyricsScreenView: View {
             }
             .padding(32)
         } else {
-            TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !appState.isPlaying)) { context in
-                let liveTime = isDraggingSlider
-                    ? draggedTime
-                    : (appState.isPlaying ? appState.audioEngine.smoothClock.interpolatedTime() : appState.currentTime)
+            TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !appState.isPlaying && !isDraggingSlider)) { context in
                 let _ = context.date
+                let liveTime: Double = {
+                    if isDraggingSlider {
+                        return draggedTime
+                    }
+                    if appState.isPlaying {
+                        return appState.audioEngine.smoothClock.interpolatedTime(at: ProcessInfo.processInfo.systemUptime)
+                    }
+                    return max(appState.currentTime, appState.audioEngine.currentTime)
+                }()
                 switch appState.lyricsEngine {
                 case .beautiful:
                     BeautifulLyricsView(

@@ -105,6 +105,10 @@ public final class BebranoidAppState: ObservableObject {
         didSet { _cachedFilteredTracks = nil }
     }
     @Published public var trackDownloadProgress: [String: Int] = [:]
+    @Published public var isBatchDownloadingSelected: Bool = false
+    @Published public var batchDownloadDoneCount: Int = 0
+    @Published public var batchDownloadTotalCount: Int = 0
+    private var batchDownloadTask: Task<Void, Never>? = nil
 
     private var _cachedFilteredTracks: [Track]?
     private var _cachedAlbums: [Album]?
@@ -204,6 +208,15 @@ public final class BebranoidAppState: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] note in
                 guard let self else { return }
+                self.invalidateLibraryCaches()
+                if !self.telegramClient.isAuthorized {
+                    self.queue = self.queue.filter { $0.sourceKind != .telegram || self.cacheIndex.isCached($0) }
+                    if let cur = self.currentTrack, cur.sourceKind == .telegram && !self.cacheIndex.isCached(cur) {
+                        self.audioEngine.pause()
+                        self.currentTrack = self.queue.first
+                        self.currentIndex = 0
+                    }
+                }
                 self.objectWillChange.send()
                 if let step = note.object as? TelegramAuthStepState, step == .authorized {
                     Task { await self.handleTelegramAuthorized() }
@@ -354,7 +367,7 @@ public final class BebranoidAppState: ObservableObject {
 
     public func playTrack(_ track: Track, in contextQueue: [Track]? = nil) {
         haptics.lightTap()
-        let baseQueue = (contextQueue?.isEmpty == false) ? contextQueue! : (queue.isEmpty ? libraryState.tracks : queue)
+        let baseQueue = (contextQueue?.isEmpty == false) ? contextQueue! : (queue.isEmpty ? availableLibraryTracks : queue)
         originalQueueSource = baseQueue
 
         if let foundIndex = baseQueue.firstIndex(where: { $0.id == track.id }) {
@@ -378,7 +391,7 @@ public final class BebranoidAppState: ObservableObject {
 
     public func togglePlayPause() {
         haptics.lightTap()
-        if currentTrack == nil, let first = queue.first ?? libraryState.tracks.first {
+        if currentTrack == nil, let first = queue.first ?? availableLibraryTracks.first {
             playTrack(first)
             return
         }
@@ -462,7 +475,7 @@ public final class BebranoidAppState: ObservableObject {
         var pool: [Track] = []
         var seenKeys = Set<String>()
 
-        for track in libraryState.tracks {
+        for track in availableLibraryTracks {
             if libraryState.hiddenAlbums.contains(track.album) || libraryState.excludedShuffleAlbums.contains(track.album) {
                 continue
             }
@@ -768,11 +781,67 @@ public final class BebranoidAppState: ObservableObject {
         libraryState.playCounts[track.cacheKey] ?? 0
     }
 
+    /// Треки, доступные для воспроизведения прямо сейчас:
+    /// до входа в Telegram скрывает облачные незакешированные треки, чтобы не показывать невоспроизводимую «фейковую» медиатеку.
+    public var availableLibraryTracks: [Track] {
+        #if DEBUG
+        if UITestingDemoSeeder.isDemoModeActive {
+            return libraryState.tracks
+        }
+        #endif
+        if telegramClient.isAuthorized {
+            return libraryState.tracks
+        }
+        return libraryState.tracks.filter { $0.sourceKind != .telegram || cacheIndex.isCached($0) }
+    }
+
+    public var hiddenCloudTracksCount: Int {
+        max(0, libraryState.tracks.count - availableLibraryTracks.count)
+    }
+
+    /// Пакетное скачивание выбранных пользователем треков в локальный офлайн-кэш
+    public func downloadTracksToCache(_ tracks: [Track]) {
+        let missing = tracks.filter { !cacheIndex.isCached($0) }
+        guard !missing.isEmpty else {
+            haptics.softSelection()
+            return
+        }
+        haptics.mediumImpact()
+        batchDownloadTask?.cancel()
+        isBatchDownloadingSelected = true
+        batchDownloadDoneCount = 0
+        batchDownloadTotalCount = missing.count
+
+        batchDownloadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for track in missing {
+                if Task.isCancelled { break }
+                if !self.cacheIndex.isCached(track) {
+                    _ = try? await self.telegramClient.ensureTrackDownloaded(
+                        track: track,
+                        priority: .nextTrackPrefetch
+                    )
+                }
+                if Task.isCancelled { break }
+                self.batchDownloadDoneCount += 1
+                self.invalidateLibraryCaches()
+            }
+            self.isBatchDownloadingSelected = false
+            self.invalidateLibraryCaches()
+        }
+    }
+
+    public func cancelBatchDownload() {
+        batchDownloadTask?.cancel()
+        batchDownloadTask = nil
+        isBatchDownloadingSelected = false
+    }
+
     public var filteredAndSortedTracks: [Track] {
         if let cached = _cachedFilteredTracks {
             return cached
         }
-        var result = libraryState.tracks
+        var result = availableLibraryTracks
 
         if showOnlyCachedTracks {
             result = result.filter { cacheIndex.isCached($0) }
@@ -822,7 +891,8 @@ public final class BebranoidAppState: ObservableObject {
         var albums: [Album] = []
 
         // 1. Виртуальный альбом «Любимые» всегда первый (`src/views/Albums.jsx`)
-        let favTracks = libraryState.tracks.filter { isFavorite($0) }
+        let sourceTracks = availableLibraryTracks
+        let favTracks = sourceTracks.filter { isFavorite($0) }
         if !favTracks.isEmpty {
             albums.append(
                 Album(
@@ -838,7 +908,7 @@ public final class BebranoidAppState: ObservableObject {
         }
 
         var grouped: [String: [Track]] = [:]
-        for track in libraryState.tracks {
+        for track in sourceTracks {
             let name = track.album.isEmpty ? "Без альбома" : track.album
             grouped[name, default: []].append(track)
         }
@@ -883,7 +953,7 @@ public final class BebranoidAppState: ObservableObject {
             return cached
         }
         let result = ArtistSplitter.buildArtistSummaries(
-            tracks: libraryState.tracks,
+            tracks: availableLibraryTracks,
             favoriteArtistKeys: libraryState.favoriteArtistKeys
         )
         _cachedArtists = result
@@ -895,7 +965,7 @@ public final class BebranoidAppState: ObservableObject {
             return cached
         }
         let recentTracks = Array(
-            libraryState.tracks
+            availableLibraryTracks
                 .sorted { ($0.messageId ?? 0) > ($1.messageId ?? 0) }
                 .prefix(30)
         )
@@ -1004,18 +1074,23 @@ public final class BebranoidAppState: ObservableObject {
 
         statusBannerMessage = nil
         isTelegramAuthPresented = false
-        try? await Task.sleep(nanoseconds: 400_000_000)
+        invalidateLibraryCaches()
+        if currentTrack == nil {
+            restorePreviousSession()
+        }
+        try? await Task.sleep(nanoseconds: 350_000_000)
         await telegramClient.refreshAuthorizedUserProfile()
         let hasExistingTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
         let hasConfiguredChat = !libraryState.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if !hasExistingTelegramTracks || !hasConfiguredChat {
             await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
         }
+        invalidateLibraryCaches()
         if let pendingTrack = currentTrack,
            pendingTrack.sourceKind == .telegram,
            !isPlaying,
            trackDownloadProgress[pendingTrack.cacheKey] == nil {
-            startPlayingCurrentIndex(autoPlay: true)
+            startPlayingCurrentIndex(autoPlay: false)
         }
     }
 
@@ -1153,11 +1228,13 @@ public final class BebranoidAppState: ObservableObject {
 
     private func restorePreviousSession() {
         guard let saved = sessionStore.loadPlaybackSession() else { return }
-        self.queue = saved.queue
-        self.originalQueueSource = saved.queue
-        self.currentIndex = saved.currentIndex
-        self.currentTrack = saved.currentTrack
-        self.currentTime = saved.currentTime
+        let isTgReady = telegramClient.isAuthorized
+        let playableQueue = isTgReady
+            ? saved.queue
+            : saved.queue.filter { $0.sourceKind != .telegram || cacheIndex.isCached($0) }
+
+        self.queue = playableQueue
+        self.originalQueueSource = playableQueue
         self.isShuffleEnabled = saved.isShuffleEnabled
         self.repeatMode = saved.repeatMode
         self.uiVolume = saved.volume
@@ -1170,15 +1247,31 @@ public final class BebranoidAppState: ObservableObject {
         self.lyricsFontSize = saved.lyricsFontSize
         self.showLyricsTranslation = saved.showLyricsTranslation
 
-        if let track = saved.currentTrack {
+        let candidateTrack: Track? = {
+            guard let t = saved.currentTrack else { return nil }
+            if isTgReady || t.sourceKind != .telegram || cacheIndex.isCached(t) {
+                return t
+            }
+            return playableQueue.first
+        }()
+
+        if let track = candidateTrack {
+            self.currentTrack = track
+            self.currentIndex = playableQueue.firstIndex(where: { $0.id == track.id }) ?? 0
+            self.currentTime = (track.id == saved.currentTrack?.id) ? saved.currentTime : 0
             updatePalette(for: track)
             loadLyricsForCurrentTrack()
             if cacheIndex.isCached(track) {
                 let url = storage.cachedAudioFileURL(for: track)
+                let startSec = self.currentTime
                 Task {
-                    await audioEngine.loadAndPlay(track: track, fileURL: url, startAt: saved.currentTime, autoPlay: false)
+                    await audioEngine.loadAndPlay(track: track, fileURL: url, startAt: startSec, autoPlay: false)
                 }
             }
+        } else {
+            self.currentTrack = nil
+            self.currentIndex = 0
+            self.currentTime = 0
         }
     }
 

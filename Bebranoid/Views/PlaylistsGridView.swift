@@ -149,6 +149,8 @@ public struct PlaylistDetailView: View {
     public let playlist: Playlist
     @ObservedObject var appState: BebranoidAppState
     @State private var isSyncingYouTube: Bool = false
+    @State private var isCacheSelectionMode: Bool = false
+    @State private var selectedCacheTrackIds: Set<String> = []
 
     public init(playlist: Playlist, appState: BebranoidAppState) {
         self.playlist = playlist
@@ -164,6 +166,7 @@ public struct PlaylistDetailView: View {
     }
 
     public var body: some View {
+        let playlistTracks = livePlaylist.tracksSnapshot
         ZStack {
             Color.black.opacity(0.32).ignoresSafeArea()
 
@@ -176,42 +179,119 @@ public struct PlaylistDetailView: View {
                             .padding(.top, 8)
                     }
 
-                    HStack(spacing: 12) {
-                        Button {
-                            if let first = livePlaylist.tracksSnapshot.first {
-                                appState.isShuffleEnabled = false
-                                appState.playTrack(first, in: livePlaylist.tracksSnapshot)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            Button {
+                                if let first = playlistTracks.first {
+                                    appState.isShuffleEnabled = false
+                                    appState.playTrack(first, in: playlistTracks)
+                                }
+                            } label: {
+                                Label("Слушать", systemImage: "play.fill")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                                    .padding(.horizontal, 18)
+                                    .padding(.vertical, 11)
+                                    .background(appState.accentSwiftUIColor, in: Capsule())
                             }
-                        } label: {
-                            Label("Слушать", systemImage: "play.fill")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 11)
-                                .background(appState.accentSwiftUIColor, in: Capsule())
-                        }
 
-                        Button {
-                            let eligible = livePlaylist.isYouTubePlaylist
-                                ? PlaylistPreferencesEngine.eligiblePlaylistTracks(tracks: livePlaylist.tracksSnapshot, preference: currentPreference)
-                                : livePlaylist.tracksSnapshot
-                            guard let rand = eligible.randomElement() else { return }
-                            appState.isShuffleEnabled = true
-                            appState.playTrack(rand, in: eligible)
-                        } label: {
-                            Label("Шаффл избранных", systemImage: "shuffle")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 18)
-                                .padding(.vertical, 11)
-                                .background(Color.white.opacity(0.14), in: Capsule())
+                            Button {
+                                let eligible = livePlaylist.isYouTubePlaylist
+                                    ? PlaylistPreferencesEngine.eligiblePlaylistTracks(tracks: playlistTracks, preference: currentPreference)
+                                    : playlistTracks
+                                guard let rand = eligible.randomElement() else { return }
+                                appState.isShuffleEnabled = true
+                                appState.playTrack(rand, in: eligible)
+                            } label: {
+                                Label("Шаффл избранных", systemImage: "shuffle")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 11)
+                                    .background(Color.white.opacity(0.14), in: Capsule())
+                            }
+
+                            if !playlistTracks.isEmpty {
+                                Button {
+                                    appState.haptics.softSelection()
+                                    withAnimation(.easeOut(duration: 0.18)) {
+                                        isCacheSelectionMode.toggle()
+                                        if !isCacheSelectionMode {
+                                            selectedCacheTrackIds.removeAll()
+                                        }
+                                    }
+                                } label: {
+                                    Label(
+                                        isCacheSelectionMode ? "Отменить выбор" : "Выбрать в кэш",
+                                        systemImage: isCacheSelectionMode ? "checkmark.circle.fill" : "arrow.down.to.line.circle"
+                                    )
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(isCacheSelectionMode ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 11)
+                                    .background(
+                                        isCacheSelectionMode ? appState.accentSwiftUIColor : Color.white.opacity(0.14),
+                                        in: Capsule()
+                                    )
+                                }
+                            }
                         }
+                        .padding(.horizontal, 16)
+                    }
+
+                    if isCacheSelectionMode {
+                        let selected = playlistTracks.filter { selectedCacheTrackIds.contains($0.id) }
+                        let missingCount = selected.filter { !appState.cacheIndex.isCached($0) }.count
+                        let allSelected = !playlistTracks.isEmpty && selectedCacheTrackIds.count >= playlistTracks.count
+                        HStack(spacing: 10) {
+                            Button {
+                                if allSelected {
+                                    selectedCacheTrackIds.removeAll()
+                                } else {
+                                    selectedCacheTrackIds = Set(playlistTracks.map(\.id))
+                                }
+                            } label: {
+                                Text(allSelected ? "Снять всё" : "Выбрать все")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(Color.white.opacity(0.12), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+
+                            Spacer()
+
+                            Button {
+                                appState.downloadTracksToCache(selected)
+                                isCacheSelectionMode = false
+                                selectedCacheTrackIds.removeAll()
+                            } label: {
+                                Label(
+                                    missingCount > 0 ? "Скачать в кэш (\(missingCount))" : "Выберите треки",
+                                    systemImage: "arrow.down.to.line.circle.fill"
+                                )
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(
+                                    missingCount > 0 ? appState.accentSwiftUIColor : appState.accentSwiftUIColor.opacity(0.45),
+                                    in: Capsule()
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(missingCount == 0)
+                        }
+                        .padding(10)
+                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                        .padding(.horizontal, 16)
                     }
 
                     LazyVStack(spacing: 8) {
-                        ForEach(Array(livePlaylist.tracksSnapshot.enumerated()), id: \.element.id) { index, track in
+                        ForEach(Array(playlistTracks.enumerated()), id: \.element.id) { index, track in
                             HStack(spacing: 8) {
-                                if livePlaylist.isYouTubePlaylist {
+                                if !isCacheSelectionMode && livePlaylist.isYouTubePlaylist {
                                     let isEligible = isTrackEligible(track: track, index: index)
                                     Button {
                                         toggleTrackShuffleOverride(track: track, index: index)
@@ -226,7 +306,16 @@ public struct PlaylistDetailView: View {
                                 TrackRowView(
                                     track: track,
                                     appState: appState,
-                                    contextQueue: livePlaylist.tracksSnapshot
+                                    contextQueue: playlistTracks,
+                                    isSelectionMode: isCacheSelectionMode,
+                                    isSelected: selectedCacheTrackIds.contains(track.id),
+                                    onToggleSelection: {
+                                        if selectedCacheTrackIds.contains(track.id) {
+                                            selectedCacheTrackIds.remove(track.id)
+                                        } else {
+                                            selectedCacheTrackIds.insert(track.id)
+                                        }
+                                    }
                                 )
                             }
                         }

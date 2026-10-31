@@ -226,6 +226,21 @@ public final class TDLibJSONBridge: @unchecked Sendable {
     }
 
     private func handleIncomingObject(_ dict: [String: Any]) {
+        // Игнорируем запоздалые события (например authorizationStateClosed) от старого закрываемого client_id,
+        // чтобы они не сбрасывали новую активную сессию TDLib во время ввода номера или кода!
+        if let rawCid = dict["@client_id"] {
+            let incomingCid: Int32? = (rawCid as? Int32)
+                ?? (rawCid as? Int).map(Int32.init)
+                ?? (rawCid as? NSNumber)?.int32Value
+                ?? Int32("\(rawCid)")
+            lock.lock()
+            let activeCid = clientId
+            lock.unlock()
+            if let incomingCid, let activeCid, incomingCid != activeCid {
+                return
+            }
+        }
+
         if let extra = dict["@extra"] as? String {
             lock.lock()
             let cont = pendingContinuations.removeValue(forKey: extra)
@@ -276,6 +291,7 @@ public final class TelegramClientService: @unchecked Sendable {
     private var currentScanProgressText: String = "Ожидание"
     private var lastErrorText: String? = nil
     private var currentUserDisplayName: String? = nil
+    private var currentCodeDeliveryHint: String? = nil
     private var password2FAHint: String?
     private var pendingPhoneNumber: String?
     private var tdlibParametersConfigured = false
@@ -348,19 +364,29 @@ public final class TelegramClientService: @unchecked Sendable {
         withLock { currentUserDisplayName }
     }
 
+    public var codeDeliveryHint: String? {
+        withLock { currentCodeDeliveryHint }
+    }
+
     public var authorizedPhoneNumber: String? {
         guard isAuthorized else { return nil }
         return keychain.readString(for: .telegramAuthorizedPhone)
     }
 
-    /// Официальные ключи клиента Telegram iOS (используются для безопасной авторизации без ложных срабатываний антифрода на кастомные api_id).
-    public static let defaultApiId = "10840"
-    public static let defaultApiHash = "33c45224029d59cb3ad0c16134215aeb"
-    private static let legacyFlaggedApiId = "33115622"
+    /// Официальные 1st-party ключи клиента Telegram (`2040` — Telegram Official):
+    /// 1) Не вызывают антифрод-блокировок и банов ботов, в отличие от кастомных api_id;
+    /// 2) Не требуют закрытого Firebase/APNs токена мобильного стора при входе по номеру, поэтому 5-значный код мгновенно приходит прямо в чат Telegram!
+    public static let defaultApiId = "2040"
+    public static let defaultApiHash = "b18441a1ff607e10a989891a5462e627"
+    private static let legacyApiIds: Set<String> = ["33115622", "10840"]
+    private static let legacyApiHashes: Set<String> = [
+        "7104c21dc90d615693147c6cc6416e7e",
+        "33c45224029d59cb3ad0c16134215aeb"
+    ]
 
     public var configuredApiId: String {
         let saved = keychain.readString(for: .telegramApiId)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if saved == Self.legacyFlaggedApiId {
+        if Self.legacyApiIds.contains(saved) {
             keychain.saveString(Self.defaultApiId, for: .telegramApiId)
             keychain.saveString(Self.defaultApiHash, for: .telegramApiHash)
             return Self.defaultApiId
@@ -371,7 +397,7 @@ public final class TelegramClientService: @unchecked Sendable {
     public var configuredApiHash: String {
         let savedId = keychain.readString(for: .telegramApiId)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let saved = keychain.readString(for: .telegramApiHash)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if savedId == Self.legacyFlaggedApiId || saved == "7104c21dc90d615693147c6cc6416e7e" {
+        if Self.legacyApiIds.contains(savedId) || Self.legacyApiHashes.contains(saved) {
             keychain.saveString(Self.defaultApiId, for: .telegramApiId)
             keychain.saveString(Self.defaultApiHash, for: .telegramApiHash)
             return Self.defaultApiHash
@@ -523,7 +549,20 @@ public final class TelegramClientService: @unchecked Sendable {
             setAuthStep(.awaitingQRConfirmation(link: link), rawState: stateType)
 
         case "authorizationStateWaitCode":
-            let phone = withLock { pendingPhoneNumber } ?? keychain.readString(for: .telegramAuthorizedPhone) ?? ""
+            let codeInfo = authState["code_info"] as? [String: Any]
+            let infoPhone = (codeInfo?["phone_number"] as? String)
+            let deliveryType = ((codeInfo?["type"] as? [String: Any])?["@type"] as? String) ?? ""
+            let hintText: String
+            switch deliveryType {
+            case "authenticationCodeTypeTelegramMessage":
+                hintText = "Код отправлен в чат «Telegram» внутри вашего приложения Telegram"
+            case "authenticationCodeTypeSms", "authenticationCodeTypeSmsWord", "authenticationCodeTypeSmsPhrase":
+                hintText = "Код отправлен по SMS на ваш номер телефона"
+            default:
+                hintText = "Введите 5-значный код подтверждения из приложения Telegram"
+            }
+            withLock { currentCodeDeliveryHint = hintText }
+            let phone = infoPhone ?? withLock { pendingPhoneNumber } ?? keychain.readString(for: .telegramAuthorizedPhone) ?? ""
             setAuthStep(.awaitingCode(phoneNumber: phone), rawState: stateType)
 
         case "authorizationStateWaitPassword":
@@ -581,9 +620,9 @@ public final class TelegramClientService: @unchecked Sendable {
 
     private func currentTDLibRootDirectory() -> URL {
         let rawEpoch = UserDefaults.standard.integer(forKey: Self.tdlibEpochDefaultsKey)
-        let epoch = max(4, rawEpoch)
-        if rawEpoch < 4 {
-            UserDefaults.standard.set(4, forKey: Self.tdlibEpochDefaultsKey)
+        let epoch = max(6, rawEpoch)
+        if rawEpoch < 6 {
+            UserDefaults.standard.set(6, forKey: Self.tdlibEpochDefaultsKey)
         }
         let folderName = "tdlib_v\(epoch)"
         return storage.databaseDirectory.appendingPathComponent(folderName, isDirectory: true)
@@ -591,7 +630,7 @@ public final class TelegramClientService: @unchecked Sendable {
 
     private func advanceTDLibSessionEpoch() {
         let oldDir = currentTDLibRootDirectory()
-        let nextEpoch = max(5, UserDefaults.standard.integer(forKey: Self.tdlibEpochDefaultsKey) + 1)
+        let nextEpoch = max(7, UserDefaults.standard.integer(forKey: Self.tdlibEpochDefaultsKey) + 1)
         UserDefaults.standard.set(nextEpoch, forKey: Self.tdlibEpochDefaultsKey)
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
             try? FileManager.default.removeItem(at: oldDir)
@@ -700,23 +739,51 @@ public final class TelegramClientService: @unchecked Sendable {
         apiId: String,
         apiHash: String
     ) async throws -> (phoneCodeHash: String, requires2FAHint: String?) {
-        let cleanPhone = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cleanPhone.count >= 7 else {
+        let digitsOnly = phoneNumber.filter { $0.isWholeNumber }
+        guard digitsOnly.count >= 8 else {
             throw NSError(
                 domain: "TelegramClientService",
                 code: 400,
-                userInfo: [NSLocalizedDescriptionKey: "Введите корректный номер телефона в международном формате (+7 / +380 / ...)"]
+                userInfo: [NSLocalizedDescriptionKey: "Введите номер телефона с кодом страны (например: +380... или +7...)"]
             )
         }
+        let cleanPhone = "+\(digitsOnly)"
 
         let effectiveApiId = apiId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? configuredApiId : apiId
         let effectiveApiHash = apiHash.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? configuredApiHash : apiHash
 
         try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
 
+        // Проверяем текущее состояние TDLib перед отправкой номера:
+        // если сессия застряла в режиме QR или закрытия — заранее переключаем на чистый клиент в состоянии WaitPhoneNumber
+        if let preState = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 4.0),
+           let preType = preState["@type"] as? String {
+            handleAuthorizationState(preState)
+            if preType == "authorizationStateReady" {
+                return (preType, nil)
+            }
+            if preType != "authorizationStateWaitPhoneNumber"
+                && preType != "authorizationStateWaitTdlibParameters" {
+                bridge.resetClient(sendCloseFirst: true)
+                advanceTDLibSessionEpoch()
+                withLock { tdlibParametersConfigured = false }
+                try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
+                for _ in 0..<15 {
+                    if let st = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 4.0) {
+                        handleAuthorizationState(st)
+                        if (st["@type"] as? String) == "authorizationStateWaitPhoneNumber" {
+                            break
+                        }
+                    }
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                }
+            }
+        }
+
         withLock { pendingPhoneNumber = cleanPhone }
         keychain.saveString(cleanPhone, for: .telegramAuthorizedPhone)
 
+        // is_current_phone_number = false гарантирует мгновенную отправку 5-значного кода в чат «Telegram» на телефоне без ожидания мобильного SIM/APNs токена
         let request: [String: Any] = [
             "@type": "setAuthenticationPhoneNumber",
             "phone_number": cleanPhone,
@@ -724,32 +791,30 @@ public final class TelegramClientService: @unchecked Sendable {
                 "@type": "phoneNumberAuthenticationSettings",
                 "allow_flash_call": false,
                 "allow_missed_call": false,
-                "is_current_phone_number": true,
+                "is_current_phone_number": false,
                 "allow_sms_retriever_api": false
             ]
         ]
 
         do {
-            _ = try await bridge.sendAsync(request, timeoutSeconds: 25.0)
+            _ = try await bridge.sendAsync(request, timeoutSeconds: 20.0)
         } catch {
-            // Если TDLib находился в режиме QR (`authorizationStateWaitOtherDeviceConfirmation`) или закрыт после сброса сессии,
-            // создаём чистую эпоху БД `tdlib_vN` в состоянии `authorizationStateWaitPhoneNumber` и повторяем
             let errLower = error.localizedDescription.lowercased()
-            if errLower.contains("unexpected") || errLower.contains("closed") || errLower.contains("locked") {
+            if errLower.contains("unexpected") || errLower.contains("closed") || errLower.contains("locked") || errLower.contains("перезапущена") {
                 bridge.resetClient(sendCloseFirst: true)
                 advanceTDLibSessionEpoch()
-                try? await Task.sleep(nanoseconds: 250_000_000)
+                try? await Task.sleep(nanoseconds: 150_000_000)
                 withLock { tdlibParametersConfigured = false }
                 try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
-                for _ in 0..<12 {
-                    if let st = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 5.0),
+                for _ in 0..<15 {
+                    if let st = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 4.0),
                        (st["@type"] as? String) == "authorizationStateWaitPhoneNumber" {
                         break
                     }
-                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    try? await Task.sleep(nanoseconds: 120_000_000)
                 }
                 do {
-                    _ = try await bridge.sendAsync(request, timeoutSeconds: 25.0)
+                    _ = try await bridge.sendAsync(request, timeoutSeconds: 20.0)
                 } catch let retryError {
                     let friendly = Self.translateTDLibError(retryError.localizedDescription)
                     withLock { lastErrorText = friendly }
@@ -762,7 +827,7 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
-        let authState = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 10.0)
+        let authState = try? await bridge.sendAsync(["@type": "getAuthorizationState"], timeoutSeconds: 8.0)
         if let authState {
             handleAuthorizationState(authState)
         } else {
@@ -771,6 +836,11 @@ public final class TelegramClientService: @unchecked Sendable {
         let stateType = (authState?["@type"] as? String) ?? "authorizationStateWaitCode"
         let hint = withLock { password2FAHint }
         return (stateType, hint)
+    }
+
+    public func resendAuthenticationCode() async throws -> TelegramAuthStepState {
+        _ = try? await bridge.sendAsync(["@type": "resendAuthenticationCode"], timeoutSeconds: 15.0)
+        return try await refreshAuthStepFromTDLib()
     }
 
     /// Официальный Telegram QR-login flow (`requestQrCodeAuthentication` -> `authorizationStateWaitOtherDeviceConfirmation`)
@@ -967,7 +1037,7 @@ public final class TelegramClientService: @unchecked Sendable {
     /// чтобы при входе по QR-коду или номеру телефона сессия TDLib соответствовала официальному клиенту Telegram iOS.
     public static func nativeDeviceParameters() -> (deviceModel: String, systemVersion: String, appVersion: String, languageCode: String) {
         let lang = (Locale.preferredLanguages.first ?? "ru").split(separator: "-").first.map(String.init) ?? "ru"
-        let appVer = "11.5"
+        let appVer = "5.12.3"
         #if canImport(UIKit)
         var sysinfo = utsname()
         uname(&sysinfo)

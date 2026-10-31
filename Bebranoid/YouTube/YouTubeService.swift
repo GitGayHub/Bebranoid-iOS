@@ -606,13 +606,77 @@ public final class YouTubeService: @unchecked Sendable {
 
         onProgress?(1)
         try preemptionToken.throwIfPreempted(key: track.cacheKey)
-        let streamURL = try await resolveAudioStreamURL(videoId: videoId)
+        let candidates = try await resolveAudioStreamCandidates(videoId: videoId)
         try preemptionToken.throwIfPreempted(key: track.cacheKey)
         onProgress?(3)
 
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: partialURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
+        var lastDownloadError: Error?
+        for (candidateIndex, candidate) in candidates.enumerated() {
+            do {
+                let activePartURL = candidate.isWebMOpus
+                    ? partialURL.deletingPathExtension().appendingPathExtension("webm.part")
+                    : partialURL
+                if candidateIndex > 0 {
+                    try? fileManager.removeItem(at: activePartURL)
+                }
+                try await downloadRawStreamToFile(
+                    streamURL: candidate.url,
+                    partialURL: activePartURL,
+                    cacheKey: track.cacheKey,
+                    preemptionToken: preemptionToken,
+                    onProgress: onProgress
+                )
+
+                if candidate.isWebMOpus {
+                    let cafTargetURL = destinationURL.deletingPathExtension().appendingPathExtension("caf")
+                    do {
+                        try WebMOpusRemuxer.remuxWebMFileToVerifiedCAF(
+                            webmURL: activePartURL,
+                            cafDestinationURL: cafTargetURL
+                        )
+                        try? fileManager.removeItem(at: activePartURL)
+                        try? fileManager.removeItem(at: destinationURL)
+                        onProgress?(100)
+                        return cafTargetURL
+                    } catch {
+                        // Если ремукс WebM Opus не прошёл валидацию AVAudioFile, прозрачно переходим к нативному AAC (itag 141/140)
+                        try? fileManager.removeItem(at: activePartURL)
+                        try? fileManager.removeItem(at: cafTargetURL)
+                        lastDownloadError = error
+                        continue
+                    }
+                } else {
+                    try? fileManager.removeItem(at: destinationURL)
+                    try fileManager.moveItem(at: activePartURL, to: destinationURL)
+                    onProgress?(100)
+                    return destinationURL
+                }
+            } catch let preempt as DownloadPreemptedError {
+                throw preempt
+            } catch {
+                lastDownloadError = error
+                continue
+            }
+        }
+
+        throw lastDownloadError ?? NSError(
+            domain: "YouTubeService",
+            code: 502,
+            userInfo: [NSLocalizedDescriptionKey: "Не удалось скачать аудиопоток YouTube максимального качества"]
+        )
+    }
+
+    private func downloadRawStreamToFile(
+        streamURL: URL,
+        partialURL: URL,
+        cacheKey: String,
+        preemptionToken: DownloadPreemptionToken,
+        onProgress: (@Sendable (Int) -> Void)?
+    ) async throws {
+        let fileManager = FileManager.default
         var offset: Int64 = 0
         if let attrs = try? fileManager.attributesOfItem(atPath: partialURL.path),
            let size = attrs[.size] as? NSNumber,
@@ -632,7 +696,7 @@ public final class YouTubeService: @unchecked Sendable {
 
         do {
             while total == 0 || offset < total {
-                try preemptionToken.throwIfPreempted(key: track.cacheKey, bytesSaved: offset)
+                try preemptionToken.throwIfPreempted(key: cacheKey, bytesSaved: offset)
 
                 var request = URLRequest(url: streamURL)
                 request.timeoutInterval = 30.0
@@ -647,11 +711,9 @@ public final class YouTubeService: @unchecked Sendable {
                 let (data, response) = try await session.data(for: request)
 
                 if let http = response as? HTTPURLResponse, http.statusCode == 416 {
-                    // Запрошенный диапазон за пределами файла: `.part` уже полный
                     break
                 }
                 if let http = response as? HTTPURLResponse, http.statusCode == 403, offset >= Self.downloadChunkSize {
-                    // Если резервный мобильный поток упёрся в лимит 1 МБ без PoToken после скачивания заголовка и аудиофреймов — завершаем файл
                     break
                 }
                 guard let http = response as? HTTPURLResponse, http.statusCode == 206 || http.statusCode == 200 else {
@@ -664,7 +726,6 @@ public final class YouTubeService: @unchecked Sendable {
                    let parsedTotal = Int64(totalPart) {
                     total = parsedTotal
                 } else if http.statusCode == 200 {
-                    // Сервер проигнорировал Range и отдал файл целиком: начинаем с нуля
                     try handle.truncate(atOffset: 0)
                     offset = 0
                     total = Int64(data.count)
@@ -675,12 +736,11 @@ public final class YouTubeService: @unchecked Sendable {
                 try handle.write(contentsOf: data)
                 offset += Int64(data.count)
                 if total > 0 {
-                    let pct = min(99, max(1, Int((Double(offset) / Double(total)) * 100.0)))
+                    let pct = min(98, max(2, Int((Double(offset) / Double(total)) * 100.0)))
                     onProgress?(pct)
                 }
             }
             try handle.close()
-            onProgress?(100)
         } catch {
             try? handle.close()
             if offset == 0 {
@@ -693,10 +753,6 @@ public final class YouTubeService: @unchecked Sendable {
             try? fileManager.removeItem(at: partialURL)
             throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Получен пустой аудиопоток YouTube"])
         }
-
-        try? fileManager.removeItem(at: destinationURL)
-        try fileManager.moveItem(at: partialURL, to: destinationURL)
-        return destinationURL
     }
 
     private func fetchWatchPageSessionContext(videoId: String) async -> (visitorData: String?, cookieHeader: String?) {
@@ -745,7 +801,23 @@ public final class YouTubeService: @unchecked Sendable {
         return (visitorData, cookieHeader)
     }
 
+    public struct AudioStreamCandidate: Sendable {
+        public let url: URL
+        public let itag: Int
+        public let bitrate: Int
+        public let isWebMOpus: Bool
+        public let isOriginalTrack: Bool
+    }
+
     public func resolveAudioStreamURL(videoId: String) async throws -> URL {
+        let candidates = try await resolveAudioStreamCandidates(videoId: videoId)
+        guard let first = candidates.first else {
+            throw NSError(domain: "YouTubeService", code: 404, userInfo: nil)
+        }
+        return first.url
+    }
+
+    public func resolveAudioStreamCandidates(videoId: String) async throws -> [AudioStreamCandidate] {
         guard let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false") else {
             throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
         }
@@ -838,7 +910,10 @@ public final class YouTubeService: @unchecked Sendable {
                 guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     continue
                 }
-                return try Self.inspectPlayerResponseJSON(root)
+                let ranked = try Self.inspectPlayerResponseCandidates(root)
+                if !ranked.isEmpty {
+                    return ranked
+                }
             } catch {
                 lastError = error
             }
@@ -851,11 +926,25 @@ public final class YouTubeService: @unchecked Sendable {
         )
     }
 
-    /// Проверяет JSON-ответ `/youtubei/v1/player`:
-    /// - Проверяет `playabilityStatus.status == "OK"`
-    /// - Извлекает прямой URL `audio/mp4` (`itag 140`) или любой прямой `audio/*` поток
-    /// - Честно детектирует `signatureCipher` / DRM без создания фальшивого потока
+    /// Проверяет JSON-ответ `/youtubei/v1/player` и возвращает лучший аудиопоток по качеству
     public static func inspectPlayerResponseJSON(_ root: [String: Any]) throws -> URL {
+        let ranked = try inspectPlayerResponseCandidates(root)
+        guard let best = ranked.first else {
+            throw NSError(
+                domain: "YouTubeService",
+                code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "Прямая аудиодорожка YouTube не найдена."]
+            )
+        }
+        return best.url
+    }
+
+    /// Ранжирует доступные прямые аудиопотоки YouTube по максимальному качеству звука:
+    /// 1) Оригинальная дорожка (`audioIsDefault != false`, чтобы не брать автодубляж);
+    /// 2) `AUDIO_QUALITY_HIGH` (`itag 141` 256 kbps AAC-LC / `itag 774` 256 kbps Opus);
+    /// 3) `itag 251` (`Opus 48 kHz ~135–165 kbps` с беспотерьным ремуксом в CoreAudio `.caf`) выше `itag 140` (`AAC 44.1 kHz ~129 kbps`);
+    /// 4) Нативный `audio/mp4` (`itag 140`) как гарантированный резервный поток для `AVAudioEngine`.
+    public static func inspectPlayerResponseCandidates(_ root: [String: Any]) throws -> [AudioStreamCandidate] {
         if let playability = root["playabilityStatus"] as? [String: Any],
            let status = playability["status"] as? String,
            status != "OK" {
@@ -879,30 +968,66 @@ public final class YouTubeService: @unchecked Sendable {
         let muxedFormats = (streamingData["formats"] as? [[String: Any]]) ?? []
         let allFormats = adaptiveFormats + muxedFormats
 
-        // 1a. Строго предпочитаем itag 140 (AAC-LC 128kbps audio/mp4) с прямым URL
-        if let itag140 = allFormats.first(where: {
-            ($0["itag"] as? Int) == 140 && ($0["url"] as? String) != nil
-        }), let urlStr = itag140["url"] as? String, let streamURL = URL(string: urlStr) {
-            return streamURL
+        var scored: [(candidate: AudioStreamCandidate, score: Int)] = []
+
+        for fmt in allFormats {
+            guard let urlStr = fmt["url"] as? String,
+                  let streamURL = URL(string: urlStr) else {
+                continue
+            }
+            let mime = ((fmt["mimeType"] as? String) ?? "").lowercased()
+            let itag = (fmt["itag"] as? Int) ?? 0
+            let isAudioOnly = mime.hasPrefix("audio/")
+            let isM4A = mime.contains("audio/mp4")
+            let isWebMOpus = mime.contains("audio/webm") && mime.contains("opus")
+            guard isM4A || isWebMOpus || isAudioOnly else {
+                continue
+            }
+
+            let avgBitrate = (fmt["averageBitrate"] as? Int)
+                ?? (fmt["bitrate"] as? Int)
+                ?? (itag == 141 ? 256_000 : (itag == 251 ? 140_000 : (itag == 140 ? 129_000 : 64_000)))
+            let qualityLabel = ((fmt["audioQuality"] as? String) ?? "").uppercased()
+            let audioTrack = fmt["audioTrack"] as? [String: Any]
+            let isOriginal = (audioTrack?["audioIsDefault"] as? Bool) != false
+
+            // Приоритет качества:
+            // - Оригинальная дорожка (+10_000_000)
+            // - AUDIO_QUALITY_HIGH / itag 141 256 kbps (+2_000_000)
+            // - Opus 48 kHz (itag 251 / 774) даёт лучшую перцептивную чёткость и ВЧ до 20 кГц по сравнению с 128 kbps AAC (+35_000 эквивалентного бонуса)
+            // - Нативный m4a / Opus выше прочих контейнеров (+500_000)
+            var score = avgBitrate
+            if isOriginal {
+                score += 10_000_000
+            }
+            if qualityLabel == "AUDIO_QUALITY_HIGH" || itag == 141 || itag == 774 {
+                score += 2_000_000
+            } else if qualityLabel == "AUDIO_QUALITY_MEDIUM" || itag == 251 || itag == 140 {
+                score += 1_000_000
+            }
+            if isWebMOpus {
+                score += 535_000
+            } else if isM4A {
+                score += 500_000
+            }
+
+            scored.append((
+                candidate: AudioStreamCandidate(
+                    url: streamURL,
+                    itag: itag,
+                    bitrate: avgBitrate,
+                    isWebMOpus: isWebMOpus,
+                    isOriginalTrack: isOriginal
+                ),
+                score: score
+            ))
         }
 
-        // 1b. Любой другой нативный контейнер audio/mp4 с прямым URL
-        if let m4aFormat = allFormats.first(where: {
-            (($0["mimeType"] as? String)?.contains("audio/mp4") == true)
-                && ($0["url"] as? String) != nil
-        }), let urlStr = m4aFormat["url"] as? String, let streamURL = URL(string: urlStr) {
-            return streamURL
+        scored.sort { $0.score > $1.score }
+        if !scored.isEmpty {
+            return scored.map(\.candidate)
         }
 
-        // 2. Любой прямой аудиопоток с открытым URL
-        if let anyAudio = allFormats.first(where: {
-            (($0["mimeType"] as? String)?.hasPrefix("audio/") == true)
-                && ($0["url"] as? String) != nil
-        }), let urlStr = anyAudio["url"] as? String, let streamURL = URL(string: urlStr) {
-            return streamURL
-        }
-
-        // 3. Честная диагностика signatureCipher / cipher
         let hasSignatureCipher = allFormats.contains {
             $0["signatureCipher"] != nil || $0["cipher"] != nil
         }
@@ -917,7 +1042,7 @@ public final class YouTubeService: @unchecked Sendable {
         throw NSError(
             domain: "YouTubeService",
             code: 404,
-            userInfo: [NSLocalizedDescriptionKey: "Прямая аудиодорожка m4a не найдена в ответе YouTube."]
+            userInfo: [NSLocalizedDescriptionKey: "Прямая аудиодорожка YouTube не найдена."]
         )
     }
 }

@@ -37,7 +37,11 @@ public extension TelegramClientService {
             return false
         }
 
-        saveApiCredentials(apiId: String(numericId), apiHash: hash)
+        if idString == "33115622" || idString == "10840" {
+            saveApiCredentials(apiId: Self.defaultApiId, apiHash: Self.defaultApiHash)
+        } else {
+            saveApiCredentials(apiId: String(numericId), apiHash: hash)
+        }
 
         // Также автоматически подхватываем выбранные чаты (основной и архивный), если они переданы из конфига ПК
         var state = PlaybackSessionStore.shared.loadLibraryState()

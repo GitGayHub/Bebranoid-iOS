@@ -143,6 +143,28 @@ public enum AudioMetadataReader {
             }
         }
 
+        // Точное чтение параметров CoreAudio `.caf` (например, ремукс YouTube Opus 48 kHz `itag 251`) через AVAudioFile
+        if (sampleRate == nil || durationSec <= 0 || ext == "caf"),
+           let avFile = try? AVAudioFile(forReading: url) {
+            let asbd = avFile.fileFormat.streamDescription.pointee
+            if asbd.mSampleRate > 0 {
+                sampleRate = Int(round(asbd.mSampleRate))
+            }
+            if asbd.mChannelsPerFrame > 0 {
+                channels = Int(asbd.mChannelsPerFrame)
+            }
+            if asbd.mFormatID == kAudioFormatOpus {
+                codec = "OPUS"
+                isLossless = false
+            } else if asbd.mFormatID == kAudioFormatMPEG4AAC {
+                codec = "AAC"
+                isLossless = false
+            }
+            if durationSec <= 0 && avFile.processingFormat.sampleRate > 0 && avFile.length > 0 {
+                durationSec = Double(avFile.length) / avFile.processingFormat.sampleRate
+            }
+        }
+
         let bitrateKbps: Int? = {
             guard let size = fileSize, size > 0, durationSec > 0.05 else { return nil }
             return Int(round((Double(size) * 8.0) / durationSec / 1000.0))

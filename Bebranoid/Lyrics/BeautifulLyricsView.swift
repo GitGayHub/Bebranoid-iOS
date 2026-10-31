@@ -83,9 +83,12 @@ public struct BeautifulLyricsView: View {
                             lastUserScrollTime = Date()
                         }
                 )
+                .onAppear {
+                    scrollToActiveNode(proxy: proxy, lineIndex: activeLineIndex, animated: false)
+                }
                 .onChange(of: activeLineIndex) { _, newIdx in
                     guard !isUserBrowsing else { return }
-                    scrollToActiveNode(proxy: proxy, lineIndex: newIdx)
+                    scrollToActiveNode(proxy: proxy, lineIndex: newIdx, animated: true)
                 }
             }
 
@@ -113,12 +116,17 @@ public struct BeautifulLyricsView: View {
         }
     }
 
-    private func scrollToActiveNode(proxy: ScrollViewProxy, lineIndex: Int) {
+    private func scrollToActiveNode(proxy: ScrollViewProxy, lineIndex: Int, animated: Bool = true) {
+        guard lineIndex >= 0 else { return }
         if let activeVocal = nodes.first(where: {
             if case .vocal(let g) = $0 { return g.lineIndex == lineIndex }
             return false
         }) {
-            withAnimation(.interpolatingSpring(stiffness: 110, damping: 18)) {
+            if animated {
+                withAnimation(.interpolatingSpring(stiffness: 110, damping: 18)) {
+                    proxy.scrollTo(activeVocal.id, anchor: UnitPoint(x: 0.5, y: 0.34))
+                }
+            } else {
                 proxy.scrollTo(activeVocal.id, anchor: UnitPoint(x: 0.5, y: 0.34))
             }
         }
@@ -322,41 +330,50 @@ private struct SyllableWordSpanView: View {
     var body: some View {
         let rawProgress = HarmonoidMeshEngine.clamp((currentTime - syllable.startTime) / syllable.duration, 0.0, 1.0)
         let smoothCubic = rawProgress * rawProgress * (3.0 - 2.0 * rawProgress)
-        let progress = 0.35 * rawProgress + 0.65 * smoothCubic
+        let progress = 0.40 * rawProgress + 0.60 * smoothCubic
         let isActive = rawProgress > 0.001 && rawProgress < 0.999
         let isPast = rawProgress >= 0.999
 
         let fadeAt = fadePeer?.startTime ?? (syllable.endTime + 0.45)
         let fadeOut = isPast ? HarmonoidMeshEngine.clamp((currentTime - fadeAt) / 0.70, 0.0, 1.0) : 0.0
-        let restAlpha = 1.0 - 0.18 * fadeOut
+        let restAlpha = 1.0 - 0.14 * fadeOut
 
-        let wipeLead = -0.18 + 1.18 * progress
-        let wipeTrail = wipeLead + 0.24
-        let yLift: CGFloat = isActive ? -1.8 * CGFloat(sin(rawProgress * .pi)) : 0.0
-        let glowAlpha: Double = isActive ? (0.42 * sin(rawProgress * .pi)) : (isPast ? 0.14 * (1.0 - fadeOut) : 0.0)
+        let p = HarmonoidMeshEngine.clamp(progress, 0.01, 0.99)
+        let softHalf = 0.11
+        let lead = max(0.002, min(0.97, p - softHalf))
+        let trail = max(lead + 0.02, min(0.998, p + softHalf))
+
+        let pulse = sin(rawProgress * .pi)
+        let yLift: CGFloat = isActive ? -2.2 * CGFloat(pulse) : 0.0
+        let wordScale: CGFloat = isActive ? (1.0 + 0.032 * CGFloat(pulse)) : 1.0
+        let glowAlpha: Double = isActive ? (0.48 * pulse) : (isPast ? 0.14 * (1.0 - fadeOut) : 0.0)
         let font = Font.system(size: 27 * scaleFactor, weight: .bold, design: .rounded)
+
+        let style: AnyShapeStyle = {
+            if isPast {
+                return AnyShapeStyle(Color.white.opacity(restAlpha))
+            } else if isActive {
+                return AnyShapeStyle(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .white, location: 0.0),
+                            .init(color: .white, location: lead),
+                            .init(color: .white.opacity(0.32), location: trail),
+                            .init(color: .white.opacity(0.32), location: 1.0)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+            } else {
+                return AnyShapeStyle(Color.white.opacity(0.32))
+            }
+        }()
 
         Text(syllable.text)
             .font(font)
-            .foregroundStyle(Color.white.opacity(isPast ? restAlpha : 0.34))
-            .overlay {
-                if isActive {
-                    Text(syllable.text)
-                        .font(font)
-                        .foregroundStyle(Color.white)
-                        .mask(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .white, location: 0.0),
-                                    .init(color: .white, location: max(0.0, min(1.0, wipeLead))),
-                                    .init(color: .clear, location: max(0.001, min(1.0, wipeTrail)))
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                }
-            }
+            .foregroundStyle(style)
+            .scaleEffect(wordScale)
             .offset(y: yLift)
             .shadow(color: Color.white.opacity(glowAlpha), radius: 7, x: 0, y: 0)
     }
@@ -379,31 +396,35 @@ private struct EmphasizedWordLettersView: View {
                 let charEnd = Double(charIdx + 1) / Double(count)
                 let charProgress = HarmonoidMeshEngine.clamp((overallProgress - charStart) / max(0.05, charEnd - charStart), 0.0, 1.0)
                 let pulse = sin(charProgress * .pi)
-                let lead = -0.15 + 1.15 * charProgress
-                let trail = lead + 0.30
+                let p = HarmonoidMeshEngine.clamp(charProgress, 0.01, 0.99)
+                let lead = max(0.002, min(0.96, p - 0.12))
+                let trail = max(lead + 0.03, min(0.998, p + 0.12))
                 let chStr = String(chars[charIdx])
+
+                let charStyle: AnyShapeStyle = {
+                    if charProgress >= 0.999 {
+                        return AnyShapeStyle(Color.white)
+                    } else if charProgress > 0.001 {
+                        return AnyShapeStyle(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .white, location: 0.0),
+                                    .init(color: .white, location: lead),
+                                    .init(color: .white.opacity(0.32), location: trail),
+                                    .init(color: .white.opacity(0.32), location: 1.0)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                    } else {
+                        return AnyShapeStyle(Color.white.opacity(0.32))
+                    }
+                }()
 
                 Text(chStr)
                     .font(font)
-                    .foregroundStyle(Color.white.opacity(charProgress >= 0.999 ? 1.0 : 0.34))
-                    .overlay {
-                        if charProgress > 0.001 && charProgress < 0.999 {
-                            Text(chStr)
-                                .font(font)
-                                .foregroundStyle(Color.white)
-                                .mask(
-                                    LinearGradient(
-                                        stops: [
-                                            .init(color: .white, location: 0.0),
-                                            .init(color: .white, location: max(0.0, min(1.0, lead))),
-                                            .init(color: .clear, location: max(0.001, min(1.0, trail)))
-                                        ],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                )
-                        }
-                    }
+                    .foregroundStyle(charStyle)
                     .scaleEffect(CGFloat(1.0 + 0.09 * pulse))
                     .offset(y: CGFloat(-3.2 * pulse))
                     .shadow(color: Color.white.opacity(0.55 * pulse), radius: CGFloat(8.0 * pulse))

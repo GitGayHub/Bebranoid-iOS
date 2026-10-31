@@ -47,10 +47,15 @@ public final class CacheIndexManager: @unchecked Sendable {
         }
 
         for url in urls {
-            if url.pathExtension.lowercased() == "part" { continue }
+            let ext = url.pathExtension.lowercased()
+            if ext == "part" { continue }
             if let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
                let size = values.fileSize, size > 1024 {
                 cachedKeys.insert(url.lastPathComponent)
+                if ext == "caf" {
+                    let m4aAlias = url.deletingPathExtension().appendingPathExtension("m4a").lastPathComponent
+                    cachedKeys.insert(m4aAlias)
+                }
             }
         }
     }

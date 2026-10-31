@@ -60,7 +60,14 @@ public final class StorageManager: @unchecked Sendable {
             return URL(fileURLWithPath: local)
         }
         let safeName = safeCacheFilename(for: track.cacheKey)
-        return audioCacheDirectory.appendingPathComponent(safeName)
+        let baseURL = audioCacheDirectory.appendingPathComponent(safeName)
+        if track.sourceKind == .youtube {
+            let cafURL = baseURL.deletingPathExtension().appendingPathExtension("caf")
+            if fileManager.fileExists(atPath: cafURL.path) {
+                return cafURL
+            }
+        }
+        return baseURL
     }
 
     public func partialAudioFileURL(for track: Track) -> URL {

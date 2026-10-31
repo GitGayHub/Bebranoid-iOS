@@ -35,12 +35,12 @@ public struct SettingsView: View {
                                 let userName = appState.telegramClient.authorizedUserDisplayName
                                 Text(appState.telegramClient.isAuthorized
                                      ? (userName.map { "Telegram: \($0)" } ?? "Авторизован в Telegram")
-                                     : "Вход по QR-коду Telegram")
+                                     : "Быстрый вход в Telegram")
                                     .font(.system(size: 15, weight: .bold))
                                     .foregroundStyle(.white)
                                 Text(appState.telegramClient.isAuthorized
                                      ? (appState.telegramClient.authorizedPhoneNumber ?? "Сессия активна • Чаты синхронизированы")
-                                     : "Без ввода API-ключей • Автоподхват чатов и медиатеки")
+                                     : "Код приходит сразу в Telegram • Автоподхват чатов")
                                     .font(.system(size: 12))
                                     .foregroundStyle(.white.opacity(0.65))
                             }
@@ -283,76 +283,128 @@ public struct SettingsView: View {
     }
 }
 
-/// Экран пошаговой авторизации Telegram через нативный `TDLibFramework` (`src/views/Auth.jsx`).
-/// Единственный источник статуса авторизации — `authorizationStateReady` от TDLib.
+/// Незакрываемое диалоговое меню быстрой авторизации Telegram через нативный `TDLibFramework`.
+/// По умолчанию работает по номеру телефона (5-значный код мгновенно приходит в чат «Telegram»).
+/// Закрывается строго по кнопке «Отменить» или после успешного входа, чтобы свайп или переключение в Telegram за кодом никогда не сбрасывали окно.
 public struct TelegramAuthView: View {
     @ObservedObject var appState: BebranoidAppState
     @StateObject private var authVM = TelegramAuthViewModel()
-    @State private var showPhoneLogin: Bool = false
+    @State private var showPhoneLogin: Bool = true
+    @FocusState private var focusedField: AuthFieldFocus?
     @Environment(\.dismiss) private var dismiss
+
+    private enum AuthFieldFocus: Hashable {
+        case phone
+        case code
+        case password2FA
+    }
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
     }
 
-    public var body: some View {
-        NavigationStack {
-            ZStack {
-                Color(red: 0.07, green: 0.07, blue: 0.11).ignoresSafeArea()
+    private func closeModal() {
+        focusedField = nil
+        appState.isTelegramAuthPresented = false
+        dismiss()
+    }
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(authVM.connectionState == .ready ? Color.green : Color.orange)
-                                .frame(width: 8, height: 8)
-                            Text("TDLib: \(authVM.connectionState.rawValue)")
-                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.75))
+    private var canContinueCurrentStep: Bool {
+        if authVM.isLoading { return false }
+        switch authVM.step {
+        case .unauthorized, .awaitingQRConfirmation:
+            if showPhoneLogin {
+                return authVM.phoneNumber.filter(\.isWholeNumber).count >= 8
+            } else {
+                return true
+            }
+        case .awaitingCode:
+            return authVM.verificationCode.trimmingCharacters(in: .whitespacesAndNewlines).count >= 4
+        case .awaiting2FAPassword:
+            return !authVM.twoFactorPassword.isEmpty
+        case .authorized:
+            return true
+        }
+    }
+
+    private var continueButtonTitle: String {
+        switch authVM.step {
+        case .unauthorized, .awaitingQRConfirmation:
+            return showPhoneLogin ? "Продолжить" : "Обновить QR"
+        case .awaitingCode:
+            return "Продолжить"
+        case .awaiting2FAPassword:
+            return "Продолжить"
+        case .authorized:
+            return "Готово"
+        }
+    }
+
+    private func performPrimaryContinue() {
+        switch authVM.step {
+        case .unauthorized, .awaitingQRConfirmation:
+            if showPhoneLogin {
+                focusedField = nil
+                Task { await authVM.requestCode() }
+            } else {
+                Task { await authVM.requestQRLogin() }
+            }
+        case .awaitingCode:
+            focusedField = nil
+            Task { await authVM.submitCode() }
+        case .awaiting2FAPassword:
+            focusedField = nil
+            Task { await authVM.submit2FAPassword() }
+        case .authorized:
+            closeModal()
+        }
+    }
+
+    public var body: some View {
+        ZStack {
+            // Затемнённая подложка без закрытия по тапу мимо или свайпу вниз
+            Color.black.opacity(0.72)
+                .ignoresSafeArea()
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 32)
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        // Шапка менюшки
+                        HStack(spacing: 10) {
+                            Image(systemName: "paperplane.circle.fill")
+                                .font(.system(size: 28))
+                                .foregroundStyle(Color(red: 0.24, green: 0.68, blue: 1.0))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Вход в Telegram")
+                                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white)
+
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(authVM.connectionState == .ready ? Color.green : Color.orange)
+                                        .frame(width: 7, height: 7)
+                                    Text(authVM.connectionState == .ready ? "Подключено к Telegram" : authVM.connectionState.rawValue)
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.72))
+                                }
+                            }
+
                             Spacer()
-                            Label("Anti-Ban защита активна", systemImage: "shield.lefthalf.filled.badge.checkmark")
+
+                            Label("Anti-Ban", systemImage: "checkmark.shield.fill")
                                 .font(.system(size: 11, weight: .bold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.green.opacity(0.18), in: Capsule())
                                 .foregroundStyle(.green)
                         }
 
-                        if authVM.step != .authorized {
-                            HStack(spacing: 8) {
-                                Button {
-                                    showPhoneLogin = false
-                                    Task { await authVM.requestQRLogin() }
-                                } label: {
-                                    Label("По QR-коду", systemImage: "qrcode")
-                                        .font(.system(size: 13, weight: .bold))
-                                        .foregroundStyle(!showPhoneLogin ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 10)
-                                        .background(!showPhoneLogin ? appState.accentSwiftUIColor : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                                }
+                        Divider().overlay(Color.white.opacity(0.12))
 
-                                Button {
-                                    showPhoneLogin = true
-                                } label: {
-                                    Label("По номеру", systemImage: "phone.fill")
-                                        .font(.system(size: 13, weight: .bold))
-                                        .foregroundStyle(showPhoneLogin ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 10)
-                                        .background(showPhoneLogin ? appState.accentSwiftUIColor : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                                }
-                            }
-                        }
-
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "network.badge.shield.half.filled")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(appState.accentSwiftUIColor)
-                            Text("Безопасный вход: сессия использует реальный профиль вашего iPhone без фонового спама запросов. Чтобы Telegram не сбрасывал новую сессию из-за подозрительного IP, рекомендуем отключить VPN на время входа.")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.white.opacity(0.78))
-                        }
-                        .padding(12)
-                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-
+                        // Текущий шаг диалога
                         switch authVM.step {
                         case .unauthorized:
                             if showPhoneLogin {
@@ -375,278 +427,307 @@ public struct TelegramAuthView: View {
                         }
 
                         if let error = authVM.errorMessage {
-                            Text(error)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Color(red: 1.0, green: 0.42, blue: 0.42))
-                                .padding(12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.red.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.45))
+                                Text(error)
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(Color(red: 1.0, green: 0.55, blue: 0.55))
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
                         }
 
-                        if authVM.step != .authorized {
+                        Divider().overlay(Color.white.opacity(0.12))
+
+                        // Строгие кнопки менюшки: «Отменить» и «Продолжить»
+                        HStack(spacing: 12) {
                             Button {
-                                Task {
-                                    await appState.telegramClient.resetTDLibSession()
-                                    if !showPhoneLogin {
-                                        await authVM.requestQRLogin()
-                                    }
-                                }
+                                closeModal()
                             } label: {
-                                Label("Сбросить локальную базу TDLib (чистый вход)", systemImage: "arrow.triangle.2.circlepath")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.72))
+                                Text("Отменить")
+                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.9))
                                     .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                                    .padding(.vertical, 13)
+                                    .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                performPrimaryContinue()
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if authVM.isLoading {
+                                        ProgressView()
+                                            .tint(Color(red: 0.08, green: 0.06, blue: 0.14))
+                                            .scaleEffect(0.85)
+                                    }
+                                    Text(authVM.isLoading ? "Загрузка..." : continueButtonTitle)
+                                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                                }
+                                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 13)
+                                .background(
+                                    canContinueCurrentStep ? appState.accentSwiftUIColor : appState.accentSwiftUIColor.opacity(0.45),
+                                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!canContinueCurrentStep)
                         }
                     }
                     .padding(20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            .fill(Color(red: 0.10, green: 0.10, blue: 0.16))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                            )
+                            .shadow(color: .black.opacity(0.55), radius: 28, y: 12)
+                    )
+                    .padding(.horizontal, 18)
+
+                    Spacer(minLength: 32)
+                }
+                .frame(minHeight: 460)
+            }
+        }
+        .interactiveDismissDisabled(true)
+        .onAppear {
+            authVM.onAuthSuccess = {
+                Task { await appState.handleTelegramAuthorized() }
+                closeModal()
+            }
+            if authVM.step == .unauthorized && showPhoneLogin {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    focusedField = .phone
                 }
             }
-            .navigationTitle("Вход в Telegram")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Закрыть") { dismiss() }
-                        .foregroundStyle(.white)
+        }
+        .onChange(of: authVM.step) { _, newStep in
+            switch newStep {
+            case .awaitingCode:
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    focusedField = .code
                 }
+            case .awaiting2FAPassword:
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    focusedField = .password2FA
+                }
+            default:
+                break
             }
-            .onAppear {
-                authVM.onAuthSuccess = {
-                    Task { await appState.handleTelegramAuthorized() }
-                    dismiss()
-                }
-            }
-            .task {
-                // Сразу запрашиваем QR-код без необходимости искать и вводить API ID / API Hash
-                if !showPhoneLogin, authVM.step == .unauthorized {
-                    await authVM.requestQRLogin()
-                }
+        }
+        .task {
+            // Инициализируем TDLib в состоянии ожидания номера (БЕЗ вызова QR, который раньше блокировал отправку кода!)
+            if !appState.telegramClient.isAuthorized {
+                _ = await appState.telegramClient.initializeAndRestoreSession()
             }
         }
     }
 
     private var phoneStepView: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Быстрый вход в Telegram (без API-ключей)", systemImage: "paperplane.fill")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Введите ваш номер телефона — 5-значный код мгновенно придёт в чат «Telegram» на вашем телефоне.")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.80))
 
-            Text("Введите номер телефона — код придёт прямо в пуш-уведомлении приложения Telegram на этом iPhone (или отсканируйте QR-код с другого устройства).")
-                .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.75))
-
-            TextField("Номер телефона (+380... / +7...)", text: $authVM.phoneNumber)
+            TextField("+380... или +7...", text: $authVM.phoneNumber)
+                .focused($focusedField, equals: .phone)
                 #if os(iOS)
                 .keyboardType(.phonePad)
                 .textContentType(.telephoneNumber)
                 #endif
+                .font(.system(size: 17, weight: .semibold, design: .monospaced))
                 .padding(14)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(focusedField == .phone ? appState.accentSwiftUIColor : Color.white.opacity(0.12), lineWidth: 1.2)
+                )
                 .foregroundStyle(.white)
 
-            Button {
-                Task { await authVM.requestCode() }
-            } label: {
-                HStack(spacing: 8) {
-                    if authVM.isLoading {
-                        ProgressView().tint(Color(red: 0.08, green: 0.06, blue: 0.14))
-                    }
-                    Label("Получить код в Telegram", systemImage: "message.badge.filled.fill")
-                        .font(.system(size: 15, weight: .bold))
+            HStack {
+                Button {
+                    focusedField = nil
+                    showPhoneLogin = false
+                    Task { await authVM.requestQRLogin() }
+                } label: {
+                    Label("Вход по QR с другого телефона", systemImage: "qrcode")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(appState.accentSwiftUIColor)
                 }
-                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
-            }
-            .disabled(authVM.isLoading)
+                .buttonStyle(.plain)
+                .disabled(authVM.isLoading)
 
-            Button {
-                showPhoneLogin = false
-                Task { await authVM.requestQRLogin() }
-            } label: {
-                HStack(spacing: 8) {
-                    Label("Показать QR-код (для сканирования с другого телефона)", systemImage: "qrcode")
-                        .font(.system(size: 14, weight: .semibold))
+                Spacer()
+
+                Button {
+                    Task { await authVM.resetToPhoneInput() }
+                } label: {
+                    Label("Сброс сессии", systemImage: "arrow.counterclockwise")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.55))
                 }
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+                .buttonStyle(.plain)
+                .disabled(authVM.isLoading)
             }
-            .disabled(authVM.isLoading)
-
-            DisclosureGroup("Пользовательские API ID / Hash (опционально)") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("По умолчанию используются проверенные ключи Bebranoid. Если хотите подключить личные ключи с https://my.telegram.org:")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.60))
-
-                    TextField("Telegram API ID (число)", text: $authVM.apiId)
-                        .padding(12)
-                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                        .foregroundStyle(.white)
-
-                    SecureField("Telegram API Hash", text: $authVM.apiHash)
-                        .padding(12)
-                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                        .foregroundStyle(.white)
-
-                    Button("Сохранить свои ключи в Keychain") {
-                        authVM.saveCredentialsOnly()
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-                }
-                .padding(.top, 6)
-            }
-            .font(.system(size: 12))
-            .foregroundStyle(.white.opacity(0.65))
+            .padding(.top, 2)
         }
     }
 
     private var codeStepView: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Введите 5-значный код из уведомления Telegram")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "message.badge.filled.fill")
+                    .foregroundStyle(appState.accentSwiftUIColor)
+                Text(authVM.codeDeliveryHint ?? "Код отправлен в приложение Telegram")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundStyle(.white)
+            }
 
-            TextField("Код подтверждения", text: $authVM.verificationCode)
+            Text("Откройте приложение Telegram (чат «Telegram»), скопируйте 5-значный код и введите его ниже. Это окно не закроется при переключении приложений.")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.72))
+
+            TextField("5-значный код (например: 12345)", text: $authVM.verificationCode)
+                .focused($focusedField, equals: .code)
                 #if os(iOS)
                 .keyboardType(.numberPad)
                 .textContentType(.oneTimeCode)
                 #endif
+                .font(.system(size: 20, weight: .bold, design: .monospaced))
+                .multilineTextAlignment(.center)
                 .padding(14)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(appState.accentSwiftUIColor, lineWidth: 1.5)
+                )
                 .foregroundStyle(.white)
+                .onChange(of: authVM.verificationCode) { _, newValue in
+                    let digits = newValue.filter(\.isWholeNumber)
+                    if digits != newValue {
+                        authVM.verificationCode = digits
+                    }
+                    if digits.count == 5 && !authVM.isLoading {
+                        focusedField = nil
+                        Task { await authVM.submitCode() }
+                    }
+                }
 
-            Button {
-                Task { await authVM.submitCode() }
-            } label: {
-                Text("Подтвердить код")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
+            HStack {
+                Button {
+                    Task { await authVM.resetToPhoneInput() }
+                } label: {
+                    Label("Изменить номер", systemImage: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .disabled(authVM.isLoading)
+
+                Spacer()
+
+                Button {
+                    Task { await authVM.resendCode() }
+                } label: {
+                    Label("Отправить код ещё раз", systemImage: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(appState.accentSwiftUIColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(authVM.isLoading)
             }
-            .disabled(authVM.isLoading)
         }
     }
 
     private func qrConfirmationStepView(link: String) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Вход через QR-код Telegram", systemImage: "qrcode.viewfinder")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
-
-            Text("Отсканируйте этот QR-код камерой другого устройства (Telegram → Настройки → Устройства → Подключить устройство). Если Telegram установлен на этом же iPhone — войдите по номеру телефона (код придёт в пуш-уведомлении).")
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Отсканируйте QR-код камерой второго устройства (Telegram → Настройки → Устройства → Подключить устройство).")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.75))
 
-            Button {
-                showPhoneLogin = true
-            } label: {
-                Label("Войти по номеру телефона на этом iPhone", systemImage: "phone.fill")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
-            }
-
             TelegramQRCodeView(link: link)
-                .frame(maxWidth: 260)
+                .frame(maxWidth: 220)
                 .frame(maxWidth: .infinity)
 
-            if !authVM.isLoading {
-                Button {
-                    Task {
-                        if link.isEmpty {
-                            await appState.telegramClient.resetTDLibSession()
-                        }
-                        await authVM.requestQRLogin()
-                    }
-                } label: {
-                    Label("Обновить QR-код", systemImage: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
-                }
+            Button {
+                showPhoneLogin = true
+                Task { await authVM.resetToPhoneInput() }
+            } label: {
+                Label("Вернуться ко входу по номеру телефона", systemImage: "phone.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(appState.accentSwiftUIColor)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
             }
+            .buttonStyle(.plain)
         }
     }
 
     private var twoFactorStepView: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Облачный пароль двухфакторной аутентификации (2FA)")
-                .font(.system(size: 16, weight: .bold))
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Облачный пароль 2FA", systemImage: "lock.shield.fill")
+                .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(.white)
 
             if let hint = authVM.twoFactorHint, !hint.isEmpty {
                 Text("Подсказка пароля: \(hint)")
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.65))
+                    .foregroundStyle(.white.opacity(0.68))
             }
 
-            SecureField("Облачный пароль 2FA", text: $authVM.twoFactorPassword)
+            SecureField("Введите облачный пароль Telegram", text: $authVM.twoFactorPassword)
+                .focused($focusedField, equals: .password2FA)
                 .padding(14)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(appState.accentSwiftUIColor, lineWidth: 1.2)
+                )
                 .foregroundStyle(.white)
-
-            Button {
-                Task { await authVM.submit2FAPassword() }
-            } label: {
-                Text("Войти")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 14))
-            }
-            .disabled(authVM.isLoading)
+                .onSubmit {
+                    performPrimaryContinue()
+                }
         }
     }
 
     private var authorizedSummaryView: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Сессия TDLib активна (authorizationStateReady)", systemImage: "checkmark.shield.fill")
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Вы успешно вошли в Telegram", systemImage: "checkmark.seal.fill")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.green)
 
             if let userName = appState.telegramClient.authorizedUserDisplayName, !userName.isEmpty {
-                Text("Профиль: \(userName)")
-                    .font(.system(size: 15, weight: .semibold))
+                Text("Аккаунт: \(userName)")
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
             }
 
             Text("Телефон: \(appState.telegramClient.authorizedPhoneNumber ?? "Подключён")")
-                .font(.system(size: 14))
+                .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.80))
 
             Text("Основной чат: \(appState.libraryState.selectedTelegramChatTitle)")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.70))
+                .font(.system(size: 12.5))
+                .foregroundStyle(.white.opacity(0.68))
 
             Button(role: .destructive) {
                 authVM.logout()
             } label: {
-                Text("Выйти из TDLib и очистить сессию")
-                    .font(.system(size: 14, weight: .bold))
+                Text("Выйти из аккаунта Telegram")
+                    .font(.system(size: 13.5, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .background(Color.red.opacity(0.75), in: RoundedRectangle(cornerRadius: 14))
+                    .padding(.vertical, 11)
+                    .background(Color.red.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
             }
+            .buttonStyle(.plain)
         }
     }
 }
