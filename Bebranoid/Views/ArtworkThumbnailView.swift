@@ -22,8 +22,15 @@ public struct ArtworkThumbnailView: View {
     public var cornerRadius: CGFloat
     public var showFavoriteOverlay: Bool
     public var sizeTier: ArtworkSizeTier
+    public var enableSmoothTransition: Bool
+    public var showBorder: Bool
 
     @State private var asyncLoadedCGImage: CGImage?
+    @State private var displayedCGImage: CGImage?
+    @State private var displayedKey: String = ""
+    @State private var outgoingCGImage: CGImage?
+    @State private var incomingAlpha: Double = 1.0
+    @State private var cleanupOutgoingTask: Task<Void, Never>? = nil
 
     public init(
         track: Track? = nil,
@@ -32,7 +39,9 @@ public struct ArtworkThumbnailView: View {
         fallbackSeed: String,
         cornerRadius: CGFloat = 12,
         showFavoriteOverlay: Bool = false,
-        sizeTier: ArtworkSizeTier = .albumGrid
+        sizeTier: ArtworkSizeTier = .albumGrid,
+        enableSmoothTransition: Bool = false,
+        showBorder: Bool = true
     ) {
         self.track = track
         self.localPath = localPath
@@ -41,6 +50,8 @@ public struct ArtworkThumbnailView: View {
         self.cornerRadius = cornerRadius
         self.showFavoriteOverlay = showFavoriteOverlay
         self.sizeTier = sizeTier
+        self.enableSmoothTransition = enableSmoothTransition
+        self.showBorder = showBorder
     }
 
     private var taskIdentifier: String {
@@ -58,7 +69,11 @@ public struct ArtworkThumbnailView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .overlay(borderOverlay)
+        .overlay {
+            if showBorder {
+                borderOverlay
+            }
+        }
         .task(id: taskIdentifier) {
             await loadArtworkOffMainThreadIfNeeded()
         }
@@ -66,12 +81,75 @@ public struct ArtworkThumbnailView: View {
 
     @ViewBuilder
     private var artworkImageLayer: some View {
-        if let cgImage = asyncLoadedCGImage ?? ArtworkService.shared.memoryCachedImage(forKey: taskIdentifier, tier: sizeTier) {
-            Image(decorative: cgImage, scale: 1.0, orientation: .up)
-                .resizable()
-                .scaledToFill()
+        if enableSmoothTransition {
+            ZStack {
+                if let prev = outgoingCGImage {
+                    Image(decorative: prev, scale: 1.0, orientation: .up)
+                        .resizable()
+                        .scaledToFill()
+                }
+
+                if let current = displayedCGImage {
+                    Image(decorative: current, scale: 1.0, orientation: .up)
+                        .resizable()
+                        .scaledToFill()
+                        .opacity(outgoingCGImage != nil ? incomingAlpha : 1.0)
+                } else if outgoingCGImage == nil {
+                    fallbackCover
+                } else {
+                    fallbackCover
+                        .opacity(incomingAlpha)
+                }
+            }
         } else {
-            fallbackCover
+            if let cgImage = asyncLoadedCGImage ?? ArtworkService.shared.memoryCachedImage(forKey: taskIdentifier, tier: sizeTier) {
+                Image(decorative: cgImage, scale: 1.0, orientation: .up)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                fallbackCover
+            }
+        }
+    }
+
+    private func commitResolvedImage(_ newImage: CGImage?, forKey key: String) {
+        guard enableSmoothTransition else {
+            if let newImage, asyncLoadedCGImage !== newImage {
+                asyncLoadedCGImage = newImage
+            } else if newImage == nil {
+                asyncLoadedCGImage = nil
+            }
+            return
+        }
+
+        if displayedKey.isEmpty {
+            displayedKey = key
+            displayedCGImage = newImage
+            outgoingCGImage = nil
+            incomingAlpha = 1.0
+            return
+        }
+
+        if displayedKey == key && displayedCGImage === newImage {
+            return
+        }
+
+        cleanupOutgoingTask?.cancel()
+        if let existing = displayedCGImage {
+            outgoingCGImage = existing
+        }
+        displayedKey = key
+        displayedCGImage = newImage
+        incomingAlpha = 0.0
+
+        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.72)) {
+            incomingAlpha = 1.0
+        }
+
+        cleanupOutgoingTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 760_000_000)
+            guard !Task.isCancelled else { return }
+            outgoingCGImage = nil
         }
     }
 
@@ -94,9 +172,7 @@ public struct ArtworkThumbnailView: View {
         let key = taskIdentifier
         let tier = sizeTier
         if let cached = ArtworkService.shared.memoryCachedImage(forKey: key, tier: tier) {
-            if asyncLoadedCGImage !== cached {
-                asyncLoadedCGImage = cached
-            }
+            commitResolvedImage(cached, forKey: key)
             return
         }
 
@@ -125,8 +201,8 @@ public struct ArtworkThumbnailView: View {
             return nil
         }.value
 
-        if !Task.isCancelled, let cgResult {
-            asyncLoadedCGImage = cgResult
+        if !Task.isCancelled {
+            commitResolvedImage(cgResult, forKey: key)
         }
     }
 

@@ -185,7 +185,7 @@ public enum LRCParser {
                         nsMain.substring(with: sm.range(at: 2))
                             .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
                     )
-                    let trimmedSpan = rawSpanText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedSpan = Self.stripInstrumentalOnlyMarkers(rawSpanText)
                     guard !trimmedSpan.isEmpty else {
                         prevSpanEndLocation = sm.range.location + sm.range.length
                         continue
@@ -222,17 +222,19 @@ public enum LRCParser {
                 anyWordTokens = true
                 baseText = mergedWords.map(\.text).joined(separator: " ")
             } else {
-                baseText = decodeXMLEntities(
-                    mainBody.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+                baseText = Self.stripInstrumentalOnlyMarkers(
+                    decodeXMLEntities(
+                        mainBody.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+                    )
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
                 )
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
             }
 
-            let fullLineText = ([baseText] + bgParts)
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let fullLineText = Self.stripInstrumentalOnlyMarkers(
+                ([baseText] + bgParts)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+            )
 
             guard !fullLineText.isEmpty else { continue }
 
@@ -353,12 +355,17 @@ public enum LRCParser {
                 }
             }
 
-            // Удаляем возможные оставшиеся угловые теги и декоративные ноты `♪` из субтитров YouTube
-            cleanLineText = cleanLineText
-                .replacingOccurrences(of: #"<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>"#, with: "", options: .regularExpression)
-                .replacingOccurrences(of: "♪", with: "")
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Удаляем возможные оставшиеся угловые теги и декоративные ноты `♪` / троеточия пауз (`...`, `…`) из субтитров
+            cleanLineText = Self.stripInstrumentalOnlyMarkers(
+                cleanLineText
+                    .replacingOccurrences(of: #"<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: "♪", with: "")
+                    .replacingOccurrences(of: "♫", with: "")
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            )
+            if cleanLineText.isEmpty {
+                extractedWords = nil
+            }
 
             for ts in lineTimestamps {
                 syncedEntries.append((time: ts, text: cleanLineText, rawWords: extractedWords))
@@ -418,6 +425,16 @@ public enum LRCParser {
                 if let lastTokenEnd = tokens.last?.endTime {
                     effectiveLineEndTime = lastTokenEnd
                 }
+            } else {
+                // Как в десктопном `transform.js`: если между line-synced строками огромный проигрыш (>= 18 с) без пустого маркера,
+                // ограничиваем длительность вокальной строки естественной оценкой, чтобы показать 3 точки `Interlude`
+                let rawGap = nextTime - entry.time
+                if rawGap >= 18.0 {
+                    let estimatedVocalSec = min(12.0, max(1.8, Double(entry.text.count) / 11.0 + 0.8))
+                    if rawGap - estimatedVocalSec >= 3.5 {
+                        effectiveLineEndTime = entry.time + estimatedVocalSec
+                    }
+                }
             }
 
             let lineIndex = builtLines.count
@@ -438,6 +455,17 @@ public enum LRCParser {
             kind: hasWordSync ? .word : .line,
             lines: builtLines
         )
+    }
+
+    /// Превращает строки-заглушки инструментала (`♪`, `♫`, `...`, `…`, `•••`) в пустой маркер паузы, чтобы вместо текстовых точек рисовалась волна `Interlude`
+    private static func stripInstrumentalOnlyMarkers(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let markerChars = CharacterSet(charactersIn: "♪♫♩♬.…•·-–—~* \t\n\r")
+        if trimmed.unicodeScalars.allSatisfy({ markerChars.contains($0) }) {
+            return ""
+        }
+        return trimmed
     }
 
     private static func isClosedCaptionNoiseLine(_ text: String) -> Bool {

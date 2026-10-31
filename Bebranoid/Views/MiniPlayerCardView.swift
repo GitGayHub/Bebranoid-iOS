@@ -28,7 +28,8 @@ public struct MiniPlayerCardView: View {
                         remoteURL: track.remoteArtworkURL,
                         fallbackSeed: "\(track.album)|\(track.artist)",
                         cornerRadius: 10,
-                        sizeTier: .listThumbnail
+                        sizeTier: .listThumbnail,
+                        enableSmoothTransition: true
                     )
                     .frame(width: 44, height: 44)
 

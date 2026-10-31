@@ -115,4 +115,25 @@ final class LRCParserTests: XCTestCase {
         XCTAssertEqual(decoded.selectedTelegramChatId, "-1003734947911")
         XCTAssertTrue(decoded.isGyroscope3DCoverEnabled)
     }
+
+    func testInterludeMarbleWaveAndInstrumentalMarkerStripping() {
+        let raw = """
+        [00:00.00] ...
+        [00:06.00] First vocal line
+        [00:08.50] ♪
+        [00:14.50] Second vocal line
+        """
+        let doc = LRCParser.parseLRC(raw)
+        XCTAssertEqual(doc.lines.count, 2)
+        let nodes = BeautifulLyricsTransform.transform(document: doc)
+        XCTAssertEqual(nodes.count, 4)
+
+        let midFrame = InterludeEngine.evaluate(startTime: 0.0, endTime: 6.0, timestamp: 3.0)
+        XCTAssertTrue(midFrame.isVisible)
+        XCTAssertEqual(midFrame.dots.count, 3)
+
+        let finalFrame = InterludeEngine.evaluate(startTime: 0.0, endTime: 6.0, timestamp: 5.85)
+        XCTAssertTrue(finalFrame.isCountdownPhase)
+        XCTAssertGreaterThan(finalFrame.dots[2].opacity, finalFrame.dots[0].opacity)
+    }
 }

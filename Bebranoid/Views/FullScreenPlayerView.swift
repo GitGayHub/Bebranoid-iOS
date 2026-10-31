@@ -18,6 +18,7 @@ public struct FullScreenPlayerView: View {
     @State private var dragDismissOffset: CGFloat = 0.0
     @State private var coverHorizontalOffset: CGFloat = 0.0
     @State private var lockedGestureAxis: Axis? = nil
+    @State private var trackChangeSettleScale: CGFloat = 1.0
     @StateObject private var gyro = GyroscopeMotionManager()
 
     public init(appState: BebranoidAppState) {
@@ -66,37 +67,54 @@ public struct FullScreenPlayerView: View {
                     let tiltX = appState.isGyroscope3DCoverEnabled ? gyro.tiltXDegrees : 0.0
                     let tiltY = appState.isGyroscope3DCoverEnabled ? gyro.tiltYDegrees : 0.0
                     let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 20.0)
+                    let resolvedLocalCoverPath = track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath }
+                    let coverFallbackSeed = "\(track?.album ?? "")|\(track?.artist ?? "")"
 
                     ZStack(alignment: .bottom) {
-                        // Физическая 3D-грань (толщина пластинки при повороте телефона)
-                        if appState.isGyroscope3DCoverEnabled && tiltMagnitude > 0.02 {
-                            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                            Color.white.opacity(0.22),
-                                            appState.accentSwiftUIColor.opacity(0.32),
-                                            Color.black.opacity(0.65)
-                                        ],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
+                        // Идеальное 3D-продолжение крайних пикселей самой обложки по бокам (8-слойная экструзия вглубь с естественным затенением торца)
+                        if appState.isGyroscope3DCoverEnabled && tiltMagnitude > 0.015 {
+                            ForEach((1...8).reversed(), id: \.self) { sliceIdx in
+                                let frac = Double(sliceIdx) / 8.0
+                                ArtworkThumbnailView(
+                                    track: track,
+                                    localPath: resolvedLocalCoverPath,
+                                    remoteURL: track?.remoteArtworkURL,
+                                    fallbackSeed: coverFallbackSeed,
+                                    cornerRadius: 28,
+                                    sizeTier: .fullPlayer,
+                                    enableSmoothTransition: true,
+                                    showBorder: false
                                 )
                                 .frame(width: coverSide, height: coverSide)
-                                .offset(
-                                    x: CGFloat(-tiltY * 0.36),
-                                    y: CGFloat(tiltX * 0.36)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                        .fill(Color.black.opacity(0.14 + 0.34 * frac))
                                 )
+                                .offset(
+                                    x: CGFloat(-tiltY * 0.44 * frac),
+                                    y: CGFloat(tiltX * 0.44 * frac)
+                                )
+                                .allowsHitTesting(false)
+                            }
                         }
 
-                        ArtworkThumbnailView(
-                            track: track,
-                            localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
-                            remoteURL: track?.remoteArtworkURL,
-                            fallbackSeed: "\(track?.album ?? "")|\(track?.artist ?? "")",
+                        // Живой бегущий ободок вокруг обложки 1:1 как на ПК (`.andro-cover-living-shell` + `.andro-cover-living-spin` 7.5s linear)
+                        CoverLivingRimShellView(
+                            accentRGB: appState.accentRGB,
                             cornerRadius: 28,
-                            sizeTier: .fullPlayer
-                        )
+                            isPaused: appState.isReducedMotionEnabled || dragDismissOffset > 1 || abs(coverHorizontalOffset) > 1
+                        ) {
+                            ArtworkThumbnailView(
+                                track: track,
+                                localPath: resolvedLocalCoverPath,
+                                remoteURL: track?.remoteArtworkURL,
+                                fallbackSeed: coverFallbackSeed,
+                                cornerRadius: 25.5,
+                                sizeTier: .fullPlayer,
+                                enableSmoothTransition: true,
+                                showBorder: false
+                            )
+                        }
                         .frame(width: coverSide, height: coverSide)
                         .overlay {
                             if appState.isGyroscope3DCoverEnabled {
@@ -109,29 +127,14 @@ public struct FullScreenPlayerView: View {
                                     .fill(
                                         RadialGradient(
                                             colors: [
-                                                Color.white.opacity(0.18 * tiltMagnitude),
-                                                Color.white.opacity(0.04 * tiltMagnitude),
+                                                Color.white.opacity(0.16 * tiltMagnitude),
+                                                Color.white.opacity(0.03 * tiltMagnitude),
                                                 Color.clear
                                             ],
                                             center: lightCenter,
                                             startRadius: 8,
                                             endRadius: coverSide * 0.78
                                         )
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                            .strokeBorder(
-                                                LinearGradient(
-                                                    colors: [
-                                                        Color.white.opacity(0.34 * max(0.25, tiltMagnitude)),
-                                                        Color.white.opacity(0.06),
-                                                        Color.black.opacity(0.28)
-                                                    ],
-                                                    startPoint: lightCenter,
-                                                    endPoint: .bottomTrailing
-                                                ),
-                                                lineWidth: 1.3
-                                            )
                                     )
                                     .allowsHitTesting(false)
                             }
@@ -171,7 +174,7 @@ public struct FullScreenPlayerView: View {
                     )
                     .offset(x: coverHorizontalOffset)
                     .rotationEffect(.degrees(Double(coverHorizontalOffset) * 0.035))
-                    .scaleEffect(appState.isPlaying ? 1.0 : 0.93)
+                    .scaleEffect((appState.isPlaying ? 1.0 : 0.93) * trackChangeSettleScale)
                     .shadow(
                         color: Color.black.opacity(0.50),
                         radius: 28,
@@ -239,6 +242,12 @@ public struct FullScreenPlayerView: View {
         }
         .onChange(of: appState.isLyricsScreenPresented) { _, lyricsOpen in
             gyro.setActive(appState.isGyroscope3DCoverEnabled && !lyricsOpen)
+        }
+        .onChange(of: track?.id) { _, _ in
+            trackChangeSettleScale = 0.972
+            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.68)) {
+                trackChangeSettleScale = 1.0
+            }
         }
     }
 
@@ -309,21 +318,13 @@ public struct FullScreenPlayerView: View {
                 switch lockedGestureAxis {
                 case .horizontal:
                     if dx < -46 || predictedX < -110 {
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            coverHorizontalOffset = -coverWidth * 0.38
-                        }
                         appState.skipToNext(isManualUserAction: true)
-                        coverHorizontalOffset = coverWidth * 0.24
-                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.84)) {
+                        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.52)) {
                             coverHorizontalOffset = 0
                         }
                     } else if dx > 46 || predictedX > 110 {
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            coverHorizontalOffset = coverWidth * 0.38
-                        }
                         appState.skipToPrevious()
-                        coverHorizontalOffset = -coverWidth * 0.24
-                        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.84)) {
+                        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.52)) {
                             coverHorizontalOffset = 0
                         }
                     } else {
@@ -744,5 +745,68 @@ public struct InteractiveSeekBarView: View {
             .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.82), value: isDragging)
         }
         .frame(height: 32)
+    }
+}
+
+/// Живой бегущий световой ободок вокруг обложки (`.andro-cover-living-shell` + `.andro-cover-living-spin` из `C:\VibeCoding\Bebranoid\src\index.css` строки 939–1003):
+/// конический градиент делает полный оборот за `7.5s` линейно вокруг отступа `2.5 pt` лицевой грани обложки с мягким акцентным свечением.
+private struct CoverLivingRimShellView<FaceContent: View>: View {
+    let accentRGB: MeshRGB
+    let cornerRadius: CGFloat
+    let isPaused: Bool
+    @ViewBuilder let faceContent: () -> FaceContent
+
+    private func mixColor(accentWeight: Double, baseR: Double, baseG: Double, baseB: Double) -> Color {
+        let norm = accentRGB.normalizedDouble
+        let w = min(1.0, max(0.0, accentWeight))
+        let r = norm.r * w + baseR * (1.0 - w)
+        let g = norm.g * w + baseG * (1.0 - w)
+        let b = norm.b * w + baseB * (1.0 - w)
+        return Color(red: r, green: g, blue: b)
+    }
+
+    var body: some View {
+        let norm = accentRGB.normalizedDouble
+        let pureAccent = Color(red: norm.r, green: norm.g, blue: norm.b)
+        let dark50 = mixColor(accentWeight: 0.50, baseR: 0.067, baseG: 0.067, baseB: 0.067) // 50% accent + #111
+        let dark48 = mixColor(accentWeight: 0.48, baseR: 0.067, baseG: 0.067, baseB: 0.067) // 48% accent + #111
+        let bright82 = mixColor(accentWeight: 0.82, baseR: 1.0, baseG: 1.0, baseB: 1.0)     // 82% accent + #fff
+        let bright78 = mixColor(accentWeight: 0.78, baseR: 1.0, baseG: 1.0, baseB: 1.0)     // 78% accent + #fff
+
+        let stops: [Gradient.Stop] = [
+            .init(color: dark50, location: 0.0 / 360.0),
+            .init(color: pureAccent, location: 55.0 / 360.0),
+            .init(color: bright82, location: 100.0 / 360.0),
+            .init(color: pureAccent, location: 160.0 / 360.0),
+            .init(color: dark48, location: 220.0 / 360.0),
+            .init(color: bright78, location: 280.0 / 360.0),
+            .init(color: dark50, location: 1.0)
+        ]
+
+        ZStack {
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: isPaused)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                let angleDeg = (t.truncatingRemainder(dividingBy: 7.5) / 7.5) * 360.0
+
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(
+                        AngularGradient(
+                            gradient: Gradient(stops: stops),
+                            center: .center,
+                            startAngle: .degrees(angleDeg),
+                            endAngle: .degrees(angleDeg + 360.0)
+                        )
+                    )
+            }
+
+            faceContent()
+                .background(Color(red: 0.02, green: 0.02, blue: 0.02))
+                .clipShape(RoundedRectangle(cornerRadius: max(4, cornerRadius - 2.5), style: .continuous))
+                .padding(2.5)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .shadow(color: pureAccent.opacity(0.36), radius: 14, x: 0, y: 0)
+        .shadow(color: pureAccent.opacity(0.42), radius: 4, x: 0, y: 0)
+        .animation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.65), value: accentRGB)
     }
 }

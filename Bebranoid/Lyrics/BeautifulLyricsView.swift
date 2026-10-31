@@ -20,6 +20,7 @@ public struct BeautifulLyricsView: View {
     @State private var activeLineIndex: Int = -1
     @State private var isUserBrowsing: Bool = false
     @State private var autoResumeTask: Task<Void, Never>? = nil
+    @State private var selectedPlainLineIndex: Int? = nil
 
     public init(
         document: ParsedLyricsDocument,
@@ -44,20 +45,20 @@ public struct BeautifulLyricsView: View {
     }
 
     public var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            // Лёгкий трекер смены индекса активной строки: обновляет `ScrollView` только при реальном переходе на новую строку
-            ActiveLineIndexDriverView(
-                lines: document.lines,
-                isPlaying: isPlaying,
-                liveTimeProvider: liveTimeProvider,
-                activeLineIndex: $activeLineIndex
-            )
-            .frame(width: 0, height: 0)
-            .allowsHitTesting(false)
+        ScrollViewReader { proxy in
+            ZStack(alignment: .bottomTrailing) {
+                // Лёгкий трекер смены индекса активной строки: обновляет `ScrollView` только при реальном переходе на новую строку
+                ActiveLineIndexDriverView(
+                    lines: document.lines,
+                    isPlaying: isPlaying,
+                    liveTimeProvider: liveTimeProvider,
+                    activeLineIndex: $activeLineIndex
+                )
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
 
-            ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 0) {
                         Spacer().frame(height: 32)
 
                         ForEach(nodes) { node in
@@ -76,19 +77,30 @@ public struct BeautifulLyricsView: View {
                                 BeautifulVocalLineRow(
                                     group: group,
                                     activeLineIndex: activeLineIndex,
+                                    selectedPlainLineIndex: selectedPlainLineIndex,
                                     syncKind: document.kind,
                                     isPlaying: isPlaying,
                                     liveTimeProvider: liveTimeProvider,
                                     accentColor: accentColor,
                                     scaleFactor: fontSizePreset.scaleFactor,
                                     showTranslation: showTranslation,
-                                    isUserBrowsing: isUserBrowsing,
                                     onTap: {
                                         autoResumeTask?.cancel()
-                                        isUserBrowsing = false
-                                        onSeekToTime(group.startTime)
+                                        if document.kind == .plain {
+                                            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.38)) {
+                                                if selectedPlainLineIndex == group.lineIndex {
+                                                    selectedPlainLineIndex = nil
+                                                } else {
+                                                    selectedPlainLineIndex = group.lineIndex
+                                                }
+                                            }
+                                        } else {
+                                            isUserBrowsing = false
+                                            onSeekToTime(group.startTime)
+                                        }
                                     }
                                 )
+                                .padding(.vertical, 11)
                                 .id(group.id)
                             }
                         }
@@ -100,6 +112,7 @@ public struct BeautifulLyricsView: View {
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
                         .onChanged { _ in
+                            guard document.kind != .plain else { return }
                             if !isUserBrowsing {
                                 isUserBrowsing = true
                             }
@@ -112,6 +125,7 @@ public struct BeautifulLyricsView: View {
                     scrollToActiveNode(proxy: proxy, lineIndex: initialIdx, animated: false)
                 }
                 .onChange(of: document.lines.count) { _, _ in
+                    selectedPlainLineIndex = nil
                     let idx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
                     activeLineIndex = idx
                     scrollToActiveNode(proxy: proxy, lineIndex: idx, animated: false)
@@ -120,29 +134,37 @@ public struct BeautifulLyricsView: View {
                     guard !isUserBrowsing else { return }
                     scrollToActiveNode(proxy: proxy, lineIndex: newIdx, animated: true)
                 }
-            }
-
-            if isUserBrowsing {
-                Button {
-                    autoResumeTask?.cancel()
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.92)) {
-                        isUserBrowsing = false
+                .onChange(of: isUserBrowsing) { _, browsing in
+                    if !browsing {
+                        let currentIdx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
+                        activeLineIndex = currentIdx
+                        scrollToActiveNode(proxy: proxy, lineIndex: currentIdx, animated: true)
                     }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.up.and.down.circle.fill")
-                        Text("Синхр.")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
                 }
-                .padding(.trailing, 20)
-                .padding(.bottom, 16)
-                .transition(.scale.combined(with: .opacity))
+
+                if isUserBrowsing && document.kind != .plain {
+                    Button {
+                        autoResumeTask?.cancel()
+                        let currentIdx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
+                        activeLineIndex = currentIdx
+                        isUserBrowsing = false
+                        scrollToActiveNode(proxy: proxy, lineIndex: currentIdx, animated: true)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.up.and.down.circle.fill")
+                            Text("Синхр.")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                    }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 16)
+                    .transition(.scale.combined(with: .opacity))
+                }
             }
         }
     }
@@ -152,26 +174,41 @@ public struct BeautifulLyricsView: View {
         autoResumeTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 4_500_000_000)
             guard !Task.isCancelled else { return }
-            withAnimation(.spring(response: 0.48, dampingFraction: 0.96)) {
+            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.55)) {
                 isUserBrowsing = false
             }
         }
     }
 
     private func scrollToActiveNode(proxy: ScrollViewProxy, lineIndex: Int, animated: Bool = true) {
-        guard lineIndex >= 0 else { return }
-        if let activeVocal = nodes.first(where: {
-            if case .vocal(let g) = $0 { return g.lineIndex == lineIndex }
-            return false
-        }) {
-            if animated {
-                // Критически демпфированная пружина без отскока — сверхплавное скольжение при 120 Гц
-                withAnimation(.spring(response: 0.48, dampingFraction: 0.97, blendDuration: 0.16)) {
-                    proxy.scrollTo(activeVocal.id, anchor: UnitPoint(x: 0.5, y: 0.33))
+        guard document.kind != .plain else { return }
+        let targetId: String? = {
+            if lineIndex < 0 {
+                if let introNode = nodes.first(where: {
+                    if case .interlude(let id, _, _) = $0 { return id == "interlude_intro" }
+                    return false
+                }) {
+                    return introNode.id
                 }
-            } else {
-                proxy.scrollTo(activeVocal.id, anchor: UnitPoint(x: 0.5, y: 0.33))
+                return nodes.first?.id
             }
+            if let activeVocal = nodes.first(where: {
+                if case .vocal(let g) = $0 { return g.lineIndex == lineIndex }
+                return false
+            }) {
+                return activeVocal.id
+            }
+            return nil
+        }()
+
+        guard let targetId else { return }
+        if animated {
+            // Точная кривая `cubic-bezier(0.22, 1, 0.36, 1)` из десктопного `BeautifulLyrics.css` — сливочное скольжение без подпрыгивания
+            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.68)) {
+                proxy.scrollTo(targetId, anchor: UnitPoint(x: 0.5, y: 0.34))
+            }
+        } else {
+            proxy.scrollTo(targetId, anchor: UnitPoint(x: 0.5, y: 0.34))
         }
     }
 }
@@ -210,20 +247,26 @@ private struct InterludeDotsLiveContainer: View {
             let now = liveTimeProvider()
             let state = InterludeEngine.evaluate(startTime: startTime, endTime: endTime, timestamp: now)
             if state.isVisible {
-                HStack(spacing: 10) {
+                HStack(spacing: 6.5) {
                     ForEach(0..<state.dots.count, id: \.self) { idx in
                         let dot = state.dots[idx]
+                        let baseWhiteAlpha = dot.isLit ? 0.96 : 0.72
                         Circle()
-                            .fill(Color.white.opacity(dot.opacity))
-                            .frame(width: 10, height: 10)
+                            .fill(Color.white.opacity(baseWhiteAlpha * dot.opacity))
+                            .frame(width: 8.0, height: 8.0)
                             .scaleEffect(CGFloat(dot.scale))
-                            .offset(y: CGFloat(dot.yOffset * 0.45))
-                            .shadow(color: Color.white.opacity(dot.glow * 0.50), radius: CGFloat(6.0 * dot.glow))
+                            .offset(y: CGFloat(dot.yOffset))
+                            .shadow(
+                                color: Color.white.opacity(dot.glow * 0.85 * state.groupOpacity),
+                                radius: CGFloat(3.0 + 7.5 * dot.glow)
+                            )
                     }
                 }
                 .scaleEffect(CGFloat(state.groupScale), anchor: .leading)
                 .opacity(state.groupOpacity)
-                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: CGFloat(34.0 * state.expansionProgress))
+                .opacity(state.expansionProgress)
             }
         }
     }
@@ -232,100 +275,118 @@ private struct InterludeDotsLiveContainer: View {
 private struct BeautifulVocalLineRow: View {
     let group: BeautifulVocalLineGroup
     let activeLineIndex: Int
+    let selectedPlainLineIndex: Int?
     let syncKind: ParsedLyricsSyncKind
     let isPlaying: Bool
     let liveTimeProvider: () -> Double
     let accentColor: Color
     let scaleFactor: CGFloat
     let showTranslation: Bool
-    let isUserBrowsing: Bool
     let onTap: () -> Void
 
     private var isLineActive: Bool {
-        if syncKind == .plain { return true }
+        if syncKind == .plain {
+            return selectedPlainLineIndex == group.lineIndex
+        }
         return group.lineIndex == activeLineIndex
     }
 
     private var isLinePast: Bool {
-        guard syncKind != .plain else { return false }
+        guard syncKind != .plain, activeLineIndex >= 0 else { return false }
         return group.lineIndex < activeLineIndex
     }
 
+    /// Неактивные строки ВСЕГДА остаются мягкими серенькими (даже на паузе, во вступлении `activeLineIndex == -1` и при прокрутке пальцем!)
     private var nonActiveLineOpacity: Double {
-        guard syncKind != .plain, activeLineIndex >= 0 else { return 0.90 }
-        if isUserBrowsing { return 0.72 }
+        if syncKind == .plain {
+            return 0.46
+        }
+        if activeLineIndex < 0 {
+            let dist = min(4, group.lineIndex)
+            return max(0.18, 0.30 - Double(dist) * 0.03)
+        }
         let dist = min(4, abs(group.lineIndex - activeLineIndex))
         let base = isLinePast ? 0.38 : 0.28
-        return max(0.16, base - Double(dist) * 0.03)
+        return max(0.18, base - Double(dist) * 0.025)
     }
 
     var body: some View {
         Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 6) {
-                if !group.syllables.isEmpty && syncKind != .plain {
-                    // ВАЖНО: Всегда рендерим одну и ту же раскладку `SyllableWrappingFlowLayout`
-                    // для прошлых, активной и будущих строк — ноль переносов строк во время проигрывания!
-                    if isLineActive {
-                        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !isPlaying)) { context in
-                            let _ = context.date
+            HStack(alignment: .center, spacing: 10) {
+                if syncKind == .plain && isLineActive {
+                    Capsule()
+                        .fill(accentColor)
+                        .frame(width: 3.5)
+                        .padding(.vertical, 3)
+                        .transition(.opacity.combined(with: .scale))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    if !group.syllables.isEmpty && syncKind != .plain {
+                        // ВАЖНО: Всегда рендерим одну и ту же раскладку `SyllableWrappingFlowLayout`
+                        // для прошлых, активной и будущих строк — ноль переносов строк во время проигрывания!
+                        if isLineActive {
+                            TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !isPlaying)) { context in
+                                let _ = context.date
+                                SyllableFlowLineView(
+                                    syllables: group.syllables,
+                                    lineMode: .active(currentTime: liveTimeProvider(), isPlaying: isPlaying),
+                                    scaleFactor: scaleFactor
+                                )
+                            }
+                        } else {
                             SyllableFlowLineView(
                                 syllables: group.syllables,
-                                lineMode: .active(currentTime: liveTimeProvider()),
+                                lineMode: .inactive(opacity: nonActiveLineOpacity),
                                 scaleFactor: scaleFactor
                             )
                         }
                     } else {
-                        SyllableFlowLineView(
-                            syllables: group.syllables,
-                            lineMode: .inactive(opacity: nonActiveLineOpacity),
-                            scaleFactor: scaleFactor
-                        )
+                        Text(group.mainText)
+                            .font(.system(size: 26 * scaleFactor, weight: .bold, design: .rounded))
+                            .foregroundStyle(
+                                isLineActive
+                                    ? Color.white
+                                    : Color.white.opacity(nonActiveLineOpacity)
+                            )
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                } else {
-                    Text(group.mainText)
-                        .font(.system(size: 26 * scaleFactor, weight: .bold, design: .rounded))
-                        .foregroundStyle(
-                            isLineActive
-                                ? Color.white
-                                : Color.white.opacity(nonActiveLineOpacity)
-                        )
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
 
-                if let bg = group.backgroundText, !bg.isEmpty {
-                    Text(bg)
-                        .font(.system(size: 17.5 * scaleFactor, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(isLineActive ? 0.66 : 0.26))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                    if let bg = group.backgroundText, !bg.isEmpty {
+                        Text(bg)
+                            .font(.system(size: 17.5 * scaleFactor, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(isLineActive ? 0.68 : 0.26))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-                if let romanized = group.romanizedText, !romanized.isEmpty {
-                    Text(romanized)
-                        .font(.system(size: 13.5 * scaleFactor, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(isLineActive ? 0.58 : 0.24))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                    if let romanized = group.romanizedText, !romanized.isEmpty {
+                        Text(romanized)
+                            .font(.system(size: 13.5 * scaleFactor, weight: .medium, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(isLineActive ? 0.58 : 0.24))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-                if showTranslation, let tr = group.translatedText, !tr.isEmpty {
-                    Text(tr)
-                        .font(.system(size: 15.5 * scaleFactor, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(isLineActive ? 0.76 : 0.30))
-                        .padding(.top, 2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if showTranslation, let tr = group.translatedText, !tr.isEmpty {
+                        Text(tr)
+                            .font(.system(size: 15.5 * scaleFactor, weight: .medium, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(isLineActive ? 0.78 : 0.30))
+                            .padding(.top, 2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .scaleEffect(isLineActive ? 1.0 : 0.95, anchor: .leading)
+            .scaleEffect(isLineActive ? 1.0 : (syncKind == .plain ? 0.98 : 0.955), anchor: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .animation(.spring(response: 0.42, dampingFraction: 0.94), value: isLineActive)
+        .animation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.62), value: isLineActive)
     }
 }
 
 private enum SyllableLineRenderMode: Equatable {
-    case active(currentTime: Double)
+    case active(currentTime: Double, isPlaying: Bool)
     case inactive(opacity: Double)
 }
 
@@ -419,17 +480,19 @@ private struct SyllableWordSpanView: View {
                 .font(font)
                 .foregroundStyle(Color.white.opacity(opacity))
 
-        case .active(let currentTime):
+        case .active(let currentTime, let isPlaying):
             let dur = max(0.06, syllable.duration)
             let rawProgress = HarmonoidMeshEngine.clamp((currentTime - syllable.startTime) / dur, 0.0, 1.0)
             let smoothCubic = rawProgress * rawProgress * (3.0 - 2.0 * rawProgress)
             let progress = 0.45 * rawProgress + 0.55 * smoothCubic
             let isActive = rawProgress > 0.001 && rawProgress < 0.999
             let isPast = rawProgress >= 0.999
+            // На паузе непропетые слова активной строки остаются светлыми (0.78), чтобы текущая строка всегда была ярче серых соседних!
+            let unsungAlpha: Double = isPlaying ? 0.38 : 0.78
 
             let fadeAt = fadePeer?.startTime ?? (syllable.endTime + 0.50)
             let fadeOut = isPast ? HarmonoidMeshEngine.clamp((currentTime - fadeAt) / 0.75, 0.0, 1.0) : 0.0
-            let restAlpha = 1.0 - 0.10 * fadeOut
+            let restAlpha = 1.0 - 0.08 * fadeOut
 
             // Мягкая растушёвка границы заполнения слова (28% ширины слова)
             let p = HarmonoidMeshEngine.clamp(progress, 0.01, 0.99)
@@ -456,15 +519,15 @@ private struct SyllableWordSpanView: View {
                             stops: [
                                 .init(color: .white, location: 0.0),
                                 .init(color: .white, location: lead),
-                                .init(color: .white.opacity(0.32), location: trail),
-                                .init(color: .white.opacity(0.32), location: 1.0)
+                                .init(color: .white.opacity(unsungAlpha), location: trail),
+                                .init(color: .white.opacity(unsungAlpha), location: 1.0)
                             ],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
                     )
                 } else {
-                    return AnyShapeStyle(Color.white.opacity(0.32))
+                    return AnyShapeStyle(Color.white.opacity(unsungAlpha))
                 }
             }()
 

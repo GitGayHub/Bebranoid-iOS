@@ -148,6 +148,8 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var availableTelegramChats: [TelegramChatSummary] = []
     @Published public var isSyncingTelegramLibrary: Bool = false
     @Published public var telegramScanProgressText: String = ""
+    @Published public var isVerifyingTelegramAccess: Bool = false
+    @Published public var lastTelegramAccessReport: TelegramLiveAccessReport? = nil
     #if DEBUG
     @Published public var demoDirectScreenOverride: String? = nil
     @Published public var demoFixedMeshTime: Double? = nil
@@ -1138,9 +1140,11 @@ public final class BebranoidAppState: ObservableObject {
                 statusBannerMessage = nil
                 break
             }
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
             await syncTelegramLibrary()
         }
+
+        await verifyTelegramAccessLive(autoTriggerSyncIfEmpty: true)
 
         invalidateLibraryCaches()
         if let pendingTrack = currentTrack,
@@ -1148,6 +1152,63 @@ public final class BebranoidAppState: ObservableObject {
            !isPlaying,
            trackDownloadProgress[pendingTrack.cacheKey] == nil {
             startPlayingCurrentIndex(autoPlay: false)
+        }
+    }
+
+    /// Интерактивная проверка реального доступа к Telegram на сервере и подсчёт песен в основном чате («галочка»)
+    public func verifyTelegramAccessLive(autoTriggerSyncIfEmpty: Bool = true) async {
+        guard !isVerifyingTelegramAccess else { return }
+        isVerifyingTelegramAccess = true
+        defer { isVerifyingTelegramAccess = false }
+
+        let cachedCount = libraryState.tracks.filter { cacheIndex.isCached($0) }.count
+        var report = await telegramClient.verifyLiveAccessAndChatTrackCounts(
+            mainChatId: libraryState.selectedTelegramChatId,
+            mainChatTitle: libraryState.selectedTelegramChatTitle,
+            archiveChatId: libraryState.selectedTelegramArchiveChatId,
+            syncedTracks: libraryState.tracks,
+            cachedCount: cachedCount
+        )
+        lastTelegramAccessReport = report
+
+        if report.hasMainChatAccess && !report.resolvedMainChatId.isEmpty {
+            var didMutate = false
+            if libraryState.selectedTelegramChatId != report.resolvedMainChatId {
+                libraryState.selectedTelegramChatId = report.resolvedMainChatId
+                didMutate = true
+            }
+            if !report.resolvedMainChatTitle.isEmpty && libraryState.selectedTelegramChatTitle != report.resolvedMainChatTitle {
+                libraryState.selectedTelegramChatTitle = report.resolvedMainChatTitle
+                didMutate = true
+            }
+            if didMutate {
+                saveLibraryState()
+            }
+            if availableTelegramChats.isEmpty {
+                if let chats = try? await telegramClient.fetchAvailableAudioChats(
+                    configuredArchiveChatId: libraryState.selectedTelegramArchiveChatId
+                ) {
+                    availableTelegramChats = chats
+                }
+            }
+        }
+
+        // Если на сервере в основном чате есть песни, а локально синхронизировано 0 — сразу запускаем синхронизацию!
+        if autoTriggerSyncIfEmpty
+            && report.hasMainChatAccess
+            && (report.serverMainAudioCount > 0 || report.serverMainDocumentCount > 0)
+            && report.syncedMainTracksCount == 0
+            && !isSyncingTelegramLibrary {
+            await syncTelegramLibrary()
+            let updatedCachedCount = libraryState.tracks.filter { cacheIndex.isCached($0) }.count
+            report = await telegramClient.verifyLiveAccessAndChatTrackCounts(
+                mainChatId: libraryState.selectedTelegramChatId,
+                mainChatTitle: libraryState.selectedTelegramChatTitle,
+                archiveChatId: libraryState.selectedTelegramArchiveChatId,
+                syncedTracks: libraryState.tracks,
+                cachedCount: updatedCachedCount
+            )
+            lastTelegramAccessReport = report
         }
     }
 
@@ -1160,7 +1221,7 @@ public final class BebranoidAppState: ObservableObject {
 
             var didMutateSelection = false
 
-            // Автоматический выбор основного чата AndroSend по названию или типу форума, если пользователь ещё не выбрал чат
+            // Автоматический выбор основного чата AndroSend по названию или типу форума
             let normCurrentMain = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramChatId)
             if normCurrentMain.isEmpty {
                 if let matched = chats.first(where: {
@@ -1177,6 +1238,14 @@ public final class BebranoidAppState: ObservableObject {
                     libraryState.selectedTelegramChatTitle = existingMain.title
                     didMutateSelection = true
                 }
+            } else if !chats.isEmpty,
+                      let canonicalMain = chats.first(where: {
+                          let lower = $0.title.lowercased()
+                          return lower.contains("androsend") && !lower.contains("архив") && !lower.contains("📦")
+                      }) {
+                libraryState.selectedTelegramChatId = canonicalMain.id
+                libraryState.selectedTelegramChatTitle = canonicalMain.title
+                didMutateSelection = true
             }
 
             // Автоматический выбор архивного чата AndroSend по названию
@@ -1195,6 +1264,14 @@ public final class BebranoidAppState: ObservableObject {
                     libraryState.selectedTelegramArchiveChatTitle = existingArchive.title
                     didMutateSelection = true
                 }
+            } else if !chats.isEmpty,
+                      let canonicalArchive = chats.first(where: {
+                          let lower = $0.title.lowercased()
+                          return lower.contains("androsend") && (lower.contains("архив") || lower.contains("📦"))
+                      }) {
+                libraryState.selectedTelegramArchiveChatId = canonicalArchive.id
+                libraryState.selectedTelegramArchiveChatTitle = canonicalArchive.title
+                didMutateSelection = true
             }
 
             if didMutateSelection {
@@ -1252,7 +1329,20 @@ public final class BebranoidAppState: ObservableObject {
             }
             let localAndYouTube = libraryState.tracks.filter { $0.sourceKind != .telegram }
             libraryState.tracks = scannedTracks + localAndYouTube
+            statusBannerMessage = nil
             saveLibraryState()
+
+            if var currentReport = lastTelegramAccessReport {
+                let normMain = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramChatId)
+                let syncedTg = libraryState.tracks.filter { $0.sourceKind == .telegram }
+                let syncedMain = syncedTg.filter {
+                    !$0.isFromArchive && (normMain.isEmpty || AppConfig.normalizeTelegramChatId($0.chatId ?? "") == normMain)
+                }
+                currentReport.syncedMainTracksCount = syncedMain.count
+                currentReport.totalSyncedTelegramTracksCount = syncedTg.count
+                currentReport.cachedTracksCount = libraryState.tracks.filter { cacheIndex.isCached($0) }.count
+                lastTelegramAccessReport = currentReport
+            }
         } catch {
             statusBannerMessage = error.localizedDescription
         }

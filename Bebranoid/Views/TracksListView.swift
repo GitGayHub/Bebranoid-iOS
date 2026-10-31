@@ -43,6 +43,11 @@ public struct TracksListView: View {
                             .padding(.horizontal, 16)
                     }
 
+                    if appState.isVerifyingTelegramAccess || (tracks.isEmpty && appState.lastTelegramAccessReport != nil) {
+                        TelegramLiveAccessReportCardView(appState: appState)
+                            .padding(.horizontal, 16)
+                    }
+
                     if !appState.telegramClient.isAuthorized {
                         telegramSignInPromptCard
                             .padding(.horizontal, 16)
@@ -206,8 +211,36 @@ public struct TracksListView: View {
                     .background(Color.white.opacity(0.10), in: Capsule())
                 }
 
-                // Быстрое обновление облачного чата AndroSend прямо со вкладки Треки
+                // Быстрое обновление и серверная проверка облачного чата AndroSend прямо со вкладки Треки
                 if appState.telegramClient.isAuthorized {
+                    Button {
+                        appState.haptics.lightTap()
+                        Task { await appState.verifyTelegramAccessLive() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if appState.isVerifyingTelegramAccess {
+                                ProgressView()
+                                    .tint(.green)
+                                    .scaleEffect(0.75)
+                            } else {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            }
+                            if let rep = appState.lastTelegramAccessReport, rep.hasMainChatAccess {
+                                Text("TG: \(rep.syncedMainTracksCount)/\(rep.serverMainAudioCount)")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                            } else {
+                                Text("Проверить TG")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            }
+                        }
+                        .foregroundStyle(.white.opacity(0.92))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Color.green.opacity(0.16), in: Capsule())
+                    }
+                    .disabled(appState.isVerifyingTelegramAccess)
+
                     Button {
                         appState.haptics.lightTap()
                         Task { await appState.syncTelegramLibrary() }

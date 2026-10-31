@@ -26,7 +26,7 @@ public struct SettingsView: View {
 
                 List {
                     Section("Облако Telegram (TDLib)") {
-                        HStack {
+                        HStack(spacing: 10) {
                             Image(systemName: "paperplane.circle.fill")
                                 .font(.system(size: 26))
                                 .foregroundStyle(Color(red: 0.24, green: 0.68, blue: 1.0))
@@ -45,7 +45,36 @@ public struct SettingsView: View {
                                     .foregroundStyle(.white.opacity(0.65))
                             }
 
-                            Spacer()
+                            Spacer(minLength: 4)
+
+                            // Интерактивная галочка живой проверки доступа и количества песен на сервере Telegram
+                            Button {
+                                appState.haptics.lightTap()
+                                Task { await appState.verifyTelegramAccessLive() }
+                            } label: {
+                                Group {
+                                    if appState.isVerifyingTelegramAccess {
+                                        ProgressView()
+                                            .tint(appState.accentSwiftUIColor)
+                                            .scaleEffect(0.82)
+                                    } else {
+                                        Image(systemName: (appState.lastTelegramAccessReport?.hasMainChatAccess == true)
+                                              ? "checkmark.seal.fill"
+                                              : "checkmark.circle.fill")
+                                            .font(.system(size: 19, weight: .bold))
+                                            .foregroundStyle(
+                                                (appState.lastTelegramAccessReport?.hasMainChatAccess == true)
+                                                    ? Color.green
+                                                    : appState.accentSwiftUIColor
+                                            )
+                                    }
+                                }
+                                .frame(width: 34, height: 34)
+                                .background(Color.white.opacity(0.10), in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(appState.isVerifyingTelegramAccess)
+                            .accessibilityLabel("Проверить доступ к Telegram и количество песен")
 
                             Button(appState.telegramClient.isAuthorized ? "Аккаунт" : "Войти") {
                                 appState.openTelegramAuthSheet()
@@ -56,6 +85,11 @@ public struct SettingsView: View {
                             .padding(.vertical, 7)
                             .background(appState.accentSwiftUIColor, in: Capsule())
                             .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                        }
+
+                        if appState.isVerifyingTelegramAccess || appState.lastTelegramAccessReport != nil {
+                            TelegramLiveAccessReportCardView(appState: appState)
+                                .padding(.vertical, 4)
                         }
 
                         Menu {
@@ -110,6 +144,28 @@ public struct SettingsView: View {
                                     .foregroundStyle(.white.opacity(0.68))
                             }
                         }
+
+                        Button {
+                            appState.haptics.lightTap()
+                            Task { await appState.verifyTelegramAccessLive() }
+                        } label: {
+                            HStack {
+                                Label(
+                                    appState.isVerifyingTelegramAccess
+                                        ? "Проверка доступа и песен на сервере..."
+                                        : "Проверить доступ и кол-во песен в чате",
+                                    systemImage: "checkmark.circle.fill"
+                                )
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.green)
+
+                                if appState.isVerifyingTelegramAccess {
+                                    Spacer()
+                                    ProgressView().tint(.green)
+                                }
+                            }
+                        }
+                        .disabled(appState.isVerifyingTelegramAccess)
 
                         if appState.telegramClient.isAuthorized {
                             Button {
@@ -398,6 +454,31 @@ public struct TelegramAuthView: View {
 
                             Spacer()
 
+                            // Кликабельная галочка живой серверной проверки доступа и количества песен
+                            Button {
+                                appState.haptics.lightTap()
+                                Task { await appState.verifyTelegramAccessLive() }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if appState.isVerifyingTelegramAccess {
+                                        ProgressView()
+                                            .tint(.green)
+                                            .scaleEffect(0.72)
+                                    } else {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 13, weight: .bold))
+                                    }
+                                    Text("Проверить")
+                                        .font(.system(size: 11, weight: .bold))
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(Color.green.opacity(0.20), in: Capsule())
+                                .foregroundStyle(.green)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(appState.isVerifyingTelegramAccess)
+
                             Label("Anti-Ban", systemImage: "checkmark.shield.fill")
                                 .font(.system(size: 11, weight: .bold))
                                 .padding(.horizontal, 8)
@@ -428,6 +509,10 @@ public struct TelegramAuthView: View {
                             twoFactorStepView
                         case .authorized:
                             authorizedSummaryView
+                        }
+
+                        if authVM.step != .authorized && (appState.isVerifyingTelegramAccess || appState.lastTelegramAccessReport != nil) {
+                            TelegramLiveAccessReportCardView(appState: appState)
                         }
 
                         if let error = authVM.errorMessage {
@@ -530,6 +615,8 @@ public struct TelegramAuthView: View {
             // Инициализируем TDLib в состоянии ожидания номера (БЕЗ вызова QR, который раньше блокировал отправку кода!)
             if !appState.telegramClient.isAuthorized {
                 _ = await appState.telegramClient.initializeAndRestoreSession()
+            } else if appState.lastTelegramAccessReport == nil {
+                await appState.verifyTelegramAccessLive()
             }
         }
     }
@@ -703,9 +790,34 @@ public struct TelegramAuthView: View {
 
     private var authorizedSummaryView: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Вы успешно вошли в Telegram", systemImage: "checkmark.seal.fill")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.green)
+            HStack {
+                Label("Вы успешно вошли в Telegram", systemImage: "checkmark.seal.fill")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.green)
+
+                Spacer()
+
+                Button {
+                    appState.haptics.lightTap()
+                    Task { await appState.verifyTelegramAccessLive() }
+                } label: {
+                    HStack(spacing: 5) {
+                        if appState.isVerifyingTelegramAccess {
+                            ProgressView().tint(.green).scaleEffect(0.75)
+                        } else {
+                            Image(systemName: "checkmark.circle.fill")
+                        }
+                        Text("Проверить доступ")
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.green.opacity(0.18), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(appState.isVerifyingTelegramAccess)
+            }
 
             if let userName = appState.telegramClient.authorizedUserDisplayName, !userName.isEmpty {
                 Text("Аккаунт: \(userName)")
@@ -721,6 +833,33 @@ public struct TelegramAuthView: View {
                 .font(.system(size: 12.5))
                 .foregroundStyle(.white.opacity(0.68))
 
+            TelegramLiveAccessReportCardView(appState: appState)
+
+            if appState.telegramClient.isAuthorized {
+                Button {
+                    appState.haptics.lightTap()
+                    Task { await appState.syncTelegramLibrary() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if appState.isSyncingTelegramLibrary {
+                            ProgressView().tint(Color(red: 0.08, green: 0.06, blue: 0.14)).scaleEffect(0.82)
+                        } else {
+                            Image(systemName: "icloud.and.arrow.down.fill")
+                        }
+                        Text(appState.isSyncingTelegramLibrary
+                             ? "Синхронизация песен..."
+                             : "Синхронизировать песни из основного чата")
+                            .font(.system(size: 13.5, weight: .bold))
+                    }
+                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(appState.accentSwiftUIColor, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+                .disabled(appState.isSyncingTelegramLibrary)
+            }
+
             Button(role: .destructive) {
                 authVM.logout()
             } label: {
@@ -733,5 +872,141 @@ public struct TelegramAuthView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+}
+
+/// Карточка живого серверного отчёта проверки реального доступа к Telegram и количества песен в основном чате
+public struct TelegramLiveAccessReportCardView: View {
+    @ObservedObject var appState: BebranoidAppState
+
+    public init(appState: BebranoidAppState) {
+        self.appState = appState
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if appState.isVerifyingTelegramAccess {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .tint(.green)
+                        .scaleEffect(0.88)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Запрос к серверу Telegram (TDLib)...")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("Проверяем доступ к чату и считаем песни на сервере")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+            } else if let rep = appState.lastTelegramAccessReport {
+                HStack(spacing: 8) {
+                    Image(systemName: rep.hasMainChatAccess ? "checkmark.seal.fill" : "xmark.octagon.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(rep.hasMainChatAccess ? Color.green : Color(red: 1.0, green: 0.45, blue: 0.45))
+
+                    Text(rep.verdictTitle)
+                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(rep.hasMainChatAccess ? Color.green : Color(red: 1.0, green: 0.55, blue: 0.55))
+
+                    Spacer()
+
+                    Button {
+                        appState.haptics.lightTap()
+                        Task { await appState.verifyTelegramAccessLive() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.75))
+                            .padding(6)
+                            .background(Color.white.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Text("Аккаунт: \(rep.accountSummary) • Сеть: \(rep.connectionStateText)")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.78))
+
+                if rep.hasMainChatAccess {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Чат на сервере:")
+                                .foregroundStyle(.white.opacity(0.68))
+                            Spacer()
+                            Text("\(rep.resolvedMainChatTitle) (\(rep.resolvedMainChatId))")
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                        }
+
+                        HStack {
+                            Text("Песен на сервере (основной чат):")
+                                .foregroundStyle(.white.opacity(0.68))
+                            Spacer()
+                            Text("\(rep.serverMainAudioCount) шт.")
+                                .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                                .foregroundStyle(.green)
+                        }
+
+                        if rep.serverArchiveAudioCount > 0 {
+                            HStack {
+                                Text("Песен в архивном чате:")
+                                    .foregroundStyle(.white.opacity(0.68))
+                                Spacer()
+                                Text("\(rep.serverArchiveAudioCount) шт.")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.88))
+                            }
+                        }
+
+                        HStack {
+                            Text("Синхронизировано в приложении:")
+                                .foregroundStyle(.white.opacity(0.68))
+                            Spacer()
+                            Text("\(rep.syncedMainTracksCount) (всего \(rep.totalSyncedTelegramTracksCount)) • В кэше: \(rep.cachedTracksCount)")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundStyle(appState.accentSwiftUIColor)
+                        }
+                    }
+                    .font(.system(size: 12))
+                    .padding(10)
+                    .background(Color.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else {
+                    Text(rep.verdictDetails)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.82))
+                }
+            } else {
+                Button {
+                    appState.haptics.lightTap()
+                    Task { await appState.verifyTelegramAccessLive() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Нажмите галочку для проверки доступа и подсчёта песен на сервере")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.88))
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.07))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(
+                            (appState.lastTelegramAccessReport?.hasMainChatAccess == true)
+                                ? Color.green.opacity(0.38)
+                                : Color.white.opacity(0.14),
+                            lineWidth: 1
+                        )
+                )
+        )
     }
 }
