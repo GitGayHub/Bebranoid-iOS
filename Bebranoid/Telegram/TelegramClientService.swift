@@ -1757,7 +1757,9 @@ public final class TelegramClientService: @unchecked Sendable {
         }
         if resolvedChatDict == nil {
             resolvedChatDict = await findChatByTitle(targetTitle)
-                ?? await findChatByTitle("AndroSend")
+        }
+        if resolvedChatDict == nil {
+            resolvedChatDict = await findChatByTitle("AndroSend")
         }
 
         if let chatDict = resolvedChatDict,
@@ -1878,7 +1880,10 @@ public final class TelegramClientService: @unchecked Sendable {
 
         var resolvedDict = await ensureChatResolved(chatId: initialChatId, titleHint: chatTitle)
         if resolvedDict == nil && !isArchiveChat {
-            resolvedDict = await findChatByTitle("AndroSend Облако") ?? await findChatByTitle("AndroSend")
+            resolvedDict = await findChatByTitle("AndroSend Облако")
+            if resolvedDict == nil {
+                resolvedDict = await findChatByTitle("AndroSend")
+            }
         }
 
         guard let chatObj = resolvedDict,
