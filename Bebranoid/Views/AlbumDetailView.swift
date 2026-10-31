@@ -75,6 +75,7 @@ public struct AlbumDetailView: View {
     private var headerHeroView: some View {
         VStack(spacing: 14) {
             ArtworkThumbnailView(
+                track: liveAlbum.customCoverPath == nil ? liveAlbum.tracks.first : nil,
                 localPath: liveAlbum.coverPath,
                 remoteURL: liveAlbum.remoteArtworkURL,
                 fallbackSeed: "\(liveAlbum.name)|\(liveAlbum.artist)",

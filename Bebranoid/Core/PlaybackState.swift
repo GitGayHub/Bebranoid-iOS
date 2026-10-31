@@ -116,12 +116,23 @@ public enum TrackSortField: String, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .recent: return "По дате добавления"
-        case .title: return "По названию"
-        case .artist: return "По исполнителю"
-        case .album: return "По альбому"
-        case .year: return "По году"
-        case .plays: return "По прослушиваниям"
+        case .recent: return "Недавно добавленные"
+        case .title: return "От А до Я (Название)"
+        case .artist: return "Исполнители"
+        case .album: return "Альбом"
+        case .year: return "Год"
+        case .plays: return "Часто воспроизводимые"
+        }
+    }
+
+    public var shortLabel: String {
+        switch self {
+        case .recent: return "Недавние"
+        case .title: return "Название"
+        case .artist: return "Исполнители"
+        case .album: return "Альбом"
+        case .year: return "Год"
+        case .plays: return "Популярные"
         }
     }
 }

@@ -29,11 +29,24 @@ public struct RootTabView: View {
             nativeTabContainer(isScreenOverridden: isScreenOverridden)
                 .tint(appState.accentSwiftUIColor)
 
-            if appState.currentTrack != nil && !isScreenOverridden {
-                MiniPlayerCardView(appState: appState)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 66)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            if !isScreenOverridden && (appState.currentTrack != nil || appState.pendingDownloadTrack != nil) {
+                VStack(spacing: 8) {
+                    if let pending = appState.pendingDownloadTrack, pending.id != appState.currentTrack?.id {
+                        DownloadingTrackGlassBanner(appState: appState, downloadingTrack: pending)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    } else if let pending = appState.pendingDownloadTrack, appState.currentTrack == nil {
+                        DownloadingTrackGlassBanner(appState: appState, downloadingTrack: pending)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    if appState.currentTrack != nil {
+                        MiniPlayerCardView(appState: appState)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 66)
+                .animation(.spring(response: 0.34, dampingFraction: 0.84), value: appState.pendingDownloadTrack?.id)
             }
 
             if let banner = appState.statusBannerMessage, !banner.isEmpty, !isScreenOverridden {
@@ -54,7 +67,7 @@ public struct RootTabView: View {
                             .font(.system(size: 12, weight: .bold))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(appState.accentSwiftUIColor, in: Capsule())
+                            .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
                             .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                         }
                         Button {
@@ -67,7 +80,7 @@ public struct RootTabView: View {
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .liquidGlassCard(cornerRadius: 18, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
                     Spacer()
@@ -107,6 +120,21 @@ public struct RootTabView: View {
         }
         .fullScreenCover(isPresented: $appState.isFullScreenPlayerPresented) {
             FullScreenPlayerView(appState: appState)
+        }
+        .sheet(
+            item: Binding(
+                get: { appState.isFullScreenPlayerPresented ? nil : appState.inspectedTrackForInfo },
+                set: { appState.inspectedTrackForInfo = $0 }
+            )
+        ) { targetTrack in
+            TrackInfoSheetView(
+                track: targetTrack,
+                formatInfo: appState.audioEngine.currentFormatInfo ?? targetTrack.formatInfo,
+                accentColor: appState.accentSwiftUIColor
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .liquidGlassSheetPresentation()
         }
         .fullScreenCover(isPresented: $appState.isTelegramAuthPresented) {
             TelegramAuthView(appState: appState)

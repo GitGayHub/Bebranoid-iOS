@@ -58,8 +58,19 @@ public final class DualStreamAudioEngine: ObservableObject {
     private var lastTickWallTime: TimeInterval = 0
     private var hasCountedPlayForCurrentTrack: Bool = false
     private var scheduleGeneration: UInt64 = 0
+    private var seekAnchorUptime: TimeInterval = 0
+    private var seekGraceUntilUptime: TimeInterval = 0
 
     public let smoothClock = SmoothClock()
+
+    /// Мгновенная 120 Гц интерполированная позиция для прогресс-бара и караоке без рывков квантования
+    public var livePlaybackTime: Double {
+        let raw = isPlaying ? smoothClock.interpolatedTime() : currentTime
+        if duration > 0 {
+            return min(duration, max(0.0, raw))
+        }
+        return max(0.0, raw)
+    }
 
     public init() {
         setupEngineGraph()
@@ -127,6 +138,17 @@ public final class DualStreamAudioEngine: ObservableObject {
         scheduleGeneration &+= 1
         let currentGen = scheduleGeneration
 
+        let initialPos = max(0.0, timeSec)
+        primaryStartTimeOffset = initialPos
+        currentTime = initialPos
+        if track.duration > 0 {
+            duration = track.duration
+        }
+        smoothClock.forceSetTime(initialPos)
+        let preNow = ProcessInfo.processInfo.systemUptime
+        seekAnchorUptime = preNow
+        seekGraceUntilUptime = preNow + 0.32
+
         let inspected = await AudioMetadataReader.inspectAudioFile(at: fileURL)
         guard currentGen == scheduleGeneration else { return }
 
@@ -177,7 +199,11 @@ public final class DualStreamAudioEngine: ObservableObject {
 
             applyFXToBothDecks()
             updateDeckVolumes()
+            let postNow = ProcessInfo.processInfo.systemUptime
+            seekAnchorUptime = postNow
+            seekGraceUntilUptime = postNow + 0.28
             smoothClock.forceSetTime(clampedStart)
+            currentTime = clampedStart
 
             if autoPlay {
                 primaryDeck.playerNode.play()
@@ -267,6 +293,9 @@ public final class DualStreamAudioEngine: ObservableObject {
             }
         }
 
+        let seekNow = ProcessInfo.processInfo.systemUptime
+        seekAnchorUptime = seekNow
+        seekGraceUntilUptime = seekNow + 0.30
         smoothClock.forceSetTime(clamped)
         currentTime = clamped
 
@@ -390,6 +419,18 @@ public final class DualStreamAudioEngine: ObservableObject {
     private func readHardwareTime(forPrimary: Bool) -> Double {
         let deck = forPrimary ? primaryDeck : secondaryDeck
         let offsetSec = forPrimary ? primaryStartTimeOffset : secondaryStartTimeOffset
+
+        if forPrimary {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now < seekGraceUntilUptime {
+                if isPlaying {
+                    let elapsed = max(0.0, now - seekAnchorUptime)
+                    return max(0.0, offsetSec + elapsed * Double(effectivePlaybackRate))
+                } else {
+                    return max(0.0, offsetSec)
+                }
+            }
+        }
 
         guard let nodeTime = deck.playerNode.lastRenderTime,
               let playerTime = deck.playerNode.playerTime(forNodeTime: nodeTime),

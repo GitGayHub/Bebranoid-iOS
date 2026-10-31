@@ -3,13 +3,12 @@ import SwiftUI
 /// Экран всех треков медиатеки (`src/views/Tracks.jsx`).
 /// Включает:
 /// - Поиск по названию, исполнителю, альбому и имени файла
-/// - Фильтр «В кеше» (показывает только офлайн-готовые треки)
-/// - Модальное окно «Сверка» с расчётом процента закешированности каждого альбома и пакетной докачкой
-/// - Сортировку по 6 критериям (`recent`, `title`, `artist`, `album`, `year`, `plays`) и направлению
+/// - Фильтр «Скачанные» (показывает офлайн-готовые треки на устройстве)
+/// - Выпадающее меню «Сортировка по» 1:1 с настольной версией (`Недавно добавленные`, `От А до Я (Название)`, `Исполнители`, `Альбом`, `Год`, `Часто воспроизводимые` + направление)
+/// - Лаконичные круглые стеклянные кнопки обновления (`arrow.clockwise`) и пакетного выбора (`checklist`) без лишнего текста
 /// - Кнопку честного шаффла всей медиатеки
 public struct TracksListView: View {
     @ObservedObject var appState: BebranoidAppState
-    @State private var isReconcileSheetPresented: Bool = false
     @State private var isSelectionMode: Bool = false
     @State private var selectedTrackIds: Set<String> = []
 
@@ -43,11 +42,6 @@ public struct TracksListView: View {
                             .padding(.horizontal, 16)
                     }
 
-                    if appState.isVerifyingTelegramAccess || (tracks.isEmpty && appState.lastTelegramAccessReport != nil) {
-                        TelegramLiveAccessReportCardView(appState: appState)
-                            .padding(.horizontal, 16)
-                    }
-
                     if !appState.telegramClient.isAuthorized {
                         telegramSignInPromptCard
                             .padding(.horizontal, 16)
@@ -70,7 +64,7 @@ public struct TracksListView: View {
                                         }
                                     )
                                 }
-                                Spacer().frame(height: 110)
+                                Spacer().frame(height: 118)
                             }
                             .padding(.horizontal, 16)
                         }
@@ -79,51 +73,6 @@ public struct TracksListView: View {
             }
             .navigationTitle("Треки (\(tracks.count))")
             .searchable(text: $appState.searchQuery, prompt: "Поиск треков, артистов, альбомов")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    HStack(spacing: 12) {
-                        if !tracks.isEmpty {
-                            Button {
-                                appState.haptics.softSelection()
-                                withAnimation(.easeOut(duration: 0.18)) {
-                                    isSelectionMode.toggle()
-                                    if !isSelectionMode {
-                                        selectedTrackIds.removeAll()
-                                    }
-                                }
-                            } label: {
-                                Image(systemName: isSelectionMode ? "checkmark.circle.fill" : "checkmark.circle")
-                                    .foregroundStyle(isSelectionMode ? appState.accentSwiftUIColor : .white)
-                            }
-                        }
-
-                        Menu {
-                            Picker("Сортировка", selection: $appState.trackSortField) {
-                                ForEach(TrackSortField.allCases, id: \.self) { field in
-                                    Text(field.displayName).tag(field)
-                                }
-                            }
-                            Divider()
-                            Button {
-                                appState.trackSortAscending.toggle()
-                            } label: {
-                                Label(
-                                    appState.trackSortAscending ? "По возрастанию (А–Я)" : "По убыванию (Я–А / Новые)",
-                                    systemImage: appState.trackSortAscending ? "arrow.up" : "arrow.down"
-                                )
-                            }
-                        } label: {
-                            Image(systemName: "arrow.up.arrow.down.circle")
-                                .foregroundStyle(.white)
-                        }
-                    }
-                }
-            }
-            .sheet(isPresented: $isReconcileSheetPresented) {
-                AlbumCacheReconcileSheet(appState: appState)
-                    .presentationDetents([.medium, .large])
-                    .presentationDragIndicator(.visible)
-            }
         }
     }
 
@@ -138,23 +87,120 @@ public struct TracksListView: View {
 
     private func filterAndActionHeader(tracks: [Track]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+            HStack(spacing: 9) {
+                // 1. Перемешать всё
                 Button {
                     appState.shuffleAllEligibleLibrary()
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "shuffle")
-                        Text("Перемешать всё")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("Перемешать")
                             .font(.system(size: 13, weight: .bold, design: .rounded))
                     }
                     .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
-                    .background(appState.accentSwiftUIColor, in: Capsule())
+                    .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
+                }
+                .buttonStyle(.plain)
+
+                // 2. Фильтр «Скачанные» (переименован из «В кеше»)
+                Button {
+                    appState.haptics.softSelection()
+                    appState.showOnlyCachedTracks.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: appState.showOnlyCachedTracks ? "checkmark.circle.fill" : "arrow.down.circle")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("Скачанные")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(
+                        appState.showOnlyCachedTracks
+                            ? Color(red: 0.08, green: 0.06, blue: 0.14)
+                            : .white.opacity(0.92)
+                    )
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .liquidGlassCapsule(
+                        tint: appState.accentSwiftUIColor,
+                        isProminent: appState.showOnlyCachedTracks
+                    )
+                }
+                .buttonStyle(.plain)
+
+                // 3. Меню сортировки 1:1 с настольной версией (`Tracks.jsx`)
+                Menu {
+                    Section("Сортировка по") {
+                        ForEach(TrackSortField.allCases, id: \.self) { field in
+                            Button {
+                                appState.haptics.softSelection()
+                                if appState.trackSortField == field {
+                                    appState.trackSortAscending.toggle()
+                                } else {
+                                    appState.trackSortField = field
+                                    // По умолчанию как на ПК: А–Я / Артист / Альбом по возрастанию, Новые / Год / Прослушивания по убыванию
+                                    switch field {
+                                    case .title, .artist, .album:
+                                        appState.trackSortAscending = true
+                                    case .recent, .year, .plays:
+                                        appState.trackSortAscending = false
+                                    }
+                                }
+                            } label: {
+                                HStack {
+                                    Text(field.displayName)
+                                    if appState.trackSortField == field {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Section("Порядок") {
+                        Button {
+                            appState.haptics.softSelection()
+                            appState.trackSortAscending = false
+                        } label: {
+                            Label(
+                                "По убыванию",
+                                systemImage: !appState.trackSortAscending ? "checkmark.circle.fill" : "arrow.down"
+                            )
+                        }
+
+                        Button {
+                            appState.haptics.softSelection()
+                            appState.trackSortAscending = true
+                        } label: {
+                            Label(
+                                "По возрастанию",
+                                systemImage: appState.trackSortAscending ? "checkmark.circle.fill" : "arrow.up"
+                            )
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: appState.trackSortAscending ? "arrow.up" : "arrow.down")
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundStyle(appState.accentSwiftUIColor)
+                        Text(appState.trackSortField.shortLabel)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.92))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.58))
+                    }
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 9)
+                    .liquidGlassCapsule(tint: .white, isProminent: false)
                 }
 
-                // Кнопка выделения треков для пакетного скачивания в кэш
-                if !tracks.isEmpty {
+                // 4. Круглая иконка пакетного выбора треков (без лишнего текста «Выбрать»)
+                if !tracks.isEmpty || isSelectionMode {
                     Button {
                         appState.haptics.softSelection()
                         withAnimation(.easeOut(duration: 0.18)) {
@@ -164,100 +210,46 @@ public struct TracksListView: View {
                             }
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: isSelectionMode ? "checkmark.circle.fill" : "checklist")
-                            Text(isSelectionMode ? "Отменить выбор" : "Выбрать")
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        }
-                        .foregroundStyle(isSelectionMode ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.90))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(
-                            isSelectionMode ? appState.accentSwiftUIColor : Color.white.opacity(0.10),
-                            in: Capsule()
-                        )
+                        Image(systemName: isSelectionMode ? "checkmark.circle.fill" : "checklist")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(
+                                isSelectionMode
+                                    ? Color(red: 0.08, green: 0.06, blue: 0.14)
+                                    : .white.opacity(0.92)
+                            )
+                            .frame(width: 37, height: 37)
+                            .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: isSelectionMode)
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isSelectionMode ? "Отменить выбор треков" : "Выбрать треки")
                 }
 
-                // Фильтр «В кеше»
-                Button {
-                    appState.haptics.softSelection()
-                    appState.showOnlyCachedTracks.toggle()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: appState.showOnlyCachedTracks ? "checkmark.icloud.fill" : "icloud.and.arrow.down")
-                        Text("В кеше")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    }
-                    .foregroundStyle(appState.showOnlyCachedTracks ? appState.accentSwiftUIColor : .white.opacity(0.85))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(Color.white.opacity(appState.showOnlyCachedTracks ? 0.18 : 0.10), in: Capsule())
-                }
-
-                // Кнопка «Сверка»
-                Button {
-                    appState.haptics.lightTap()
-                    isReconcileSheetPresented = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chart.pie.fill")
-                        Text("Сверка кеша")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    }
-                    .foregroundStyle(.white.opacity(0.88))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(Color.white.opacity(0.10), in: Capsule())
-                }
-
-                // Быстрое обновление и серверная проверка облачного чата AndroSend прямо со вкладки Треки
+                // 5. Круглая иконка обновления облачной медиатеки (без текста «Обновить TG»)
                 if appState.telegramClient.isAuthorized {
-                    Button {
-                        appState.haptics.lightTap()
-                        Task { await appState.verifyTelegramAccessLive() }
-                    } label: {
-                        HStack(spacing: 6) {
-                            if appState.isVerifyingTelegramAccess {
-                                ProgressView()
-                                    .tint(.green)
-                                    .scaleEffect(0.75)
-                            } else {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                            }
-                            if let rep = appState.lastTelegramAccessReport, rep.hasMainChatAccess {
-                                Text("TG: \(rep.syncedMainTracksCount)/\(rep.serverMainAudioCount)")
-                                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                            } else {
-                                Text("Проверить TG")
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            }
-                        }
-                        .foregroundStyle(.white.opacity(0.92))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(Color.green.opacity(0.16), in: Capsule())
-                    }
-                    .disabled(appState.isVerifyingTelegramAccess)
-
                     Button {
                         appState.haptics.lightTap()
                         Task { await appState.syncTelegramLibrary() }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                            Text(appState.isSyncingTelegramLibrary ? "Синхр..." : "Обновить TG")
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        Group {
+                            if appState.isSyncingTelegramLibrary {
+                                ProgressView()
+                                    .tint(appState.accentSwiftUIColor)
+                                    .scaleEffect(0.76)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundStyle(.white.opacity(0.92))
+                            }
                         }
-                        .foregroundStyle(.white.opacity(0.88))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(Color.white.opacity(0.10), in: Capsule())
+                        .frame(width: 37, height: 37)
+                        .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: false)
                     }
+                    .buttonStyle(.plain)
                     .disabled(appState.isSyncingTelegramLibrary)
+                    .accessibilityLabel("Обновить медиатеку")
                 }
             }
+            .padding(.vertical, 2)
         }
     }
 
@@ -280,7 +272,7 @@ public struct TracksListView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.12), in: Capsule())
+                    .liquidGlassCapsule(tint: .white, isProminent: false)
             }
             .buttonStyle(.plain)
 
@@ -296,23 +288,23 @@ public struct TracksListView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.to.line.circle.fill")
                     Text(uncachedSelectedCount > 0
-                         ? "Скачать в кэш (\(uncachedSelectedCount))"
-                         : (selectedTracks.isEmpty ? "Выберите треки" : "Уже в кэше"))
+                         ? "Скачать (\(uncachedSelectedCount))"
+                         : (selectedTracks.isEmpty ? "Выберите треки" : "Уже скачаны"))
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                 }
                 .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
-                .background(
-                    uncachedSelectedCount > 0 ? appState.accentSwiftUIColor : appState.accentSwiftUIColor.opacity(0.45),
-                    in: Capsule()
+                .liquidGlassCapsule(
+                    tint: uncachedSelectedCount > 0 ? appState.accentSwiftUIColor : appState.accentSwiftUIColor.opacity(0.45),
+                    isProminent: true
                 )
             }
             .buttonStyle(.plain)
             .disabled(uncachedSelectedCount == 0)
         }
-        .padding(10)
-        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(11)
+        .liquidGlassCard(cornerRadius: 18, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
     }
 
     private var batchDownloadProgressCard: some View {
@@ -322,7 +314,7 @@ public struct TracksListView: View {
                 .scaleEffect(0.85)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Скачивание выбранных треков в кэш: \(appState.batchDownloadDoneCount) из \(appState.batchDownloadTotalCount)")
+                Text("Скачивание выбранных треков: \(appState.batchDownloadDoneCount) из \(appState.batchDownloadTotalCount)")
                     .font(.system(size: 12.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 ProgressView(
@@ -335,15 +327,15 @@ public struct TracksListView: View {
             Button("Стоп") {
                 appState.cancelBatchDownload()
             }
-            .font(.system(size: 12, weight: .bold))
-            .foregroundStyle(.white.opacity(0.85))
+            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .foregroundStyle(.white.opacity(0.90))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.white.opacity(0.14), in: Capsule())
+            .liquidGlassCapsule(tint: .white, isProminent: false)
             .buttonStyle(.plain)
         }
         .padding(12)
-        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .liquidGlassCard(cornerRadius: 18, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
     }
 
     private var telegramSignInPromptCard: some View {
@@ -360,7 +352,7 @@ public struct TracksListView: View {
                      ? "Войдите в Telegram, чтобы открыть ваши \(appState.hiddenCloudTracksCount) облачных треков"
                      : "Войдите по коду, чтобы загрузить музыку из облака Telegram")
                     .font(.system(size: 11.5))
-                    .foregroundStyle(.white.opacity(0.70))
+                    .foregroundStyle(.white.opacity(0.72))
             }
 
             Spacer(minLength: 4)
@@ -373,12 +365,12 @@ public struct TracksListView: View {
                     .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(appState.accentSwiftUIColor, in: Capsule())
+                    .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
             }
             .buttonStyle(.plain)
         }
         .padding(12)
-        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .liquidGlassCard(cornerRadius: 18, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
     }
 
     private var telegramLiveSyncBanner: some View {
@@ -395,14 +387,14 @@ public struct TracksListView: View {
                      ? "Загрузка аудиосообщений и документов из Telegram..."
                      : appState.telegramScanProgressText)
                     .font(.system(size: 11.5))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .foregroundStyle(.white.opacity(0.70))
                     .lineLimit(1)
             }
 
             Spacer(minLength: 4)
         }
         .padding(12)
-        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .liquidGlassCard(cornerRadius: 18, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
     }
 
     private var emptyTracksState: some View {
@@ -427,12 +419,14 @@ public struct TracksListView: View {
                 Image(systemName: "music.note.list")
                     .font(.system(size: 46))
                     .foregroundStyle(.white.opacity(0.35))
-                Text(appState.showOnlyCachedTracks ? "Нет треков в локальном кеше" : "Медиатека готова к загрузке")
+                Text(appState.showOnlyCachedTracks ? "Нет скачанных треков" : "Медиатека готова к загрузке")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.85))
                 Text(!appState.telegramClient.isAuthorized
                      ? "Войдите в Telegram по кнопке выше, чтобы отобразить и слушать вашу облачную медиатеку, или импортируйте плейлист YouTube."
-                     : "Выбран чат «\(appState.libraryState.selectedTelegramChatTitle)». Нажмите кнопку ниже, чтобы подтянуть все ваши треки.")
+                     : (appState.showOnlyCachedTracks
+                        ? "Скачайте любые треки для прослушивания без сети."
+                        : "Выбран чат «\(appState.libraryState.selectedTelegramChatTitle)». Нажмите кнопку ниже, чтобы подтянуть все ваши треки."))
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.58))
                     .multilineTextAlignment(.center)
@@ -451,7 +445,7 @@ public struct TracksListView: View {
                         .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                         .padding(.horizontal, 18)
                         .padding(.vertical, 11)
-                        .background(appState.accentSwiftUIColor, in: Capsule())
+                        .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
                     }
                     .buttonStyle(.plain)
                     .padding(.top, 4)
@@ -488,6 +482,7 @@ public struct TrackRowView: View {
 
     public var body: some View {
         let isCurrent = appState.currentTrack?.id == track.id
+        let isPendingTarget = appState.pendingDownloadTrack?.id == track.id
         let downloadPct = appState.downloadProgress(for: track)
         let isCached = appState.cacheIndex.isCached(track)
         let isLiked = appState.isFavorite(track)
@@ -516,8 +511,8 @@ public struct TrackRowView: View {
                 )
                 .frame(width: 48, height: 48)
                 .overlay {
-                    if isCurrent {
-                        RoundedRectangle(cornerRadius: 10)
+                    if isCurrent || isPendingTarget {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .stroke(appState.accentSwiftUIColor, lineWidth: 2)
                     }
                 }
@@ -525,8 +520,8 @@ public struct TrackRowView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(track.title)
-                            .font(.system(size: 15, weight: isCurrent ? .bold : .semibold, design: .rounded))
-                            .foregroundStyle(isCurrent ? appState.accentSwiftUIColor : .white)
+                            .font(.system(size: 15, weight: (isCurrent || isPendingTarget) ? .bold : .semibold, design: .rounded))
+                            .foregroundStyle((isCurrent || isPendingTarget) ? appState.accentSwiftUIColor : .white)
                             .lineLimit(1)
 
                         if let pct = downloadPct {
@@ -553,7 +548,7 @@ public struct TrackRowView: View {
                     }
 
                     if let pct = downloadPct {
-                        Text("Загрузка аудио: \(pct)% • \(track.artist)")
+                        Text("Скачивание: \(pct)% • \(track.artist)")
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
                             .foregroundStyle(appState.accentSwiftUIColor)
                             .lineLimit(1)
@@ -585,8 +580,12 @@ public struct TrackRowView: View {
             }
             .padding(10)
             .background(
-                Color.white.opacity(isSelected ? 0.18 : (isCurrent ? 0.14 : 0.06)),
-                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(isSelected ? 0.18 : (isCurrent ? 0.14 : 0.06)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.white.opacity(isCurrent ? 0.22 : 0.08), lineWidth: 0.7)
+                    )
             )
         }
         .buttonStyle(.plain)
@@ -595,7 +594,7 @@ public struct TrackRowView: View {
                 Button {
                     appState.downloadTracksToCache([track])
                 } label: {
-                    Label("Скачать трек в кэш", systemImage: "arrow.down.to.line.circle")
+                    Label("Скачать трек", systemImage: "arrow.down.to.line.circle")
                 }
             }
 
@@ -627,76 +626,6 @@ public struct TrackRowView: View {
                     systemImage: appState.isLyricsDisabled(for: track) ? "eye" : "eye.slash"
                 )
             }
-        }
-    }
-}
-
-/// Модальное окно «Сверка» кеша по альбомам (`src/views/Tracks.jsx` `showReconcileModal`)
-private struct AlbumCacheReconcileSheet: View {
-    @ObservedObject var appState: BebranoidAppState
-    @Environment(\.dismiss) private var dismiss
-    @State private var isBatchDownloading: Bool = false
-
-    var body: some View {
-        let report = appState.cacheIndex.buildReconcileReport(tracks: appState.availableLibraryTracks)
-        NavigationStack {
-            ZStack {
-                Color(red: 0.07, green: 0.07, blue: 0.11).ignoresSafeArea()
-
-                List {
-                    ForEach(report) { item in
-                        HStack(spacing: 12) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.albumName)
-                                    .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(.white)
-                                Text("В кеше: \(item.cachedTracks) из \(item.totalTracks) (\(item.completionPercentage)%)")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.white.opacity(0.68))
-                            }
-
-                            Spacer()
-
-                            if item.isFullyCached {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                            } else {
-                                Button("Докачать (\(item.missingTracks.count))") {
-                                    downloadMissing(item.missingTracks)
-                                }
-                                .font(.system(size: 12, weight: .bold))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(appState.accentSwiftUIColor, in: Capsule())
-                                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                            }
-                        }
-                        .listRowBackground(Color.white.opacity(0.06))
-                    }
-                }
-                .scrollContentBackground(.hidden)
-            }
-            .navigationTitle("Сверка кеша по альбомам")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Закрыть") { dismiss() }
-                        .foregroundStyle(.white)
-                }
-            }
-        }
-    }
-
-    private func downloadMissing(_ tracks: [Track]) {
-        guard !isBatchDownloading else { return }
-        isBatchDownloading = true
-        Task {
-            for track in tracks {
-                _ = try? await appState.telegramClient.ensureTrackDownloaded(track: track, priority: .backgroundBatch)
-            }
-            isBatchDownloading = false
         }
     }
 }

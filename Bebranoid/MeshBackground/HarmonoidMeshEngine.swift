@@ -518,6 +518,54 @@ public enum HarmonoidMeshEngine {
         }
     }
 
+    /// Нейтральная графитово-серебристая палитра для чёрно-белых / монохромных обложек (без паразитного жёлтого или фиолетового оттенка JPEG-шума)
+    public static let monochromePalette: [MeshRGB] = [
+        MeshRGB(28, 28, 32),
+        MeshRGB(48, 48, 54),
+        MeshRGB(18, 18, 22),
+        MeshRGB(38, 38, 43)
+    ]
+
+    public static let monochromeAccent = MeshRGB(234, 236, 242)
+
+    /// Определяет, является ли обложка чёрно-белой / монохромной (отсекает артефакты сжатия JPEG `sat ~ 0.04..0.09`, сохраняя обложки с реальным цветным акцентом)
+    public static func isPredominantlyMonochrome(rgba: [UInt8]) -> Bool {
+        var validCount = 0
+        var colorfulCount = 0
+        var vividAccentCount = 0
+        var chromaSum = 0.0
+
+        var idx = 0
+        while idx + 3 < rgba.count {
+            let a = Int(rgba[idx + 3])
+            if a >= 32 {
+                let r = Int(rgba[idx])
+                let g = Int(rgba[idx + 1])
+                let b = Int(rgba[idx + 2])
+                let lum = luminance(r, g, b)
+                if lum >= 0.025 && lum <= 0.985 {
+                    validCount += 1
+                    let sat = chroma(r, g, b)
+                    chromaSum += sat
+                    if sat >= 0.115 {
+                        colorfulCount += 1
+                    }
+                    if sat >= 0.24 && lum >= 0.08 && lum <= 0.92 {
+                        vividAccentCount += 1
+                    }
+                }
+            }
+            idx += 4
+        }
+
+        guard validCount > 0 else { return true }
+        let colorfulRatio = Double(colorfulCount) / Double(validCount)
+        let vividRatio = Double(vividAccentCount) / Double(validCount)
+        let meanChroma = chromaSum / Double(validCount)
+
+        return vividRatio < 0.012 && colorfulRatio < 0.045 && meanChroma < 0.058
+    }
+
     /// Точный расчёт координат и динамических радиусов 4 пятен в момент `timeSec` (строки 478–494 `HarmonoidMeshBackground.jsx`):
     /// - `x = (p.bx + sin(t * speed * p.sx + p.p) * p.ax) * w`
     /// - `y = (p.by + cos(t * speed * p.sy + p.p * 0.8) * p.ay) * h`
@@ -548,8 +596,37 @@ public enum HarmonoidMeshEngine {
         }
     }
 
+    /// Адаптация той же самой 4-точечной синусоидальной логики Harmonoid под компактный экран iPhone:
+    /// чуть более выраженная амплитуда дрейфа и дыхания пятен, чтобы живое движение фона было деликатно заметно на узком дисплее телефона.
+    public static func mobileBlobCenters(
+        at timeSec: Double,
+        width: Double,
+        height: Double,
+        meshColors: [MeshRGB]
+    ) -> [MeshBlobPoint] {
+        let cols = meshColors.count >= 4 ? meshColors : defaultPalette
+        let maxDim = max(width, height)
+        let mobileSpeed = motionSpeed * 1.36
+        let ampBoost = 1.42
+
+        return (0..<4).map { i in
+            let p = controlPoints[i]
+            let x = (p.bx + sin(timeSec * mobileSpeed * p.sx + p.p) * (p.ax * ampBoost)) * width
+            let y = (p.by + cos(timeSec * mobileSpeed * p.sy + p.p * 0.8) * (p.ay * ampBoost)) * height
+            let radius = maxDim * (0.52 + 0.12 * sin(timeSec * 0.48 + Double(i)))
+            return MeshBlobPoint(
+                index: i,
+                x: x,
+                y: y,
+                radius: radius,
+                color: cols[i],
+                isSourceOver: i == 0
+            )
+        }
+    }
+
     #if canImport(CoreGraphics)
-    /// Полный конвейер для `CGImage`: downscale до `64×64` RGBA -> `extractCoverPalette` -> `(palette, meshColors, uiAccent)`
+    /// Полный конвейер для `CGImage`: downscale до `64×64` RGBA -> детекция Ч/Б монохрома -> `extractCoverPalette` -> `(palette, meshColors, uiAccent)`
     public static func analyzeCoverImage(_ cgImage: CGImage) -> (palette: [MeshRGB], meshColors: [MeshRGB], uiAccent: MeshRGB) {
         let dim = analysisDimension
         var pixels = [UInt8](repeating: 0, count: dim * dim * 4)
@@ -571,7 +648,14 @@ public enum HarmonoidMeshEngine {
         context.interpolationQuality = .medium
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: dim, height: dim))
 
+        if isPredominantlyMonochrome(rgba: pixels) {
+            return (monochromePalette, monochromePalette, monochromeAccent)
+        }
+
         let palette = extractCoverPalette(fromRGBA: pixels, maxColors: maxExtractedPaletteColors)
+        if palette.isEmpty || palette.allSatisfy({ chroma($0.r, $0.g, $0.b) < 0.095 }) {
+            return (monochromePalette, monochromePalette, monochromeAccent)
+        }
         let mesh = mapPaletteToMeshColors(palette)
         let accent = pickAccentFromPalette(palette)
         return (palette, mesh, accent)

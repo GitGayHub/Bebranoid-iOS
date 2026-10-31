@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// Отдельный полноэкранный экран текстов песен Bebranoid iOS по референсному скриншоту 2 (`src/views/Lyrics.jsx`).
+/// Отдельный полноэкранный экран текстов песен Bebranoid iOS (`src/views/Lyrics.jsx`) в стиле Liquid Glass.
 /// Структура:
-/// 1. Компактная шапка с кнопкой `⌄`, миниатюрой обложки (`46x46`), названием трека и исполнителем
-/// 2. Переключатель перевода `RU`, выбор движка (`Beautiful Lyrics` / `Classic Karaoke`), размер шрифта и отключение текста для трека
-/// 3. Полноэкранная область синхронизированных текстов с автоматической прокруткой, 3-точечным `Interlude`, послоговым свечением и переводом
-/// 4. Компактная нижняя панель управления воспроизведением (слайдер прогресса, таймкоды, `FLAC • kHz • kbps` и кнопки `Shuffle / Prev / Play-Pause / Next / Repeat`)
+/// 1. Компактная шапка с кнопкой `⌄`, миниатюрой обложки (`44x44`), названием трека и исполнителем
+/// 2. Автоматическое скрытие кнопки перевода `RU`, если песня уже на русском/кириллице (`isCurrentLyricsCyrillic`)
+/// 3. Полноэкранная 120 Гц область синхронизированных однострочных текстов (`1 строка` с автоподбором масштаба) и аналитическим пружинным скроллом `Spring`
+/// 4. Компактная нижняя панель управления воспроизведением с плавной полосой перемотки без рывков
 public struct LyricsScreenView: View {
     @ObservedObject var appState: BebranoidAppState
     @Environment(\.dismiss) private var dismiss
@@ -20,10 +20,6 @@ public struct LyricsScreenView: View {
 
     private var track: Track? {
         appState.currentTrack
-    }
-
-    private var displayedTime: Double {
-        isDraggingSlider ? draggedTime : appState.currentTime
     }
 
     public var body: some View {
@@ -55,11 +51,11 @@ public struct LyricsScreenView: View {
                     .contentShape(Rectangle())
                     .gesture(swipeDownDismissGesture)
 
-                // Основная область текстов
+                // Основная 120 Гц область однострочных текстов
                 lyricsContentBody
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Нижняя компактная панель управления как на референсе 2
+                // Нижняя компактная панель управления
                 bottomCompactTransportBar
                     .padding(.horizontal, 24)
                     .padding(.top, 10)
@@ -78,17 +74,21 @@ public struct LyricsScreenView: View {
             }
             .offset(y: dragDismissOffset)
         }
-        .onChange(of: appState.currentLyricsDocument.lines.isEmpty) { isEmpty in
+        .onChange(of: appState.currentLyricsDocument.lines.isEmpty) { _, isEmpty in
             if isEmpty && !appState.isLoadingLyrics {
                 appState.isLyricsScreenPresented = false
                 dismiss()
             }
         }
-        .onChange(of: appState.isLoadingLyrics) { loading in
+        .onChange(of: appState.isLoadingLyrics) { _, loading in
             if !loading && appState.currentLyricsDocument.lines.isEmpty {
                 appState.isLyricsScreenPresented = false
                 dismiss()
             }
+        }
+        .onChange(of: track?.id) { _, _ in
+            isDraggingSlider = false
+            draggedTime = 0.0
         }
     }
 
@@ -128,10 +128,11 @@ public struct LyricsScreenView: View {
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(.white.opacity(0.90))
                     .frame(width: 38, height: 38)
-                    .background(Color.white.opacity(0.10), in: Circle())
+                    .liquidGlassCircle(tint: .white)
             }
+            .buttonStyle(.plain)
 
             Button {
                 appState.haptics.softSelection()
@@ -168,28 +169,31 @@ public struct LyricsScreenView: View {
 
             Spacer(minLength: 4)
 
-            // Кнопка перевода RU
-            Button {
-                appState.haptics.softSelection()
-                appState.showLyricsTranslation.toggle()
-            } label: {
-                HStack(spacing: 4) {
-                    if appState.isTranslatingLyrics {
-                        ProgressView()
-                            .scaleEffect(0.65)
-                            .tint(.white)
-                    } else {
-                        Text("RU")
-                            .font(.system(size: 12, weight: .heavy, design: .rounded))
+            // Кнопка перевода «RU» скрывается автоматически, если текст песни уже на кириллице!
+            if !appState.isCurrentLyricsCyrillic && !appState.currentLyricsDocument.lines.isEmpty {
+                Button {
+                    appState.haptics.softSelection()
+                    appState.showLyricsTranslation.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        if appState.isTranslatingLyrics {
+                            ProgressView()
+                                .scaleEffect(0.65)
+                                .tint(appState.showLyricsTranslation ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
+                        } else {
+                            Text("RU")
+                                .font(.system(size: 12, weight: .heavy, design: .rounded))
+                        }
                     }
+                    .foregroundStyle(appState.showLyricsTranslation ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .liquidGlassCapsule(
+                        tint: appState.accentSwiftUIColor,
+                        isProminent: appState.showLyricsTranslation
+                    )
                 }
-                .foregroundStyle(appState.showLyricsTranslation ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 7)
-                .background(
-                    appState.showLyricsTranslation ? appState.accentSwiftUIColor : Color.white.opacity(0.12),
-                    in: Capsule()
-                )
+                .buttonStyle(.plain)
             }
 
             // Меню настроек отображения текста
@@ -220,9 +224,9 @@ public struct LyricsScreenView: View {
             } label: {
                 Image(systemName: "textformat.size")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(.white.opacity(0.90))
                     .frame(width: 38, height: 38)
-                    .background(Color.white.opacity(0.10), in: Circle())
+                    .liquidGlassCircle(tint: .white)
             }
         }
     }
@@ -242,11 +246,11 @@ public struct LyricsScreenView: View {
                 Button("Включить обратно") {
                     appState.toggleLyricsDisabled(for: current)
                 }
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 10)
-                .background(Color.white.opacity(0.14), in: Capsule())
+                .liquidGlassCapsule(tint: .white, isProminent: false)
             }
             .padding(32)
         } else if appState.isLoadingLyrics {
@@ -273,14 +277,18 @@ public struct LyricsScreenView: View {
             }
             .padding(32)
         } else {
+            let effectiveShowTranslation = appState.showLyricsTranslation && !appState.isCurrentLyricsCyrillic
+            let baseDisplayTime = isDraggingSlider
+                ? draggedTime
+                : (appState.isPlaying ? appState.audioEngine.livePlaybackTime : appState.currentTime)
             let liveTimeReader: () -> Double = { [appState, isDraggingSlider, draggedTime] in
                 if isDraggingSlider {
                     return draggedTime
                 }
                 if appState.isPlaying {
-                    return appState.audioEngine.smoothClock.interpolatedTime(at: ProcessInfo.processInfo.systemUptime)
+                    return appState.audioEngine.livePlaybackTime
                 }
-                return max(appState.currentTime, appState.audioEngine.currentTime)
+                return appState.currentTime
             }
 
             switch appState.lyricsEngine {
@@ -288,12 +296,12 @@ public struct LyricsScreenView: View {
                 BeautifulLyricsView(
                     document: appState.currentLyricsDocument,
                     nodes: appState.currentBeautifulNodes,
-                    currentTime: displayedTime,
+                    currentTime: baseDisplayTime,
                     isPlaying: appState.isPlaying || isDraggingSlider,
                     liveTimeProvider: liveTimeReader,
                     accentColor: appState.accentSwiftUIColor,
                     fontSizePreset: appState.lyricsFontSize,
-                    showTranslation: appState.showLyricsTranslation,
+                    showTranslation: effectiveShowTranslation,
                     onSeekToTime: { targetSec in
                         appState.seek(to: targetSec)
                     }
@@ -301,12 +309,12 @@ public struct LyricsScreenView: View {
             case .classic:
                 ClassicKaraokeLyricsView(
                     document: appState.currentLyricsDocument,
-                    currentTime: displayedTime,
+                    currentTime: baseDisplayTime,
                     isPlaying: appState.isPlaying || isDraggingSlider,
                     liveTimeProvider: liveTimeReader,
                     accentColor: appState.accentSwiftUIColor,
                     fontSizePreset: appState.lyricsFontSize,
-                    showTranslation: appState.showLyricsTranslation,
+                    showTranslation: effectiveShowTranslation,
                     onSeekToTime: { targetSec in
                         appState.seek(to: targetSec)
                     }
@@ -315,44 +323,51 @@ public struct LyricsScreenView: View {
         }
     }
 
-    // MARK: - Bottom Compact Transport Bar (Reference Screenshot 2)
+    // MARK: - Bottom Compact Transport Bar
 
     private var bottomCompactTransportBar: some View {
         let effectiveDuration = appState.duration > 0 ? appState.duration : (track?.duration ?? 0.0)
         let maxDur = max(1.0, effectiveDuration)
-        let clampedPos = min(maxDur, max(0.0, displayedTime))
 
         return VStack(spacing: 12) {
-            VStack(spacing: 6) {
-                InteractiveSeekBarView(
-                    currentTime: clampedPos,
-                    duration: maxDur,
-                    accentColor: appState.accentSwiftUIColor,
-                    isDragging: $isDraggingSlider,
-                    draggedTime: $draggedTime,
-                    onCommitSeek: { targetSec in
-                        appState.haptics.softSelection()
-                        appState.seek(to: targetSec)
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !appState.isPlaying && !isDraggingSlider)) { context in
+                let _ = context.date
+                let livePos = appState.isPlaying ? appState.audioEngine.livePlaybackTime : appState.currentTime
+                let rawPos = isDraggingSlider ? draggedTime : livePos
+                let clampedPos = min(maxDur, max(0.0, rawPos))
+
+                VStack(spacing: 6) {
+                    InteractiveSeekBarView(
+                        trackId: track?.id,
+                        currentTime: clampedPos,
+                        duration: maxDur,
+                        accentColor: appState.accentSwiftUIColor,
+                        isDragging: $isDraggingSlider,
+                        draggedTime: $draggedTime,
+                        onCommitSeek: { targetSec in
+                            appState.haptics.softSelection()
+                            appState.seek(to: targetSec)
+                        }
+                    )
+
+                    HStack {
+                        Text(FullScreenPlayerView.formatSeconds(clampedPos))
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.62))
+
+                        Spacer()
+
+                        Text(appState.currentQualityBadge.tooltipText)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        Text(FullScreenPlayerView.formatSeconds(effectiveDuration))
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.62))
                     }
-                )
-
-                HStack {
-                    Text(FullScreenPlayerView.formatSeconds(clampedPos))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.60))
-
-                    Spacer()
-
-                    Text(appState.currentQualityBadge.tooltipText)
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    Text(FullScreenPlayerView.formatSeconds(appState.duration))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.60))
                 }
             }
 

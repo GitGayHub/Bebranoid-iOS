@@ -77,6 +77,34 @@ public struct ArtworkThumbnailView: View {
         .task(id: taskIdentifier) {
             await loadArtworkOffMainThreadIfNeeded()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .artworkDidResolve)) { note in
+            guard let tr = track else { return }
+            let resolvedId = note.userInfo?["trackId"] as? String
+            if resolvedId == tr.id {
+                ArtworkService.shared.invalidateCachedSyncPath(forTrackId: tr.id)
+                Task { await loadArtworkOffMainThreadIfNeeded(forceReload: true) }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .trackDownloadProgressDidChange)) { note in
+            guard let tr = track,
+                  let key = note.userInfo?["cacheKey"] as? String,
+                  key == tr.cacheKey,
+                  note.userInfo?["percent"] == nil else {
+                return
+            }
+            ArtworkService.shared.invalidateCachedSyncPath(forTrackId: tr.id)
+            Task { await loadArtworkOffMainThreadIfNeeded(forceReload: true) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .telegramAuthStateDidChange)) { note in
+            guard track != nil,
+                  asyncLoadedCGImage == nil,
+                  displayedCGImage == nil,
+                  let step = note.object as? TelegramAuthStepState,
+                  step == .authorized else {
+                return
+            }
+            Task { await loadArtworkOffMainThreadIfNeeded(forceReload: true) }
+        }
     }
 
     @ViewBuilder
@@ -168,10 +196,10 @@ public struct ArtworkThumbnailView: View {
             .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
     }
 
-    private func loadArtworkOffMainThreadIfNeeded() async {
+    private func loadArtworkOffMainThreadIfNeeded(forceReload: Bool = false) async {
         let key = taskIdentifier
         let tier = sizeTier
-        if let cached = ArtworkService.shared.memoryCachedImage(forKey: key, tier: tier) {
+        if !forceReload, let cached = ArtworkService.shared.memoryCachedImage(forKey: key, tier: tier) {
             commitResolvedImage(cached, forKey: key)
             return
         }

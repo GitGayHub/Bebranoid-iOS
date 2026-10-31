@@ -67,6 +67,7 @@ private struct AlbumGridCard: View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
                 ArtworkThumbnailView(
+                    track: album.customCoverPath == nil ? album.tracks.first : nil,
                     localPath: album.coverPath,
                     remoteURL: album.remoteArtworkURL,
                     fallbackSeed: "\(album.name)|\(album.artist)",

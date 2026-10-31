@@ -37,8 +37,9 @@ public struct PlaylistsGridView: View {
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 10)
-                                    .background(Color.white.opacity(0.12), in: Capsule())
+                                    .liquidGlassCapsule(tint: .white, isProminent: false)
                             }
+                            .buttonStyle(.plain)
 
                             Button {
                                 isYouTubeImportPresented = true
@@ -48,8 +49,9 @@ public struct PlaylistsGridView: View {
                                     .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 10)
-                                    .background(appState.accentSwiftUIColor, in: Capsule())
+                                    .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
                             }
+                            .buttonStyle(.plain)
 
                             Spacer()
                         }
@@ -75,6 +77,9 @@ public struct PlaylistsGridView: View {
             }
             .sheet(isPresented: $isYouTubeImportPresented) {
                 YouTubeImportSheet(appState: appState)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                    .liquidGlassSheetPresentation()
             }
             .alert("Создать плейлист", isPresented: $isNewPlaylistAlertPresented) {
                 TextField("Название плейлиста", text: $newPlaylistName)

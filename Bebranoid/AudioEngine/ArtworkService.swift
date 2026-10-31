@@ -98,12 +98,22 @@ public final class ArtworkService: @unchecked Sendable {
         return dir
     }
 
+    private static let sharedAlbumBleedCleanupKey = "bebranoid.covers.bleed_cleanup_v2"
+
     public init(storage: StorageManager = .shared, session: URLSession = .shared) {
         self.storage = storage
         self.session = session
         self.dataCache.countLimit = 300
         self.dataCache.totalCostLimit = 64 * 1024 * 1024
-        _ = self.albumsCoversDirectory
+        let albumsDir = self.albumsCoversDirectory
+        if !UserDefaults.standard.bool(forKey: Self.sharedAlbumBleedCleanupKey) {
+            if let items = try? fileManager.contentsOfDirectory(at: albumsDir, includingPropertiesForKeys: nil) {
+                for item in items {
+                    try? fileManager.removeItem(at: item)
+                }
+            }
+            UserDefaults.standard.set(true, forKey: Self.sharedAlbumBleedCleanupKey)
+        }
     }
 
     public var loadedArtworkCount: Int {
@@ -118,22 +128,22 @@ public final class ArtworkService: @unchecked Sendable {
         withLock { _cacheHitCount }
     }
 
-    // MARK: - Synchronous Disk Lookup (Priorities 1, 2, 3, 5)
+    // MARK: - Synchronous Disk Lookup (Strict Per-Track Isolation, 1:1 with `electron/main.js` `media-cover`)
 
-    /// Синхронно разрешает локальный путь обложки для трека по цепочке приоритетов 1 -> 2 -> 3 -> 5 (без сетевых запросов)
+    /// Синхронно разрешает локальный путь обложки строго для конкретного трека без «заражения» чужих треков общей обложкой топика/альбома
     public func resolveLocalCoverURLSync(
         for track: Track,
         customAlbumCovers: [String: String] = [:],
         siblingTracks: [Track] = []
     ) -> (url: URL, priority: ArtworkSourcePriority)? {
-        // Priority 1: Custom album cover
+        // Priority 1: Explicit user-configured custom album cover
         if let customPath = customAlbumCovers[track.album],
            !customPath.isEmpty,
            isValidImageFile(atPath: customPath) {
             return (URL(fileURLWithPath: customPath), .customCover)
         }
 
-        if customAlbumCovers.isEmpty, siblingTracks.isEmpty,
+        if customAlbumCovers.isEmpty,
            let cachedEntry = withLock({ syncCoverPathCache[track.id] }) {
             return cachedEntry
         }
@@ -143,23 +153,25 @@ public final class ArtworkService: @unchecked Sendable {
             if let direct = track.coverPath,
                !direct.isEmpty,
                isValidImageFile(atPath: direct) {
-                let isCustom = direct.contains("CustomCovers")
+                let isCustom = direct.contains("CustomCovers") || direct.contains("custom_")
                 return (URL(fileURLWithPath: direct), isCustom ? .customCover : .localDiskCover)
             }
 
-            // Priority 2b: Covers/<safeCacheKey>.jpg or Covers/<stem>.jpg
+            // Priority 2b: Covers/<safeCacheKey>.jpg or Covers/<safeFilename>.jpg (strictly this track's own cover)
             let safeKey = storage.safeCacheFilename(for: track.cacheKey)
             let safeStem = (safeKey as NSString).deletingPathExtension
+            let safeRawFile = storage.safeCacheFilename(for: track.filename)
             let candidateTrackPaths = [
                 storage.coversDirectory.appendingPathComponent("\(safeKey).jpg"),
                 storage.coversDirectory.appendingPathComponent("\(safeStem).jpg"),
+                storage.coversDirectory.appendingPathComponent("\(safeRawFile).jpg"),
                 storage.coversDirectory.appendingPathComponent("\(safeStem).png")
             ]
             for candidate in candidateTrackPaths where isValidImageFile(atPath: candidate.path) {
                 return (candidate, .localDiskCover)
             }
 
-            // Priority 3: Embedded cover inside local/cached audio file
+            // Priority 3: Embedded cover inside local/cached audio file (saved ONLY for this track, NEVER shared to other uncached tracks!)
             let audioURL = storage.cachedAudioFileURL(for: track)
             if fileManager.fileExists(atPath: audioURL.path),
                let embeddedData = AudioMetadataReader.extractEmbeddedArtworkSync(from: audioURL),
@@ -167,7 +179,7 @@ public final class ArtworkService: @unchecked Sendable {
                 let savedURL = saveTrackAndAlbumCoverToDisk(
                     imageData: embeddedData,
                     trackFilename: track.cacheKey,
-                    albumName: track.album
+                    albumName: nil
                 )
                 if let savedURL {
                     recordArtworkLoaded()
@@ -175,33 +187,10 @@ public final class ArtworkService: @unchecked Sendable {
                 }
             }
 
-            let hasIndividualRemoteCover = (track.sourceKind == .youtube)
-                || !(track.youtubeVideoId ?? "").isEmpty
-                || !(track.remoteArtworkURL ?? "").isEmpty
-                || !(track.coverFileId ?? "").isEmpty
-
-            // Priority 2c: Covers/albums/<safeAlbumName>.jpg (только если у трека нет собственной обложки YouTube / Telegram)
-            if !hasIndividualRemoteCover, isNamedAlbum(track.album) {
-                let safeAlbum = storage.safeCacheFilename(for: track.album)
-                let albumCoverURL = albumsCoversDirectory.appendingPathComponent("\(safeAlbum).jpg")
-                if isValidImageFile(atPath: albumCoverURL.path) {
-                    return (albumCoverURL, .localDiskCover)
-                }
-            }
-
-            // Priority 5: Sibling track in the same named album (только для альбомов без индивидуальной удалённой обложки)
-            if !hasIndividualRemoteCover, isNamedAlbum(track.album) {
-                if let sibling = siblingTracks.first(where: {
-                    $0.album == track.album && $0.id != track.id && ($0.coverPath != nil)
-                }), let sibPath = sibling.coverPath, isValidImageFile(atPath: sibPath) {
-                    return (URL(fileURLWithPath: sibPath), .albumSiblingCover)
-                }
-            }
-
             return nil
         }()
 
-        if customAlbumCovers.isEmpty, siblingTracks.isEmpty {
+        if customAlbumCovers.isEmpty {
             withLock {
                 if syncCoverPathCache.count > 4000 {
                     syncCoverPathCache.removeAll(keepingCapacity: true)
@@ -213,9 +202,9 @@ public final class ArtworkService: @unchecked Sendable {
         return resolved
     }
 
-    // MARK: - Full Async 7-Level Resolution (Including Telegram Thumbnail & YouTube 1:1 Crop)
+    // MARK: - Full Async Resolution (Including Telegram Thumbnail & YouTube 1:1 Crop)
 
-    /// Полное асинхронное разрешение обложки трека по всем 7 уровням приоритета с дедупликацией in-flight запросов
+    /// Полное асинхронное разрешение индивидуальной обложки трека с поддержкой миниатюр Telegram (`coverFileId`) и YouTube 1:1
     public func resolveArtwork(
         for track: Track,
         customAlbumCovers: [String: String] = [:],
@@ -241,22 +230,24 @@ public final class ArtworkService: @unchecked Sendable {
                 _ = self.withLock { self.inFlightTasks.removeValue(forKey: dedupKey) }
             }
 
+            // Priority 4: Индивидуальная миниатюра трека из Telegram (`coverFileId` / `album_cover_thumbnail` через TDLib)
+            if track.sourceKind == .telegram || !(track.coverFileId ?? "").isEmpty {
+                if let tgPath = await TelegramClientService.shared.downloadCoverForTrack(track),
+                   self.isValidImageFile(atPath: tgPath) {
+                    let tgURL = URL(fileURLWithPath: tgPath)
+                    let data = self.loadCachedData(from: tgURL)
+                    self.recordArtworkLoaded()
+                    self.notifyArtworkResolved(trackId: track.id, albumName: "", fileURL: tgURL)
+                    return ResolvedArtworkResult(fileURL: tgURL, imageData: data, source: .telegramMessageThumbnail)
+                }
+            }
+
             // Priority 6: YouTube thumbnail (maxresdefault -> hqdefault -> remoteArtworkURL) with 16:9 / 4:3 -> 1:1 center crop
             if track.sourceKind == .youtube || !(track.youtubeVideoId ?? "").isEmpty || !(track.remoteArtworkURL ?? "").isEmpty {
                 if let ytResult = await self.downloadAndCropRemoteArtwork(for: track) {
                     self.recordArtworkLoaded()
-                    self.notifyArtworkResolved(trackId: track.id, albumName: track.album, fileURL: ytResult.fileURL)
+                    self.notifyArtworkResolved(trackId: track.id, albumName: "", fileURL: ytResult.fileURL)
                     return ytResult
-                }
-            }
-
-            // Priority 5 (fallback): Обложка альбома, если у не-YouTube трека не удалось получить собственную обложку
-            if track.sourceKind != .youtube, self.isNamedAlbum(track.album) {
-                let safeAlbum = self.storage.safeCacheFilename(for: track.album)
-                let albumCoverURL = self.albumsCoversDirectory.appendingPathComponent("\(safeAlbum).jpg")
-                if self.isValidImageFile(atPath: albumCoverURL.path) {
-                    let data = self.loadCachedData(from: albumCoverURL)
-                    return ResolvedArtworkResult(fileURL: albumCoverURL, imageData: data, source: .albumSiblingCover)
                 }
             }
 
@@ -306,7 +297,7 @@ public final class ArtworkService: @unchecked Sendable {
             if let savedURL = saveTrackAndAlbumCoverToDisk(
                 imageData: finalData,
                 trackFilename: track.cacheKey,
-                albumName: track.album
+                albumName: nil
             ) {
                 return ResolvedArtworkResult(fileURL: savedURL, imageData: finalData, source: .youtubeCroppedThumbnail)
             }
@@ -481,8 +472,17 @@ public final class ArtworkService: @unchecked Sendable {
         withLock { _failedArtworkCount += 1 }
     }
 
-    private func notifyArtworkResolved(trackId: String, albumName: String, fileURL: URL?) {
+    public func invalidateCachedSyncPath(forTrackId trackId: String) {
         _ = withLock { syncCoverPathCache.removeValue(forKey: trackId) }
+        #if canImport(CoreGraphics)
+        for tier in [ArtworkSizeTier.listThumbnail, .albumGrid, .fullPlayer, .meshAnalysis] {
+            trackTierImageCache.removeObject(forKey: "\(trackId)|\(tier.rawValue)" as NSString)
+        }
+        #endif
+    }
+
+    private func notifyArtworkResolved(trackId: String, albumName: String, fileURL: URL?) {
+        invalidateCachedSyncPath(forTrackId: trackId)
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: .artworkDidResolve,

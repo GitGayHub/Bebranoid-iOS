@@ -2187,7 +2187,11 @@ public final class TelegramClientService: @unchecked Sendable {
 
     /// Скачивает миниатюру обложки трека из Telegram по `coverFileId` (`electron/main.js` строки 2906–2932)
     /// и сохраняет её в `Covers/<safeFilename>.jpg`.
-    public func downloadCoverFromTelegram(coverFileId: String, filename: String) async -> String? {
+    public func downloadCoverFromTelegram(
+        coverFileId: String,
+        filename: String,
+        priority: Int = 20
+    ) async -> String? {
         let trimmedId = coverFileId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedId.isEmpty else { return nil }
 
@@ -2200,6 +2204,7 @@ public final class TelegramClientService: @unchecked Sendable {
         }
 
         guard TDLibJSONBridge.isNativeTDLibAvailable, isAuthorized else { return nil }
+        try? await sendTdlibParametersIfPossible()
 
         guard let remoteResp = try? await bridge.sendAsync([
             "@type": "getRemoteFile",
@@ -2218,14 +2223,22 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
+        return await downloadTDLibThumbnailByFileId(fileId, targetURL: targetURL, priority: priority)
+    }
+
+    private func downloadTDLibThumbnailByFileId(
+        _ fileId: Int,
+        targetURL: URL,
+        priority: Int
+    ) async -> String? {
         if let dlResp = try? await bridge.sendAsync([
             "@type": "downloadFile",
             "file_id": fileId,
-            "priority": 16,
+            "priority": max(1, min(32, priority)),
             "offset": 0,
             "limit": 0,
             "synchronous": true
-        ], timeoutSeconds: 12.0),
+        ], timeoutSeconds: 10.0),
         let dlPath = Self.completedLocalPath(from: dlResp) {
             try? FileManager.default.removeItem(at: targetURL)
             try? FileManager.default.copyItem(atPath: dlPath, toPath: targetURL.path)
@@ -2234,11 +2247,78 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
+        _ = try? await bridge.sendAsync([
+            "@type": "downloadFile",
+            "file_id": fileId,
+            "priority": max(1, min(32, priority)),
+            "offset": 0,
+            "limit": 0,
+            "synchronous": false
+        ], timeoutSeconds: 5.0)
+
+        let start = Date()
+        while Date().timeIntervalSince(start) < 5.0 {
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            if let fileResp = try? await bridge.sendAsync(["@type": "getFile", "file_id": fileId], timeoutSeconds: 4.0),
+               let completedPath = Self.completedLocalPath(from: fileResp) {
+                try? FileManager.default.removeItem(at: targetURL)
+                try? FileManager.default.copyItem(atPath: completedPath, toPath: targetURL.path)
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    return targetURL.path
+                }
+            }
+        }
         return nil
     }
 
-    /// Скачивает обложку трека из Telegram по `coverFileId` (`getRemoteFile` + `fileTypeThumbnail` 1:1 как в `electron/main.js`),
-    /// не вызывая `getMessages`/`searchChatMessages` и уступая приоритет активной загрузке аудио.
+    private static func extractThumbnailFileIdFromMessage(_ msg: [String: Any]) -> Int? {
+        guard let content = msg["content"] as? [String: Any],
+              let contentType = content["@type"] as? String else {
+            return nil
+        }
+        if contentType == "messageAudio",
+           let audio = content["audio"] as? [String: Any],
+           let thumb = audio["album_cover_thumbnail"] as? [String: Any],
+           let file = thumb["file"] as? [String: Any],
+           let id = extractInt(from: file["id"]) {
+            return id
+        }
+        if contentType == "messageDocument",
+           let doc = content["document"] as? [String: Any],
+           let thumb = doc["thumbnail"] as? [String: Any],
+           let file = thumb["file"] as? [String: Any],
+           let id = extractInt(from: file["id"]) {
+            return id
+        }
+        return nil
+    }
+
+    private static func extractMinithumbnailDataFromMessage(_ msg: [String: Any]) -> Data? {
+        guard let content = msg["content"] as? [String: Any],
+              let contentType = content["@type"] as? String else {
+            return nil
+        }
+        let miniDict: [String: Any]?
+        if contentType == "messageAudio",
+           let audio = content["audio"] as? [String: Any] {
+            miniDict = audio["album_cover_minithumbnail"] as? [String: Any]
+        } else if contentType == "messageDocument",
+                  let doc = content["document"] as? [String: Any] {
+            miniDict = doc["minithumbnail"] as? [String: Any]
+        } else {
+            miniDict = nil
+        }
+        guard let base64Str = miniDict?["data"] as? String,
+              !base64Str.isEmpty,
+              let decoded = Data(base64Encoded: base64Str),
+              decoded.count > 64 else {
+            return nil
+        }
+        return decoded
+    }
+
+    /// Скачивает индивидуальную обложку трека из Telegram по `coverFileId` (`getRemoteFile` + `fileTypeThumbnail` 1:1 как в `electron/main.js`),
+    /// а при устаревшем `file_reference` — разрешает свежий `album_cover_thumbnail` / `thumbnail` из сообщения чата.
     public func downloadCoverForTrack(_ track: Track) async -> String? {
         let safeBase = storage.safeCacheFilename(for: track.cacheKey)
         let targetURL = storage.coversDirectory.appendingPathComponent("\(safeBase).jpg")
@@ -2248,31 +2328,52 @@ public final class TelegramClientService: @unchecked Sendable {
             return targetURL.path
         }
 
-        // Не нагружаем TDLib скачиванием обложек во время активной загрузки аудиофайла
-        if withLock({ activeAudioDownloadsCount > 0 }) {
-            return nil
+        guard TDLibJSONBridge.isNativeTDLibAvailable, isAuthorized else { return nil }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let waitSec = withLock { () -> Double in
+            let elapsed = now - lastCoverDownloadTime
+            if elapsed < 0.06 {
+                lastCoverDownloadTime += 0.06
+                return max(0.0, lastCoverDownloadTime - now)
+            } else {
+                lastCoverDownloadTime = now
+                return 0.0
+            }
+        }
+        if waitSec > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(waitSec * 1_000_000_000))
         }
 
+        let isAudioBusy = withLock { activeAudioDownloadsCount > 0 }
+        let coverPriority = isAudioBusy ? 8 : 20
+
+        // 1. Прямая загрузка по coverFileId (`getRemoteFile` + `fileTypeThumbnail`)
         if let coverFileId = track.coverFileId, !coverFileId.isEmpty {
-            let now = ProcessInfo.processInfo.systemUptime
-            let waitSec = withLock { () -> Double in
-                let elapsed = now - lastCoverDownloadTime
-                if elapsed < 0.25 {
-                    lastCoverDownloadTime += 0.25
-                    return max(0.0, lastCoverDownloadTime - now)
-                } else {
-                    lastCoverDownloadTime = now
-                    return 0.0
-                }
-            }
-            if waitSec > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(waitSec * 1_000_000_000))
-            }
-            if withLock({ activeAudioDownloadsCount > 0 }) {
-                return nil
-            }
-            if let path = await downloadCoverFromTelegram(coverFileId: coverFileId, filename: track.cacheKey) {
+            if let path = await downloadCoverFromTelegram(
+                coverFileId: coverFileId,
+                filename: track.cacheKey,
+                priority: coverPriority
+            ) {
                 return path
+            }
+        }
+
+        // 2. Свежее сообщение из TDLib (обновляет протухший file_reference и проверяет thumbnail / minithumbnail)
+        if track.sourceKind == .telegram,
+           let chatIdStr = track.chatId,
+           let chatId64 = Int64(chatIdStr),
+           let msgId = track.messageId,
+           let msg = try? await resolveTDLibMessageObject(chatId: chatId64, messageId: Int64(msgId), track: track) {
+            if let thumbFileId = Self.extractThumbnailFileIdFromMessage(msg),
+               let path = await downloadTDLibThumbnailByFileId(thumbFileId, targetURL: targetURL, priority: coverPriority) {
+                return path
+            }
+            if let miniData = Self.extractMinithumbnailDataFromMessage(msg) {
+                try? miniData.write(to: targetURL, options: .atomic)
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    return targetURL.path
+                }
             }
         }
 

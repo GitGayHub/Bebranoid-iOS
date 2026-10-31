@@ -60,7 +60,8 @@ public final class BebranoidAppState: ObservableObject {
     // MARK: - Harmonoid Mesh Background State
     @Published public var currentPalette: [MeshRGB] = HarmonoidMeshEngine.defaultPalette
     @Published public var nextTrackPalette: [MeshRGB]? = nil
-    public var nextTrackAccent: MeshRGB? = nil
+    @Published public var nextTrackAccent: MeshRGB? = nil
+    private var preparedNextTrackId: String? = nil
     @Published public var accentRGB: MeshRGB = HarmonoidMeshEngine.defaultAccent
     @Published public var crossfadeProgress: Double = 0.0
     @Published public var isReducedMotionEnabled: Bool = false
@@ -113,6 +114,8 @@ public final class BebranoidAppState: ObservableObject {
         didSet { _cachedFilteredTracks = nil }
     }
     @Published public var trackDownloadProgress: [String: Int] = [:]
+    @Published public var pendingDownloadTrack: Track? = nil
+    private var pendingPlaybackTask: Task<Void, Never>? = nil
     @Published public var isBatchDownloadingSelected: Bool = false
     @Published public var batchDownloadDoneCount: Int = 0
     @Published public var batchDownloadTotalCount: Int = 0
@@ -215,12 +218,16 @@ public final class BebranoidAppState: ObservableObject {
         NotificationCenter.default.publisher(for: .artworkDidResolve)
             .receive(on: RunLoop.main)
             .sink { [weak self] note in
-                guard let self, let current = self.currentTrack else { return }
+                guard let self else { return }
                 let resolvedTrackId = note.userInfo?["trackId"] as? String
-                let resolvedAlbum = note.userInfo?["album"] as? String
-                if resolvedTrackId == current.id || (resolvedAlbum != nil && resolvedAlbum == current.album) {
+                if let current = self.currentTrack, resolvedTrackId == current.id {
                     self.updatePalette(for: current)
                     self.syncNowPlayingInfo()
+                }
+                if let nextIdx = self.peekNextTrackIndex(),
+                   nextIdx < self.queue.count,
+                   resolvedTrackId == self.queue[nextIdx].id {
+                    self.prepareNextTrackPalette(for: self.queue[nextIdx])
                 }
             }
             .store(in: &cancellables)
@@ -271,9 +278,23 @@ public final class BebranoidAppState: ObservableObject {
             .store(in: &cancellables)
     }
 
+    public func effectiveAccentRGB(extraProgress: Double = 0.0) -> MeshRGB {
+        let blend = max(crossfadeProgress, extraProgress)
+        if blend > 0.001, let nextAcc = nextTrackAccent {
+            let e = HarmonoidMeshEngine.smoothstep(0.0, 1.0, blend)
+            return HarmonoidMeshEngine.lerpColor(accentRGB, nextAcc, t: e)
+        }
+        return accentRGB
+    }
+
     public var accentSwiftUIColor: Color {
-        let norm = accentRGB.normalizedDouble
+        let norm = effectiveAccentRGB().normalizedDouble
         return Color(red: norm.r, green: norm.g, blue: norm.b)
+    }
+
+    public var isCurrentLyricsCyrillic: Bool {
+        guard !currentLyricsDocument.lines.isEmpty else { return false }
+        return LyricsTranslationService.isPredominantlyCyrillic(currentLyricsDocument.lines.map(\.text))
     }
 
     public var currentQualityBadge: QualityBadgeInfo {
@@ -395,27 +416,94 @@ public final class BebranoidAppState: ObservableObject {
 
     // MARK: - Playback Actions
 
+    public func cancelPendingTrackDownload() {
+        pendingPlaybackTask?.cancel()
+        pendingPlaybackTask = nil
+        if let pending = pendingDownloadTrack {
+            trackDownloadProgress.removeValue(forKey: pending.cacheKey)
+        }
+        pendingDownloadTrack = nil
+    }
+
     public func playTrack(_ track: Track, in contextQueue: [Track]? = nil) {
         haptics.lightTap()
         let baseQueue = (contextQueue?.isEmpty == false) ? contextQueue! : (queue.isEmpty ? availableLibraryTracks : queue)
-        originalQueueSource = baseQueue
+        let targetOriginalSource = baseQueue
+        var targetQueue: [Track]
+        var targetIndex: Int
 
         if let foundIndex = baseQueue.firstIndex(where: { $0.id == track.id }) {
-            queue = baseQueue
-            currentIndex = foundIndex
+            targetQueue = baseQueue
+            targetIndex = foundIndex
         } else {
-            queue = [track] + baseQueue
-            currentIndex = 0
+            targetQueue = [track] + baseQueue
+            targetIndex = 0
         }
 
         if isShuffleEnabled {
-            queue = QueueOrder.reshuffleUpcoming(
-                queue: queue,
-                currentIndex: currentIndex,
-                sourceTracks: originalQueueSource
+            targetQueue = QueueOrder.reshuffleUpcoming(
+                queue: targetQueue,
+                currentIndex: targetIndex,
+                sourceTracks: targetOriginalSource
             )
         }
 
+        // Если другой трек сейчас уже открыт/играет, а выбранный трек ещё не скачан —
+        // НЕ перехватываем плеер! Оставляем текущий трек играть и доступным в плеере,
+        // показываем отдельную стеклянную плашку загрузки и переключаем на новый трек сразу после скачивания.
+        if !cacheIndex.isCached(track), let activeCurrent = currentTrack, activeCurrent.id != track.id {
+            pendingPlaybackTask?.cancel()
+            pendingDownloadTrack = track
+            let customCovers = libraryState.customAlbumCovers
+            let siblings = libraryState.tracks
+            Task { [artworkService] in
+                _ = await artworkService.resolveArtwork(
+                    for: track,
+                    customAlbumCovers: customCovers,
+                    siblingTracks: siblings
+                )
+            }
+
+            pendingPlaybackTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let fileURL = try await self.telegramClient.ensureTrackDownloaded(
+                        track: track,
+                        priority: .activePlayback
+                    )
+                    guard !Task.isCancelled, self.pendingDownloadTrack?.id == track.id else { return }
+                    self.pendingDownloadTrack = nil
+                    self.pendingPlaybackTask = nil
+                    self.audioEngine.cancelActiveCrossfade()
+                    self.originalQueueSource = targetOriginalSource
+                    self.queue = targetQueue
+                    self.currentIndex = targetIndex
+                    self.currentTrack = track
+                    self.currentTime = 0.0
+                    self.duration = track.duration
+                    self.artworkService.invalidateCachedSyncPath(forTrackId: track.id)
+                    self.updatePalette(for: track)
+                    self.loadLyricsForCurrentTrack()
+                    self.persistPlaybackSession()
+                    await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: 0, autoPlay: true)
+                    self.updatePalette(for: track)
+                    self.syncNowPlayingInfo()
+                    self.prefetchUpcomingTrack()
+                } catch {
+                    if !Task.isCancelled, self.pendingDownloadTrack?.id == track.id {
+                        self.pendingDownloadTrack = nil
+                        self.pendingPlaybackTask = nil
+                        self.statusBannerMessage = error.localizedDescription
+                    }
+                }
+            }
+            return
+        }
+
+        cancelPendingTrackDownload()
+        originalQueueSource = targetOriginalSource
+        queue = targetQueue
+        currentIndex = targetIndex
         startPlayingCurrentIndex(autoPlay: true)
     }
 
@@ -430,7 +518,9 @@ public final class BebranoidAppState: ObservableObject {
     }
 
     public func seek(to timeSeconds: Double) {
-        audioEngine.seek(to: timeSeconds)
+        let clamped = max(0.0, timeSeconds)
+        currentTime = clamped
+        audioEngine.seek(to: clamped)
         syncNowPlayingInfo()
         persistPlaybackSession()
     }
@@ -439,6 +529,7 @@ public final class BebranoidAppState: ObservableObject {
         if isManualUserAction {
             haptics.lightTap()
             audioEngine.cancelActiveCrossfade()
+            cancelPendingTrackDownload()
         }
         guard !queue.isEmpty else { return }
 
@@ -457,10 +548,19 @@ public final class BebranoidAppState: ObservableObject {
     public func skipToPrevious() {
         haptics.lightTap()
         audioEngine.cancelActiveCrossfade()
+        cancelPendingTrackDownload()
         if currentTime > 3.5 {
             seek(to: 0)
             return
         }
+        skipToPreviousTrackForced()
+    }
+
+    /// Переключение строго на предыдущий трек (используется при свайпе диска вправо в полноэкранном плеере)
+    public func skipToPreviousTrackForced() {
+        haptics.lightTap()
+        audioEngine.cancelActiveCrossfade()
+        cancelPendingTrackDownload()
         guard !queue.isEmpty else { return }
         if currentIndex > 0 {
             currentIndex -= 1
@@ -486,6 +586,7 @@ public final class BebranoidAppState: ObservableObject {
             queue = originalQueueSource
             currentIndex = queue.firstIndex(where: { $0.id == current.id }) ?? 0
         }
+        prefetchUpcomingTrack()
         persistPlaybackSession()
     }
 
@@ -496,6 +597,7 @@ public final class BebranoidAppState: ObservableObject {
         case .all: repeatMode = .one
         case .one: repeatMode = .none
         }
+        prefetchUpcomingTrack()
         persistPlaybackSession()
     }
 
@@ -550,14 +652,52 @@ public final class BebranoidAppState: ObservableObject {
         return nil
     }
 
+    private func peekPreviousTrackIndex() -> Int? {
+        guard !queue.isEmpty else { return nil }
+        if currentIndex > 0 {
+            return currentIndex - 1
+        }
+        if repeatMode == .all {
+            return queue.count - 1
+        }
+        return nil
+    }
+
+    public var upcomingNextTrack: Track? {
+        guard let idx = peekNextTrackIndex(), idx >= 0, idx < queue.count else { return nil }
+        return queue[idx]
+    }
+
+    public var adjacentPreviousTrack: Track? {
+        guard let idx = peekPreviousTrackIndex(), idx >= 0, idx < queue.count else { return nil }
+        return queue[idx]
+    }
+
     private func startPlayingCurrentIndex(autoPlay: Bool, initialSeek: Double = 0) {
         guard currentIndex >= 0, currentIndex < queue.count else { return }
         let track = queue[currentIndex]
+
         currentTrack = track
+        currentTime = max(0.0, initialSeek)
         duration = track.duration
-        updatePalette(for: track)
+        if preparedNextTrackId == track.id,
+           let preloadedPal = nextTrackPalette,
+           let preloadedAcc = nextTrackAccent {
+            currentPalette = preloadedPal
+            accentRGB = preloadedAcc
+            nextTrackPalette = nil
+            nextTrackAccent = nil
+            preparedNextTrackId = nil
+        } else {
+            updatePalette(for: track)
+        }
         loadLyricsForCurrentTrack()
         persistPlaybackSession()
+
+        let needsDownload = !cacheIndex.isCached(track)
+        if needsDownload && autoPlay {
+            pendingDownloadTrack = track
+        }
 
         Task {
             do {
@@ -567,12 +707,19 @@ public final class BebranoidAppState: ObservableObject {
                 } else {
                     fileURL = try await telegramClient.ensureTrackDownloaded(track: track, priority: .activePlayback)
                 }
+                if pendingDownloadTrack?.id == track.id {
+                    pendingDownloadTrack = nil
+                }
                 guard currentTrack?.id == track.id else { return }
+                artworkService.invalidateCachedSyncPath(forTrackId: track.id)
                 await audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
                 updatePalette(for: track)
                 syncNowPlayingInfo()
                 prefetchUpcomingTrack()
             } catch {
+                if pendingDownloadTrack?.id == track.id {
+                    pendingDownloadTrack = nil
+                }
                 if currentTrack?.id == track.id {
                     statusBannerMessage = error.localizedDescription
                 }
@@ -600,17 +747,44 @@ public final class BebranoidAppState: ObservableObject {
     }
 
     private func prefetchUpcomingTrack() {
-        guard let nextIdx = peekNextTrackIndex(), nextIdx < queue.count else { return }
+        guard let nextIdx = peekNextTrackIndex(), nextIdx < queue.count else {
+            nextTrackPalette = nil
+            nextTrackAccent = nil
+            return
+        }
         let nextTrack = queue[nextIdx]
         prepareNextTrackPalette(for: nextTrack)
         guard !cacheIndex.isCached(nextTrack) else { return }
 
-        Task.detached { [telegramClient] in
-            _ = try? await telegramClient.ensureTrackDownloaded(track: nextTrack, priority: .nextTrackPrefetch)
+        Task.detached { [weak self, telegramClient] in
+            if (try? await telegramClient.ensureTrackDownloaded(track: nextTrack, priority: .nextTrackPrefetch)) != nil {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.artworkService.invalidateCachedSyncPath(forTrackId: nextTrack.id)
+                    if let currentNextIdx = self.peekNextTrackIndex(),
+                       currentNextIdx < self.queue.count,
+                       self.queue[currentNextIdx].id == nextTrack.id {
+                        self.prepareNextTrackPalette(for: nextTrack)
+                    }
+                }
+            }
         }
     }
 
     // MARK: - Harmonoid Mesh Palette Resolution
+
+    private func analyzeLocalArtworkURL(_ localURL: URL) -> (palette: [MeshRGB], meshColors: [MeshRGB], uiAccent: MeshRGB)? {
+        if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
+            return HarmonoidMeshEngine.analyzeCoverImage(cgImage)
+        }
+        #if canImport(UIKit)
+        if let uiImage = UIImage(contentsOfFile: localURL.path),
+           let cgImage = uiImage.cgImage {
+            return HarmonoidMeshEngine.analyzeCoverImage(cgImage)
+        }
+        #endif
+        return nil
+    }
 
     public func updatePalette(for track: Track?) {
         guard let track else {
@@ -623,39 +797,31 @@ public final class BebranoidAppState: ObservableObject {
             for: track,
             customAlbumCovers: libraryState.customAlbumCovers,
             siblingTracks: libraryState.tracks
-        ) {
-            let localURL = resolvedHit.url
-            if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
-                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
-                currentPalette = analyzed.meshColors
-                accentRGB = analyzed.uiAccent
-                return
-            }
-            #if canImport(UIKit)
-            if let uiImage = UIImage(contentsOfFile: localURL.path),
-               let cgImage = uiImage.cgImage {
-                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
-                currentPalette = analyzed.meshColors
-                accentRGB = analyzed.uiAccent
-                return
-            }
-            #endif
+        ), let analyzed = analyzeLocalArtworkURL(resolvedHit.url) {
+            currentPalette = analyzed.meshColors
+            accentRGB = analyzed.uiAccent
+            return
         }
 
-        // Детерминированная генерация богатой палитры из хеша обложки/альбома, пока реальная обложка извлекается
-        let seedPalette = Self.deterministicSeedPalette(for: "\(track.album)|\(track.artist)")
-        currentPalette = HarmonoidMeshEngine.mapPaletteToMeshColors(seedPalette)
-        accentRGB = HarmonoidMeshEngine.pickAccentFromPalette(seedPalette)
+        // Спокойная нейтральная графитово-серебристая база до завершения декодирования реальной обложки (без случайного жёлтого/фиолетового!)
+        currentPalette = HarmonoidMeshEngine.monochromePalette
+        accentRGB = HarmonoidMeshEngine.monochromeAccent
 
         // Запускаем асинхронное разрешение реальной обложки (embedded / Telegram / YouTube)
         let customCovers = libraryState.customAlbumCovers
         let siblings = libraryState.tracks
-        Task { [artworkService] in
-            _ = await artworkService.resolveArtwork(
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let resolved = await self.artworkService.resolveArtwork(
                 for: track,
                 customAlbumCovers: customCovers,
                 siblingTracks: siblings
-            )
+            ), let fileURL = resolved.fileURL,
+               self.currentTrack?.id == track.id,
+               let analyzed = self.analyzeLocalArtworkURL(fileURL) {
+                self.currentPalette = analyzed.meshColors
+                self.accentRGB = analyzed.uiAccent
+            }
         }
     }
 
@@ -664,27 +830,31 @@ public final class BebranoidAppState: ObservableObject {
             for: nextTrack,
             customAlbumCovers: libraryState.customAlbumCovers,
             siblingTracks: libraryState.tracks
-        ) {
-            let localURL = resolvedHit.url
-            if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
-                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
-                nextTrackPalette = analyzed.meshColors
-                nextTrackAccent = analyzed.uiAccent
-                return
-            }
-            #if canImport(UIKit)
-            if let uiImage = UIImage(contentsOfFile: localURL.path),
-               let cgImage = uiImage.cgImage {
-                let analyzed = HarmonoidMeshEngine.analyzeCoverImage(cgImage)
-                nextTrackPalette = analyzed.meshColors
-                nextTrackAccent = analyzed.uiAccent
-                return
-            }
-            #endif
+        ), let analyzed = analyzeLocalArtworkURL(resolvedHit.url) {
+            preparedNextTrackId = nextTrack.id
+            nextTrackPalette = analyzed.meshColors
+            nextTrackAccent = analyzed.uiAccent
+            return
         }
-        let seed = Self.deterministicSeedPalette(for: "\(nextTrack.album)|\(nextTrack.artist)")
-        nextTrackPalette = HarmonoidMeshEngine.mapPaletteToMeshColors(seed)
-        nextTrackAccent = HarmonoidMeshEngine.pickAccentFromPalette(seed)
+
+        let customCovers = libraryState.customAlbumCovers
+        let siblings = libraryState.tracks
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let resolved = await self.artworkService.resolveArtwork(
+                for: nextTrack,
+                customAlbumCovers: customCovers,
+                siblingTracks: siblings
+            ), let fileURL = resolved.fileURL,
+               let currentNextIdx = self.peekNextTrackIndex(),
+               currentNextIdx < self.queue.count,
+               self.queue[currentNextIdx].id == nextTrack.id,
+               let analyzed = self.analyzeLocalArtworkURL(fileURL) {
+                self.preparedNextTrackId = nextTrack.id
+                self.nextTrackPalette = analyzed.meshColors
+                self.nextTrackAccent = analyzed.uiAccent
+            }
+        }
     }
 
     nonisolated public static func deterministicSeedPalette(for key: String) -> [MeshRGB] {
@@ -764,6 +934,7 @@ public final class BebranoidAppState: ObservableObject {
     public func ensureCurrentLyricsTranslated() async {
         guard let track = currentTrack,
               !currentLyricsDocument.lines.isEmpty,
+              !isCurrentLyricsCyrillic,
               !currentLyricsDocument.lines.contains(where: { $0.translation != nil }) else {
             return
         }

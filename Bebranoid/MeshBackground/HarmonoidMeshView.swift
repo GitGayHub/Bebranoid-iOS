@@ -76,24 +76,27 @@ public struct HarmonoidMeshView: View {
                         in: &context,
                         size: size,
                         palette: activeColors,
-                        timeSec: fixedTime
+                        timeSec: fixedTime,
+                        useMobileMotionScale: false
                     )
                 }
             } else {
-                // В реальном рантайме на iPhone рендерим статичный GPU-холст без 24 Hz TimelineView-таймера и без drawingGroup,
-                // чтобы ProMotion на iPhone 17 Pro Max всегда работал в честных 120 Hz без просадки частоты экрана до 24–30 FPS.
-                Canvas(opaque: true, rendersAsynchronously: true) { context, size in
-                    let activeColors = (crossfadeProgress > 0.001 && (nextPalette?.count ?? 0) >= 4)
-                        ? HarmonoidMeshEngine.lerpPalette(currentPalette, nextPalette!, progress: crossfadeProgress)
-                        : currentPalette
-                    drawMesh(
-                        in: &context,
-                        size: size,
-                        palette: activeColors,
-                        timeSec: 1.25
-                    )
+                TimelineView(.animation(paused: isReducedMotion && Date().timeIntervalSince(transitionStartTime) * 1000.0 > transitionMs)) { timeline in
+                    Canvas(opaque: true, rendersAsynchronously: true) { context, size in
+                        let liveTime = SharedMeshMotionClock.shared.sampleSeconds(
+                            at: timeline.date,
+                            paused: isReducedMotion
+                        )
+                        let activeColors = resolveActivePalettePure(at: timeline.date)
+                        drawMesh(
+                            in: &context,
+                            size: size,
+                            palette: activeColors,
+                            timeSec: liveTime,
+                            useMobileMotionScale: true
+                        )
+                    }
                 }
-                .animation(.easeInOut(duration: 0.85), value: currentPalette)
             }
         }
         .ignoresSafeArea()
@@ -102,6 +105,14 @@ public struct HarmonoidMeshView: View {
                 transitionFromPalette = currentPalette
                 transitionTargetPalette = currentPalette
                 hasInitialized = true
+            }
+        }
+        .onChange(of: currentPalette) { _, nextTarget in
+            let now = Date()
+            if !HarmonoidMeshEngine.colorsNearlyEqual(transitionTargetPalette, nextTarget) {
+                transitionFromPalette = resolveActivePalettePure(at: now)
+                transitionTargetPalette = nextTarget
+                transitionStartTime = now
             }
         }
     }
@@ -132,7 +143,8 @@ public struct HarmonoidMeshView: View {
         in context: inout GraphicsContext,
         size: CGSize,
         palette: [MeshRGB],
-        timeSec: Double
+        timeSec: Double,
+        useMobileMotionScale: Bool
     ) {
         let w = Double(size.width)
         let h = Double(size.height)
@@ -149,12 +161,19 @@ public struct HarmonoidMeshView: View {
         )
 
         // 2. 4 blobs: blob 0 is source-over (.normal), blobs 1..3 are lighter (.plusLighter)
-        let blobs = HarmonoidMeshEngine.blobCenters(
-            at: timeSec,
-            width: w,
-            height: h,
-            meshColors: colors
-        )
+        let blobs = useMobileMotionScale
+            ? HarmonoidMeshEngine.mobileBlobCenters(
+                at: timeSec,
+                width: w,
+                height: h,
+                meshColors: colors
+            )
+            : HarmonoidMeshEngine.blobCenters(
+                at: timeSec,
+                width: w,
+                height: h,
+                meshColors: colors
+            )
 
         for blob in blobs {
             var layerContext = context

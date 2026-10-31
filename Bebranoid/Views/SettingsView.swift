@@ -317,6 +317,9 @@ public struct SettingsView: View {
             }
             .sheet(isPresented: $appState.isAudioFXSheetPresented) {
                 AudioFXSheetView(appState: appState)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                    .liquidGlassSheetPresentation()
             }
             .fileImporter(
                 isPresented: $isFileImporterPresented,
@@ -422,8 +425,10 @@ public struct TelegramAuthView: View {
 
     public var body: some View {
         ZStack {
-            // Затемнённая подложка без закрытия по тапу мимо или свайпу вниз
-            Color.black.opacity(0.72)
+            // Рефракционная стеклянная подложка Liquid Glass без закрытия по тапу мимо или свайпу вниз
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(Color.black.opacity(0.32))
                 .ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
@@ -487,7 +492,7 @@ public struct TelegramAuthView: View {
                                 .foregroundStyle(.green)
                         }
 
-                        Divider().overlay(Color.white.opacity(0.12))
+                        Divider().overlay(Color.white.opacity(0.16))
 
                         // Текущий шаг диалога
                         switch authVM.step {
@@ -525,22 +530,22 @@ public struct TelegramAuthView: View {
                             }
                             .padding(12)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                            .background(Color.red.opacity(0.16), in: RoundedRectangle(cornerRadius: 12))
                         }
 
-                        Divider().overlay(Color.white.opacity(0.12))
+                        Divider().overlay(Color.white.opacity(0.16))
 
-                        // Строгие кнопки менюшки: «Отменить» и «Продолжить»
+                        // Строгие кнопки менюшки: «Отменить» и «Продолжить» в стиле Liquid Glass
                         HStack(spacing: 12) {
                             Button {
                                 closeModal()
                             } label: {
                                 Text("Отменить")
                                     .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.9))
+                                    .foregroundStyle(.white.opacity(0.92))
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 13)
-                                    .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    .liquidGlassCapsule(tint: .white, isProminent: false)
                             }
                             .buttonStyle(.plain)
 
@@ -559,25 +564,17 @@ public struct TelegramAuthView: View {
                                 .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 13)
-                                .background(
-                                    canContinueCurrentStep ? appState.accentSwiftUIColor : appState.accentSwiftUIColor.opacity(0.45),
-                                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .liquidGlassCapsule(
+                                    tint: canContinueCurrentStep ? appState.accentSwiftUIColor : appState.accentSwiftUIColor.opacity(0.45),
+                                    isProminent: true
                                 )
                             }
                             .buttonStyle(.plain)
                             .disabled(!canContinueCurrentStep)
                         }
                     }
-                    .padding(20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .fill(Color(red: 0.10, green: 0.10, blue: 0.16))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                            )
-                            .shadow(color: .black.opacity(0.55), radius: 28, y: 12)
-                    )
+                    .padding(22)
+                    .liquidGlassCard(cornerRadius: 28, tint: appState.accentSwiftUIColor, tintOpacity: 0.10)
                     .padding(.horizontal, 18)
 
                     Spacer(minLength: 32)

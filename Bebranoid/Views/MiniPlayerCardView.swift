@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Плавающий стеклянный мини-плеер над нижним TabBar iPhone.
-/// Отображает обложку, название трека, артиста, плашку качества (`Hi-Res` / `Lossless`), тонкую полоску прогресса,
+/// Плавающий Liquid Glass мини-плеер над нижним TabBar iPhone.
+/// Отображает обложку, название трека, артиста, плашку качества (`Hi-Res` / `Lossless`), плавную полоску прогресса,
 /// кнопку избранного, Play/Pause и Next. При нажатии или свайпе вверх открывает `FullScreenPlayerView`.
 public struct MiniPlayerCardView: View {
     @ObservedObject var appState: BebranoidAppState
@@ -13,12 +13,6 @@ public struct MiniPlayerCardView: View {
     public var body: some View {
         if let track = appState.currentTrack {
             let downloadPct = appState.downloadProgress(for: track)
-            let progress: Double = {
-                if let pct = downloadPct {
-                    return min(1.0, max(0.02, Double(pct) / 100.0))
-                }
-                return appState.duration > 0 ? min(1.0, max(0.0, appState.currentTime / appState.duration)) : 0.0
-            }()
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
@@ -27,7 +21,7 @@ public struct MiniPlayerCardView: View {
                         localPath: appState.libraryState.customAlbumCovers[track.album] ?? track.coverPath,
                         remoteURL: track.remoteArtworkURL,
                         fallbackSeed: "\(track.album)|\(track.artist)",
-                        cornerRadius: 10,
+                        cornerRadius: 11,
                         sizeTier: .listThumbnail,
                         enableSmoothTransition: true
                     )
@@ -68,7 +62,7 @@ public struct MiniPlayerCardView: View {
                         } else {
                             Text(track.artist)
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.68))
+                                .foregroundStyle(.white.opacity(0.70))
                                 .lineLimit(1)
                         }
                     }
@@ -80,7 +74,7 @@ public struct MiniPlayerCardView: View {
                     } label: {
                         Image(systemName: appState.isFavorite(track) ? "heart.fill" : "heart")
                             .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(appState.isFavorite(track) ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.75))
+                            .foregroundStyle(appState.isFavorite(track) ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.78))
                             .frame(width: 34, height: 34)
                     }
                     .buttonStyle(.plain)
@@ -106,7 +100,7 @@ public struct MiniPlayerCardView: View {
                     } label: {
                         Image(systemName: "forward.fill")
                             .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(.white.opacity(0.88))
                             .frame(width: 34, height: 34)
                     }
                     .buttonStyle(.plain)
@@ -114,24 +108,32 @@ public struct MiniPlayerCardView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
 
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Rectangle()
-                            .fill(Color.white.opacity(0.10))
-                        Rectangle()
-                            .fill(appState.accentSwiftUIColor)
-                            .frame(width: geo.size.width * progress)
+                TimelineView(.animation(minimumInterval: 0.12, paused: !appState.isPlaying)) { context in
+                    let _ = context.date
+                    let livePos = appState.isPlaying ? appState.audioEngine.livePlaybackTime : appState.currentTime
+                    let effDur = appState.duration > 0 ? appState.duration : track.duration
+                    let progress: Double = {
+                        if let pct = downloadPct {
+                            return min(1.0, max(0.02, Double(pct) / 100.0))
+                        }
+                        return effDur > 0 ? min(1.0, max(0.0, livePos / effDur)) : 0.0
+                    }()
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.10))
+                            Rectangle()
+                                .fill(appState.accentSwiftUIColor)
+                                .frame(width: geo.size.width * progress)
+                        }
                     }
+                    .frame(height: 2.5)
                 }
-                .frame(height: 2.5)
             }
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
-            )
-            .shadow(color: Color.black.opacity(0.35), radius: 14, x: 0, y: 6)
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.09, isInteractive: true)
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .onTapGesture {
                 appState.haptics.lightTap()
                 appState.isFullScreenPlayerPresented = true

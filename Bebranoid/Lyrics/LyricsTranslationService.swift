@@ -21,7 +21,7 @@ public final class LyricsTranslationService: @unchecked Sendable {
         self.session = session
     }
 
-    /// Проверяет, написан ли текст преимущественно на русском языке (кириллицей)
+    /// Проверяет, написан ли текст преимущественно кириллицей (на русском/украинском и др.)
     public static func isPredominantlyCyrillic(_ lines: [String]) -> Bool {
         let joined = lines.joined(separator: " ")
         var cyrillicCount = 0
@@ -29,13 +29,13 @@ public final class LyricsTranslationService: @unchecked Sendable {
         for scalar in joined.unicodeScalars {
             if CharacterSet.letters.contains(scalar) {
                 letterCount += 1
-                if scalar.value >= 0x0400 && scalar.value <= 0x04FF {
+                if scalar.value >= 0x0400 && scalar.value <= 0x052F {
                     cyrillicCount += 1
                 }
             }
         }
-        guard letterCount > 0 else { return true }
-        return Double(cyrillicCount) / Double(letterCount) >= 0.45
+        guard letterCount > 0 else { return false }
+        return Double(cyrillicCount) / Double(letterCount) >= 0.35
     }
 
     /// Разбивает массив строк на пакеты длиной `<= 900` символов (`electron/lyrics-translate.js`)
