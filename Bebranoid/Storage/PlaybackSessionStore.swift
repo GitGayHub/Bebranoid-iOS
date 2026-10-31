@@ -69,12 +69,52 @@ public struct UserLibraryPersistentState: Codable, Sendable {
     public var playCounts: [String: Int] = [:]
     public var disabledLyricsTrackIds: Set<String> = []
     public var playlistShufflePreferences: [String: PlaylistShufflePreference] = [:]
-    public var selectedTelegramChatId: String = ""
-    public var selectedTelegramChatTitle: String = AppConfig.defaultMainChatPlaceholderTitle
-    public var selectedTelegramArchiveChatId: String = ""
-    public var selectedTelegramArchiveChatTitle: String = AppConfig.defaultArchiveChatPlaceholderTitle
+    public var selectedTelegramChatId: String = AppConfig.defaultPersonalMainChatId
+    public var selectedTelegramChatTitle: String = AppConfig.defaultPersonalMainChatTitle
+    public var selectedTelegramArchiveChatId: String = AppConfig.defaultPersonalArchiveChatId
+    public var selectedTelegramArchiveChatTitle: String = AppConfig.defaultPersonalArchiveChatTitle
+    public var isGyroscope3DCoverEnabled: Bool = true
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case tracks
+        case playlists
+        case favoriteTrackFilenames
+        case favoriteArtistKeys
+        case hiddenAlbums
+        case excludedShuffleAlbums
+        case customAlbumCovers
+        case albumTrackOrders
+        case playCounts
+        case disabledLyricsTrackIds
+        case playlistShufflePreferences
+        case selectedTelegramChatId
+        case selectedTelegramChatTitle
+        case selectedTelegramArchiveChatId
+        case selectedTelegramArchiveChatTitle
+        case isGyroscope3DCoverEnabled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.tracks = try c.decodeIfPresent([Track].self, forKey: .tracks) ?? []
+        self.playlists = try c.decodeIfPresent([Playlist].self, forKey: .playlists) ?? []
+        self.favoriteTrackFilenames = try c.decodeIfPresent(Set<String>.self, forKey: .favoriteTrackFilenames) ?? []
+        self.favoriteArtistKeys = try c.decodeIfPresent(Set<String>.self, forKey: .favoriteArtistKeys) ?? []
+        self.hiddenAlbums = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenAlbums) ?? []
+        self.excludedShuffleAlbums = try c.decodeIfPresent(Set<String>.self, forKey: .excludedShuffleAlbums) ?? []
+        self.customAlbumCovers = try c.decodeIfPresent([String: String].self, forKey: .customAlbumCovers) ?? [:]
+        self.albumTrackOrders = try c.decodeIfPresent([String: [String]].self, forKey: .albumTrackOrders) ?? [:]
+        self.playCounts = try c.decodeIfPresent([String: Int].self, forKey: .playCounts) ?? [:]
+        self.disabledLyricsTrackIds = try c.decodeIfPresent(Set<String>.self, forKey: .disabledLyricsTrackIds) ?? []
+        self.playlistShufflePreferences = try c.decodeIfPresent([String: PlaylistShufflePreference].self, forKey: .playlistShufflePreferences) ?? [:]
+        self.selectedTelegramChatId = try c.decodeIfPresent(String.self, forKey: .selectedTelegramChatId) ?? AppConfig.defaultPersonalMainChatId
+        self.selectedTelegramChatTitle = try c.decodeIfPresent(String.self, forKey: .selectedTelegramChatTitle) ?? AppConfig.defaultPersonalMainChatTitle
+        self.selectedTelegramArchiveChatId = try c.decodeIfPresent(String.self, forKey: .selectedTelegramArchiveChatId) ?? AppConfig.defaultPersonalArchiveChatId
+        self.selectedTelegramArchiveChatTitle = try c.decodeIfPresent(String.self, forKey: .selectedTelegramArchiveChatTitle) ?? AppConfig.defaultPersonalArchiveChatTitle
+        self.isGyroscope3DCoverEnabled = try c.decodeIfPresent(Bool.self, forKey: .isGyroscope3DCoverEnabled) ?? true
+    }
 }
 
 /// Персистентное хранилище состояния библиотеки и сессии воспроизведения
@@ -135,11 +175,35 @@ public final class PlaybackSessionStore: @unchecked Sendable {
 
     public func loadLibraryState() -> UserLibraryPersistentState {
         lock.lock()
-        defer { lock.unlock() }
         guard let data = try? Data(contentsOf: libraryStateFileURL),
-              let decoded = try? decoder.decode(UserLibraryPersistentState.self, from: data) else {
+              var decoded = try? decoder.decode(UserLibraryPersistentState.self, from: data) else {
+            lock.unlock()
             return UserLibraryPersistentState()
         }
+
+        var didMigratePersonalChats = false
+        if decoded.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            decoded.selectedTelegramChatId = AppConfig.defaultPersonalMainChatId
+            decoded.selectedTelegramChatTitle = AppConfig.defaultPersonalMainChatTitle
+            didMigratePersonalChats = true
+        } else if decoded.selectedTelegramChatTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || decoded.selectedTelegramChatTitle == AppConfig.defaultMainChatPlaceholderTitle {
+            decoded.selectedTelegramChatTitle = AppConfig.defaultPersonalMainChatTitle
+            didMigratePersonalChats = true
+        }
+
+        if decoded.selectedTelegramArchiveChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (decoded.selectedTelegramArchiveChatTitle.isEmpty
+                || decoded.selectedTelegramArchiveChatTitle == AppConfig.defaultArchiveChatPlaceholderTitle) {
+            decoded.selectedTelegramArchiveChatId = AppConfig.defaultPersonalArchiveChatId
+            decoded.selectedTelegramArchiveChatTitle = AppConfig.defaultPersonalArchiveChatTitle
+            didMigratePersonalChats = true
+        }
+
+        if didMigratePersonalChats, let migratedData = try? encoder.encode(decoded) {
+            try? migratedData.write(to: libraryStateFileURL, options: .atomic)
+        }
+        lock.unlock()
         return decoded
     }
 }

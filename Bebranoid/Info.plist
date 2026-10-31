@@ -38,6 +38,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Bebranoid использует локальную сеть для мгновенной загрузки вашей медиатеки с ПК.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Bebranoid использует гироскоп для плавного 3D-наклона обложки трека в полноэкранном плеере.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Bebranoid использует доступ к медиатеке для выбора пользовательских обложек альбомов.</string>
 	<key>NSSupportsLiveActivities</key>

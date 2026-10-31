@@ -59,6 +59,7 @@ public extension Notification.Name {
     static let telegramAuthStateDidChange = Notification.Name("Bebranoid.telegramAuthStateDidChange")
     static let telegramConnectionStateDidChange = Notification.Name("Bebranoid.telegramConnectionStateDidChange")
     static let trackDownloadProgressDidChange = Notification.Name("Bebranoid.trackDownloadProgressDidChange")
+    static let telegramScanProgressDidChange = Notification.Name("Bebranoid.telegramScanProgressDidChange")
 }
 
 /// Низкоуровневый мост к нативному `TDLibFramework` (`td_create_client_id`, `td_send`, `td_receive`, `td_execute`).
@@ -1081,46 +1082,91 @@ public final class TelegramClientService: @unchecked Sendable {
         }
     }
 
+    private func updateScanProgress(_ text: String) {
+        withLock { currentScanProgressText = text }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .telegramScanProgressDidChange,
+                object: nil,
+                userInfo: ["text": text]
+            )
+        }
+    }
+
     // MARK: - Real Dialogs & Forum Topics (`getChats`, `getChat`, `getForumTopics`)
 
-    /// Подгружает основной и архивный списки диалогов в локальный кеш TDLib один раз за сессию без спама запросов.
-    private func loadDialogListsOnceIfNeeded() async {
+    /// Подгружает полный основной и архивный списки диалогов в локальный кеш TDLib (`electron/main.js` `loadChatLists`),
+    /// останавливаясь сразу по ответу 404 `"Have no more chats to load"`, чтобы персональные чаты AndroSend гарантированно нашлись.
+    private func loadDialogListsOnceIfNeeded(forceReload: Bool = false) async {
         let alreadyLoaded = withLock {
+            if forceReload {
+                hasLoadedInitialChatLists = true
+                return false
+            }
             if hasLoadedInitialChatLists { return true }
             hasLoadedInitialChatLists = true
             return false
         }
         guard !alreadyLoaded else { return }
 
-        // Ждём до 4 секунд, если TDLib ещё устанавливает сетевое соединение с серверами Telegram
-        for _ in 0..<16 {
+        // Ждём до 6 секунд, пока TDLib подключится к серверам Telegram
+        for tick in 0..<24 {
             let conn = connectionState
-            if conn == .ready || conn == .updating { break }
+            if conn == .ready { break }
+            if conn == .updating && tick >= 10 { break }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
 
-        _ = try? await bridge.sendAsync([
-            "@type": "loadChats",
-            "chat_list": ["@type": "chatListMain"],
-            "limit": 40
-        ], timeoutSeconds: 8.0)
+        // Подгружаем все страницы основного списка диалогов (до 15 страниц по 100 чатов; 404 = всё загружено)
+        for _ in 0..<15 {
+            do {
+                _ = try await bridge.sendAsync([
+                    "@type": "loadChats",
+                    "chat_list": ["@type": "chatListMain"],
+                    "limit": 100
+                ], timeoutSeconds: 8.0)
+            } catch {
+                break
+            }
+        }
 
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        // Подгружаем все страницы архивного списка диалогов (до 10 страниц по 100 чатов; 404 = всё загружено)
+        for _ in 0..<10 {
+            do {
+                _ = try await bridge.sendAsync([
+                    "@type": "loadChats",
+                    "chat_list": ["@type": "chatListArchive"],
+                    "limit": 100
+                ], timeoutSeconds: 6.0)
+            } catch {
+                break
+            }
+        }
 
-        _ = try? await bridge.sendAsync([
-            "@type": "loadChats",
-            "chat_list": ["@type": "chatListArchive"],
-            "limit": 30
-        ], timeoutSeconds: 6.0)
-
-        // Проверяем, что TDLib действительно подгрузил хотя бы один чат, иначе разрешаем повторную загрузку позже
+        // Проверяем, что в локальном кеше TDLib уже появились супергруппы/каналы (в частности персональный чат AndroSend).
+        // Если TDLib ещё в фазе первичной синхронизации и супергрупп пока 0 — разрешаем повторную догрузку при следующем вызове.
+        var combinedIds: [Int64] = []
         if let mainResp = try? await bridge.sendAsync([
             "@type": "getChats",
             "chat_list": ["@type": "chatListMain"],
-            "limit": 20
+            "limit": 250
         ], timeoutSeconds: 5.0),
-           let ids = Self.extractInt64Array(from: mainResp["chat_ids"]),
-           ids.isEmpty {
+           let ids = Self.extractInt64Array(from: mainResp["chat_ids"]) {
+            combinedIds.append(contentsOf: ids)
+        }
+        if let archResp = try? await bridge.sendAsync([
+            "@type": "getChats",
+            "chat_list": ["@type": "chatListArchive"],
+            "limit": 250
+        ], timeoutSeconds: 5.0),
+           let ids = Self.extractInt64Array(from: archResp["chat_ids"]) {
+            combinedIds.append(contentsOf: ids)
+        }
+
+        let targetMainId = Int64(AppConfig.defaultPersonalMainChatId) ?? -1003734947911
+        let hasSupergroups = combinedIds.contains(where: { $0 < 0 })
+        let hasPersonalMain = combinedIds.contains(targetMainId)
+        if !hasSupergroups || (!hasPersonalMain && connectionState != .ready) {
             withLock { hasLoadedInitialChatLists = false }
         }
     }
@@ -1138,31 +1184,53 @@ public final class TelegramClientService: @unchecked Sendable {
             return chat
         }
 
-        // 1. Обязательно сначала подгружаем диалоги пользователя (Main + Archive), чтобы TDLib знал access_hash супергруппы
-        await loadDialogListsOnceIfNeeded()
+        for attempt in 0..<2 {
+            // 1. Подгружаем диалоги пользователя (Main + Archive), чтобы TDLib знал access_hash супергруппы
+            await loadDialogListsOnceIfNeeded(forceReload: attempt > 0)
 
-        if let chat = try? await bridge.sendAsync([
-            "@type": "getChat",
-            "chat_id": chatId
-        ], timeoutSeconds: 6.0), chat["id"] != nil {
-            _ = withLock { resolvedChatIds.insert(chatId) }
-            bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
-            return chat
-        }
-
-        // 2. Если супергруппа уже известна TDLib, открываем её строго с `force: false` (без фейкового access_hash = 0)
-        let chatIdStr = String(chatId)
-        if chatIdStr.hasPrefix("-100"),
-           let supergroupId = Int64(chatIdStr.dropFirst(4)),
-           supergroupId > 0 {
-            if let created = try? await bridge.sendAsync([
-                "@type": "createSupergroupChat",
-                "supergroup_id": supergroupId,
-                "force": false
-            ], timeoutSeconds: 8.0), created["id"] != nil {
+            if let chat = try? await bridge.sendAsync([
+                "@type": "getChat",
+                "chat_id": chatId
+            ], timeoutSeconds: 6.0), chat["id"] != nil {
                 _ = withLock { resolvedChatIds.insert(chatId) }
                 bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
-                return created
+                return chat
+            }
+
+            // 2. Локальный поиск по кешу TDLib (например, "AndroSend")
+            _ = try? await bridge.sendAsync([
+                "@type": "searchChats",
+                "query": AppConfig.defaultCloudChatSearchKeyword,
+                "limit": 30
+            ], timeoutSeconds: 4.0)
+
+            if let chat = try? await bridge.sendAsync([
+                "@type": "getChat",
+                "chat_id": chatId
+            ], timeoutSeconds: 5.0), chat["id"] != nil {
+                _ = withLock { resolvedChatIds.insert(chatId) }
+                bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
+                return chat
+            }
+
+            // 3. Если супергруппа уже известна TDLib, открываем её строго с `force: false` (без фейкового access_hash = 0)
+            let chatIdStr = String(chatId)
+            if chatIdStr.hasPrefix("-100"),
+               let supergroupId = Int64(chatIdStr.dropFirst(4)),
+               supergroupId > 0 {
+                if let created = try? await bridge.sendAsync([
+                    "@type": "createSupergroupChat",
+                    "supergroup_id": supergroupId,
+                    "force": false
+                ], timeoutSeconds: 8.0), created["id"] != nil {
+                    _ = withLock { resolvedChatIds.insert(chatId) }
+                    bridge.sendFireAndForget(["@type": "openChat", "chat_id": chatId])
+                    return created
+                }
+            }
+
+            if attempt == 0 {
+                try? await Task.sleep(nanoseconds: 1_400_000_000)
             }
         }
 
@@ -1177,7 +1245,7 @@ public final class TelegramClientService: @unchecked Sendable {
         if let mainResp = try? await bridge.sendAsync([
             "@type": "getChats",
             "chat_list": ["@type": "chatListMain"],
-            "limit": 100
+            "limit": 250
         ], timeoutSeconds: 10.0),
            let ids = Self.extractInt64Array(from: mainResp["chat_ids"]) {
             chatIds.append(contentsOf: ids)
@@ -1186,7 +1254,7 @@ public final class TelegramClientService: @unchecked Sendable {
         if let archResp = try? await bridge.sendAsync([
             "@type": "getChats",
             "chat_list": ["@type": "chatListArchive"],
-            "limit": 100
+            "limit": 250
         ], timeoutSeconds: 8.0),
            let ids = Self.extractInt64Array(from: archResp["chat_ids"]) {
             for id in ids where !chatIds.contains(id) {
@@ -1198,7 +1266,7 @@ public final class TelegramClientService: @unchecked Sendable {
         if let localSearch = try? await bridge.sendAsync([
             "@type": "searchChats",
             "query": AppConfig.defaultCloudChatSearchKeyword,
-            "limit": 20
+            "limit": 30
         ], timeoutSeconds: 5.0),
            let foundIds = Self.extractInt64Array(from: localSearch["chat_ids"]) {
             for fid in foundIds where !chatIds.contains(fid) {
@@ -1206,30 +1274,32 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
-        // Также разрешаем выбранные супергруппы из сохранённого состояния
+        // Обязательно ставим персональные чаты владельца (AndroSend Облако + AndroSend Архив) в самое начало списка
         let savedState = PlaybackSessionStore.shared.loadLibraryState()
         let candidatePinnedStrings = [
+            AppConfig.defaultPersonalMainChatId,
+            AppConfig.defaultPersonalArchiveChatId,
             savedState.selectedTelegramChatId,
             savedState.selectedTelegramArchiveChatId,
             configuredArchiveChatId ?? ""
         ]
-        for rawPinned in candidatePinnedStrings {
+        for rawPinned in candidatePinnedStrings.reversed() {
             let trimmed = rawPinned.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let pinnedId = Int64(trimmed), pinnedId != 0, !chatIds.contains(pinnedId) {
-                if await ensureChatResolved(chatId: pinnedId) != nil {
-                    chatIds.insert(pinnedId, at: 0)
-                }
+            if let pinnedId = Int64(trimmed), pinnedId < 0 {
+                _ = await ensureChatResolved(chatId: pinnedId)
+                chatIds.removeAll { $0 == pinnedId }
+                chatIds.insert(pinnedId, at: 0)
             }
         }
 
+        // ВАЖНО: сначала отфильтровываем личные переписки (cid > 0), и только потом берём первые 80 групп/каналов!
+        let groupChatIds = chatIds.filter { $0 < 0 }
+
         var summaries: [TelegramChatSummary] = []
         var seenChatIds = Set<String>()
-        // Ограничиваем обход первыми 45 чатами (супергруппы/каналы), чтобы не спамить TDLib сотнями запросов
-        for cid in chatIds.prefix(45) {
+        for cid in groupChatIds.prefix(80) {
             let chatIdStr = String(cid)
             guard !seenChatIds.contains(chatIdStr) else { continue }
-            // Пропускаем личные переписки (положительные chat_id) — библиотеки музыки всегда в группах/каналах
-            guard cid < 0 else { continue }
             guard let chatDict = try? await bridge.sendAsync([
                 "@type": "getChat",
                 "chat_id": cid
@@ -1249,6 +1319,30 @@ public final class TelegramClientService: @unchecked Sendable {
                     isForum: isForum,
                     isReadOnlyArchive: isArchive
                 )
+            )
+        }
+
+        // Гарантируем присутствие персональных чатов в выпадающем списке настроек даже во время первичной синхронизации TDLib
+        if !seenChatIds.contains(AppConfig.defaultPersonalMainChatId) {
+            summaries.insert(
+                TelegramChatSummary(
+                    id: AppConfig.defaultPersonalMainChatId,
+                    title: AppConfig.defaultPersonalMainChatTitle,
+                    isForum: true,
+                    isReadOnlyArchive: false
+                ),
+                at: 0
+            )
+        }
+        if !seenChatIds.contains(AppConfig.defaultPersonalArchiveChatId) {
+            summaries.insert(
+                TelegramChatSummary(
+                    id: AppConfig.defaultPersonalArchiveChatId,
+                    title: AppConfig.defaultPersonalArchiveChatTitle,
+                    isForum: false,
+                    isReadOnlyArchive: true
+                ),
+                at: min(1, summaries.count)
             )
         }
 
@@ -1334,9 +1428,26 @@ public final class TelegramClientService: @unchecked Sendable {
             )
         }
 
-        withLock { currentScanProgressText = "Открытие чата и загрузка топиков \(chatTitle)..." }
+        updateScanProgress("Открытие чата и загрузка топиков \(chatTitle)...")
         try await sendTdlibParametersIfPossible()
-        _ = await ensureChatResolved(chatId: numericChatId)
+        guard await ensureChatResolved(chatId: numericChatId) != nil else {
+            throw NSError(
+                domain: "TelegramClientService",
+                code: 503,
+                userInfo: [NSLocalizedDescriptionKey: "TDLib ещё подгружает диалоги Telegram (\(chatTitle)). Повтор через пару секунд..."]
+            )
+        }
+
+        // Прогреваем историю супергруппы на сервере, чтобы на свежей сессии `searchChatMessages` сразу видел все сообщения
+        _ = try? await bridge.sendAsync([
+            "@type": "getChatHistory",
+            "chat_id": numericChatId,
+            "from_message_id": 0,
+            "offset": 0,
+            "limit": 20,
+            "only_local": false
+        ], timeoutSeconds: 8.0)
+
         let forumTopics = await fetchForumTopics(chatId: numericChatId)
 
         var rawMessages: [RawTelegramAudioMessage] = []
@@ -1375,7 +1486,7 @@ public final class TelegramClientService: @unchecked Sendable {
                 ignoredChatTitles: ignoredChatTitles
             )
         }
-        withLock { currentScanProgressText = "Готово (\(built.count) треков из \(chatTitle))" }
+        updateScanProgress("Готово (\(built.count) треков из \(chatTitle))")
         return built
     }
 
@@ -1429,9 +1540,7 @@ public final class TelegramClientService: @unchecked Sendable {
         var fromMessageId: Int64 = 0
 
         while results.count < maxMessages {
-            withLock {
-                currentScanProgressText = "Сканирование \(chatTitle): \(results.count) тр."
-            }
+            updateScanProgress("Сканирование \(chatTitle): \(results.count) тр.")
             let resp = try await bridge.sendAsync([
                 "@type": "searchChatMessages",
                 "chat_id": chatId,

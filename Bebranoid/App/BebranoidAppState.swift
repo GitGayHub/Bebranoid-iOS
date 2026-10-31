@@ -64,6 +64,14 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var accentRGB: MeshRGB = HarmonoidMeshEngine.defaultAccent
     @Published public var crossfadeProgress: Double = 0.0
     @Published public var isReducedMotionEnabled: Bool = false
+    @Published public var isGyroscope3DCoverEnabled: Bool = true {
+        didSet {
+            if libraryState.isGyroscope3DCoverEnabled != isGyroscope3DCoverEnabled {
+                libraryState.isGyroscope3DCoverEnabled = isGyroscope3DCoverEnabled
+                saveLibraryState()
+            }
+        }
+    }
 
     // MARK: - Lyrics & Translation State
     @Published public var lyricsEngine: LyricsEngineKind = .beautiful {
@@ -139,6 +147,7 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var statusBannerMessage: String? = nil
     @Published public var availableTelegramChats: [TelegramChatSummary] = []
     @Published public var isSyncingTelegramLibrary: Bool = false
+    @Published public var telegramScanProgressText: String = ""
     #if DEBUG
     @Published public var demoDirectScreenOverride: String? = nil
     @Published public var demoFixedMeshTime: Double? = nil
@@ -160,7 +169,9 @@ public final class BebranoidAppState: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     public init() {
-        self.libraryState = PlaybackSessionStore.shared.loadLibraryState()
+        let initialLibrary = PlaybackSessionStore.shared.loadLibraryState()
+        self.libraryState = initialLibrary
+        self.isGyroscope3DCoverEnabled = initialLibrary.isGyroscope3DCoverEnabled
         bindAudioEngine()
         bindRemoteCommands()
         bindArtworkAndTelegramNotifications()
@@ -176,13 +187,21 @@ public final class BebranoidAppState: ObservableObject {
             guard let self else { return }
             await self.telegramClient.initializeAndRestoreSession()
             let latestSaved = PlaybackSessionStore.shared.loadLibraryState()
-            if self.libraryState.selectedTelegramChatId.isEmpty, !latestSaved.selectedTelegramChatId.isEmpty {
-                self.libraryState.selectedTelegramChatId = latestSaved.selectedTelegramChatId
-                self.libraryState.selectedTelegramChatTitle = latestSaved.selectedTelegramChatTitle
+            if self.libraryState.selectedTelegramChatId.isEmpty {
+                self.libraryState.selectedTelegramChatId = latestSaved.selectedTelegramChatId.isEmpty
+                    ? AppConfig.defaultPersonalMainChatId
+                    : latestSaved.selectedTelegramChatId
+                self.libraryState.selectedTelegramChatTitle = latestSaved.selectedTelegramChatTitle.isEmpty
+                    ? AppConfig.defaultPersonalMainChatTitle
+                    : latestSaved.selectedTelegramChatTitle
             }
-            if self.libraryState.selectedTelegramArchiveChatId.isEmpty, !latestSaved.selectedTelegramArchiveChatId.isEmpty {
-                self.libraryState.selectedTelegramArchiveChatId = latestSaved.selectedTelegramArchiveChatId
-                self.libraryState.selectedTelegramArchiveChatTitle = latestSaved.selectedTelegramArchiveChatTitle
+            if self.libraryState.selectedTelegramArchiveChatId.isEmpty {
+                self.libraryState.selectedTelegramArchiveChatId = latestSaved.selectedTelegramArchiveChatId.isEmpty
+                    ? AppConfig.defaultPersonalArchiveChatId
+                    : latestSaved.selectedTelegramArchiveChatId
+                self.libraryState.selectedTelegramArchiveChatTitle = latestSaved.selectedTelegramArchiveChatTitle.isEmpty
+                    ? AppConfig.defaultPersonalArchiveChatTitle
+                    : latestSaved.selectedTelegramArchiveChatTitle
             }
             if self.telegramClient.isAuthorized {
                 await self.handleTelegramAuthorized()
@@ -237,6 +256,15 @@ public final class BebranoidAppState: ObservableObject {
                     self.trackDownloadProgress.removeValue(forKey: cacheKey)
                     self.invalidateLibraryCaches()
                 }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .telegramScanProgressDidChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let self,
+                      let text = note.userInfo?["text"] as? String else { return }
+                self.telegramScanProgressText = text
             }
             .store(in: &cancellables)
     }
@@ -1074,17 +1102,46 @@ public final class BebranoidAppState: ObservableObject {
 
         statusBannerMessage = nil
         isTelegramAuthPresented = false
+
+        // Всегда гарантируем автовыбор персональных чатов владельца (AndroSend Облако + AndroSend Архив)
+        var didPopulateDefaultChats = false
+        if libraryState.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            libraryState.selectedTelegramChatId = AppConfig.defaultPersonalMainChatId
+            libraryState.selectedTelegramChatTitle = AppConfig.defaultPersonalMainChatTitle
+            didPopulateDefaultChats = true
+        }
+        if libraryState.selectedTelegramArchiveChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (libraryState.selectedTelegramArchiveChatTitle.isEmpty
+                || libraryState.selectedTelegramArchiveChatTitle == AppConfig.defaultArchiveChatPlaceholderTitle) {
+            libraryState.selectedTelegramArchiveChatId = AppConfig.defaultPersonalArchiveChatId
+            libraryState.selectedTelegramArchiveChatTitle = AppConfig.defaultPersonalArchiveChatTitle
+            didPopulateDefaultChats = true
+        }
+        if didPopulateDefaultChats {
+            saveLibraryState()
+        }
+
         invalidateLibraryCaches()
         if currentTrack == nil {
             restorePreviousSession()
         }
         try? await Task.sleep(nanoseconds: 350_000_000)
         await telegramClient.refreshAuthorizedUserProfile()
+
         let hasExistingTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
-        let hasConfiguredChat = !libraryState.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if !hasExistingTelegramTracks || !hasConfiguredChat {
-            await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
+        await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
+
+        // Если сразу после входа TDLib ещё подгружал диалоги с сервера и треков пока 0 — автоматически повторяем синхронизацию до 2 раз
+        for _ in 0..<2 {
+            if !telegramClient.isAuthorized { break }
+            if libraryState.tracks.contains(where: { $0.sourceKind == .telegram }) {
+                statusBannerMessage = nil
+                break
+            }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            await syncTelegramLibrary()
         }
+
         invalidateLibraryCaches()
         if let pendingTrack = currentTrack,
            pendingTrack.sourceKind == .telegram,

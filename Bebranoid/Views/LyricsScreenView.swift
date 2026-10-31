@@ -265,49 +265,51 @@ public struct LyricsScreenView: View {
                 Text("Текст песни не найден")
                     .font(.system(size: 19, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.82))
-                Text("Проверены локальный кеш, встроенные теги и база LRCLIB.")
+                Text("Проверены YouTube Music, встроенные теги и база LRCLIB.")
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.55))
                     .multilineTextAlignment(.center)
             }
             .padding(32)
         } else {
-            TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !appState.isPlaying && !isDraggingSlider)) { context in
-                let _ = context.date
-                let liveTime: Double = {
-                    if isDraggingSlider {
-                        return draggedTime
-                    }
-                    if appState.isPlaying {
-                        return appState.audioEngine.smoothClock.interpolatedTime(at: ProcessInfo.processInfo.systemUptime)
-                    }
-                    return max(appState.currentTime, appState.audioEngine.currentTime)
-                }()
-                switch appState.lyricsEngine {
-                case .beautiful:
-                    BeautifulLyricsView(
-                        document: appState.currentLyricsDocument,
-                        nodes: appState.currentBeautifulNodes,
-                        currentTime: liveTime,
-                        accentColor: appState.accentSwiftUIColor,
-                        fontSizePreset: appState.lyricsFontSize,
-                        showTranslation: appState.showLyricsTranslation,
-                        onSeekToTime: { targetSec in
-                            appState.seek(to: targetSec)
-                        }
-                    )
-                case .classic:
-                    ClassicKaraokeLyricsView(
-                        document: appState.currentLyricsDocument,
-                        currentTime: liveTime,
-                        accentColor: appState.accentSwiftUIColor,
-                        fontSizePreset: appState.lyricsFontSize,
-                        showTranslation: appState.showLyricsTranslation,
-                        onSeekToTime: { targetSec in
-                            appState.seek(to: targetSec)
-                        }
-                    )
+            let liveTimeReader: () -> Double = { [appState, isDraggingSlider, draggedTime] in
+                if isDraggingSlider {
+                    return draggedTime
                 }
+                if appState.isPlaying {
+                    return appState.audioEngine.smoothClock.interpolatedTime(at: ProcessInfo.processInfo.systemUptime)
+                }
+                return max(appState.currentTime, appState.audioEngine.currentTime)
+            }
+
+            switch appState.lyricsEngine {
+            case .beautiful:
+                BeautifulLyricsView(
+                    document: appState.currentLyricsDocument,
+                    nodes: appState.currentBeautifulNodes,
+                    currentTime: displayedTime,
+                    isPlaying: appState.isPlaying || isDraggingSlider,
+                    liveTimeProvider: liveTimeReader,
+                    accentColor: appState.accentSwiftUIColor,
+                    fontSizePreset: appState.lyricsFontSize,
+                    showTranslation: appState.showLyricsTranslation,
+                    onSeekToTime: { targetSec in
+                        appState.seek(to: targetSec)
+                    }
+                )
+            case .classic:
+                ClassicKaraokeLyricsView(
+                    document: appState.currentLyricsDocument,
+                    currentTime: displayedTime,
+                    isPlaying: appState.isPlaying || isDraggingSlider,
+                    liveTimeProvider: liveTimeReader,
+                    accentColor: appState.accentSwiftUIColor,
+                    fontSizePreset: appState.lyricsFontSize,
+                    showTranslation: appState.showLyricsTranslation,
+                    onSeekToTime: { targetSec in
+                        appState.seek(to: targetSec)
+                    }
+                )
             }
         }
     }

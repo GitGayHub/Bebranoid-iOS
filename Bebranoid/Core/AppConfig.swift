@@ -10,6 +10,12 @@ public enum AppConfig {
     public static let defaultSeedMainChatTitle: String = "AndroSend Облако"
     public static let defaultSeedArchiveChatTitle: String = "AndroSend Архив"
 
+    /// Персональные чаты владельца по умолчанию (выбираются автоматически сразу после входа в Telegram)
+    public static let defaultPersonalMainChatId: String = "-1003734947911"
+    public static let defaultPersonalMainChatTitle: String = "AndroSend Облако"
+    public static let defaultPersonalArchiveChatId: String = "-1003890744365"
+    public static let defaultPersonalArchiveChatTitle: String = "AndroSend Архив"
+
     /// Виртуальные идентификаторы альбомов и плейлистов
     public static let favoritesAlbumName: String = "Любимые"
     public static let recent30PlaylistId: String = "__recent_30__"
@@ -22,7 +28,7 @@ public enum AppConfig {
     public static let defaultPlaylistShuffleLimit: Int = 15
     public static let maxPlaylistTrackLimit: Int = 5000
     public static let playCountListenThresholdSeconds: Double = 5.0
-    public static let lyricsDurationToleranceSeconds: Double = 8.0
+    public static let lyricsDurationToleranceSeconds: Double = 3.8
 
     /// Нормализует ID супергруппы/канала Telegram (убирает префиксы `-100` и `-` для надёжного сравнения)
     public static func normalizeTelegramChatId(_ rawChatId: String?) -> String {

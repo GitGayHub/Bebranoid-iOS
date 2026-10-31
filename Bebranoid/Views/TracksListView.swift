@@ -38,6 +38,11 @@ public struct TracksListView: View {
                             .padding(.horizontal, 16)
                     }
 
+                    if appState.isSyncingTelegramLibrary {
+                        telegramLiveSyncBanner
+                            .padding(.horizontal, 16)
+                    }
+
                     if !appState.telegramClient.isAuthorized {
                         telegramSignInPromptCard
                             .padding(.horizontal, 16)
@@ -200,6 +205,25 @@ public struct TracksListView: View {
                     .padding(.vertical, 9)
                     .background(Color.white.opacity(0.10), in: Capsule())
                 }
+
+                // Быстрое обновление облачного чата AndroSend прямо со вкладки Треки
+                if appState.telegramClient.isAuthorized {
+                    Button {
+                        appState.haptics.lightTap()
+                        Task { await appState.syncTelegramLibrary() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                            Text(appState.isSyncingTelegramLibrary ? "Синхр..." : "Обновить TG")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(.white.opacity(0.88))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Color.white.opacity(0.10), in: Capsule())
+                    }
+                    .disabled(appState.isSyncingTelegramLibrary)
+                }
             }
         }
     }
@@ -324,22 +348,82 @@ public struct TracksListView: View {
         .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
+    private var telegramLiveSyncBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .tint(appState.accentSwiftUIColor)
+                .scaleEffect(0.85)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Синхронизация \(appState.libraryState.selectedTelegramChatTitle)")
+                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(appState.telegramScanProgressText.isEmpty
+                     ? "Загрузка аудиосообщений и документов из Telegram..."
+                     : appState.telegramScanProgressText)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
     private var emptyTracksState: some View {
         VStack(spacing: 14) {
             Spacer()
-            Image(systemName: "music.note.list")
-                .font(.system(size: 46))
-                .foregroundStyle(.white.opacity(0.35))
-            Text(appState.showOnlyCachedTracks ? "Нет треков в локальном кеше" : "Нет доступных офлайн-треков")
-                .font(.system(size: 18, weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.85))
-            Text(!appState.telegramClient.isAuthorized
-                 ? "Войдите в Telegram по кнопке выше, чтобы отобразить и слушать вашу облачную медиатеку, или импортируйте плейлист YouTube."
-                 : "Синхронизируйте чат Telegram, импортируйте плейлист YouTube или добавьте локальные файлы во вкладке «Настройки».")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.58))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 36)
+            if appState.isSyncingTelegramLibrary {
+                ProgressView()
+                    .tint(appState.accentSwiftUIColor)
+                    .scaleEffect(1.3)
+                Text("Загрузка медиатеки из \(appState.libraryState.selectedTelegramChatTitle)...")
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.90))
+                    .multilineTextAlignment(.center)
+                Text(appState.telegramScanProgressText.isEmpty
+                     ? "Подключение к чату AndroSend Облако и сканирование треков..."
+                     : appState.telegramScanProgressText)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.65))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 36)
+            } else {
+                Image(systemName: "music.note.list")
+                    .font(.system(size: 46))
+                    .foregroundStyle(.white.opacity(0.35))
+                Text(appState.showOnlyCachedTracks ? "Нет треков в локальном кеше" : "Медиатека готова к загрузке")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.85))
+                Text(!appState.telegramClient.isAuthorized
+                     ? "Войдите в Telegram по кнопке выше, чтобы отобразить и слушать вашу облачную медиатеку, или импортируйте плейлист YouTube."
+                     : "Выбран чат «\(appState.libraryState.selectedTelegramChatTitle)». Нажмите кнопку ниже, чтобы подтянуть все ваши треки.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 36)
+
+                if appState.telegramClient.isAuthorized && !appState.showOnlyCachedTracks {
+                    Button {
+                        appState.haptics.mediumImpact()
+                        Task { await appState.syncTelegramLibrary() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "icloud.and.arrow.down.fill")
+                            Text("Загрузить треки из \(appState.libraryState.selectedTelegramChatTitle)")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                        }
+                        .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 11)
+                        .background(appState.accentSwiftUIColor, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                }
+            }
             Spacer()
         }
     }

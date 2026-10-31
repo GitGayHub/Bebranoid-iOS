@@ -213,6 +213,10 @@ public struct SettingsView: View {
                     .listRowBackground(Color.white.opacity(0.06))
 
                     Section("Визуализация и хранилище кеша") {
+                        Toggle("3D-вращение обложки гироскопом", isOn: $appState.isGyroscope3DCoverEnabled)
+                            .foregroundStyle(.white)
+                            .tint(appState.accentSwiftUIColor)
+
                         Toggle("Энергосберегающий режим Mesh-фона", isOn: $appState.isReducedMotionEnabled)
                             .foregroundStyle(.white)
                             .tint(appState.accentSwiftUIColor)

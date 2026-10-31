@@ -71,6 +71,7 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         NSLocalNetworkUsageDescription: "Bebranoid использует локальную сеть для мгновенной загрузки вашей медиатеки с ПК."
+        NSMotionUsageDescription: "Bebranoid использует гироскоп для плавного 3D-наклона обложки трека в полноэкранном плеере."
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIDesignRequiresCompatibility: false

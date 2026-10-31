@@ -18,6 +18,7 @@ public struct FullScreenPlayerView: View {
     @State private var dragDismissOffset: CGFloat = 0.0
     @State private var coverHorizontalOffset: CGFloat = 0.0
     @State private var lockedGestureAxis: Axis? = nil
+    @StateObject private var gyro = GyroscopeMotionManager()
 
     public init(appState: BebranoidAppState) {
         self.appState = appState
@@ -60,9 +61,34 @@ public struct FullScreenPlayerView: View {
 
                     Spacer(minLength: 12)
 
-                    // Большая квадратная обложка альбома (ТОЛЬКО по обложке: свайп влево/вправо переключает треки, свайп вниз закрывает плеер)
+                    // Большая квадратная 3D-обложка альбома (свайп влево/вправо переключает треки, свайп вниз закрывает плеер, гироскоп вращает в 3D)
                     let coverSide = min(geo.size.width - 48, geo.size.height * 0.43)
+                    let tiltX = appState.isGyroscope3DCoverEnabled ? gyro.tiltXDegrees : 0.0
+                    let tiltY = appState.isGyroscope3DCoverEnabled ? gyro.tiltYDegrees : 0.0
+                    let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 20.0)
+
                     ZStack(alignment: .bottom) {
+                        // Физическая 3D-грань (толщина пластинки при повороте телефона)
+                        if appState.isGyroscope3DCoverEnabled && tiltMagnitude > 0.02 {
+                            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(0.22),
+                                            appState.accentSwiftUIColor.opacity(0.32),
+                                            Color.black.opacity(0.65)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: coverSide, height: coverSide)
+                                .offset(
+                                    x: CGFloat(-tiltY * 0.36),
+                                    y: CGFloat(tiltX * 0.36)
+                                )
+                        }
+
                         ArtworkThumbnailView(
                             track: track,
                             localPath: track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath },
@@ -72,6 +98,44 @@ public struct FullScreenPlayerView: View {
                             sizeTier: .fullPlayer
                         )
                         .frame(width: coverSide, height: coverSide)
+                        .overlay {
+                            if appState.isGyroscope3DCoverEnabled {
+                                // Подвижный блик света и стеклянная 3D-фаска при вращении телефона
+                                let lightCenter = UnitPoint(
+                                    x: max(0.05, min(0.95, 0.5 - gyro.specularUnitOffset.width * 0.42)),
+                                    y: max(0.05, min(0.95, 0.38 - gyro.specularUnitOffset.height * 0.42))
+                                )
+                                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                    .fill(
+                                        RadialGradient(
+                                            colors: [
+                                                Color.white.opacity(0.18 * tiltMagnitude),
+                                                Color.white.opacity(0.04 * tiltMagnitude),
+                                                Color.clear
+                                            ],
+                                            center: lightCenter,
+                                            startRadius: 8,
+                                            endRadius: coverSide * 0.78
+                                        )
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                            .strokeBorder(
+                                                LinearGradient(
+                                                    colors: [
+                                                        Color.white.opacity(0.34 * max(0.25, tiltMagnitude)),
+                                                        Color.white.opacity(0.06),
+                                                        Color.black.opacity(0.28)
+                                                    ],
+                                                    startPoint: lightCenter,
+                                                    endPoint: .bottomTrailing
+                                                ),
+                                                lineWidth: 1.3
+                                            )
+                                    )
+                                    .allowsHitTesting(false)
+                            }
+                        }
 
                         if let pct = activeDownloadPercent {
                             VStack(spacing: 6) {
@@ -95,10 +159,25 @@ public struct FullScreenPlayerView: View {
                     }
                     .frame(width: coverSide, height: coverSide)
                     .contentShape(Rectangle())
+                    .rotation3DEffect(
+                        .degrees(tiltX),
+                        axis: (x: 1, y: 0, z: 0),
+                        perspective: 0.52
+                    )
+                    .rotation3DEffect(
+                        .degrees(tiltY),
+                        axis: (x: 0, y: 1, z: 0),
+                        perspective: 0.52
+                    )
                     .offset(x: coverHorizontalOffset)
                     .rotationEffect(.degrees(Double(coverHorizontalOffset) * 0.035))
                     .scaleEffect(appState.isPlaying ? 1.0 : 0.93)
-                    .shadow(color: Color.black.opacity(0.48), radius: 28, x: 0, y: 16)
+                    .shadow(
+                        color: Color.black.opacity(0.50),
+                        radius: 28,
+                        x: CGFloat(-tiltY * 0.85),
+                        y: 16 + CGFloat(tiltX * 0.75)
+                    )
                     .animation(.spring(response: 0.36, dampingFraction: 0.80), value: appState.isPlaying)
                     .highPriorityGesture(coverOnlyInteractiveGesture(coverWidth: coverSide))
 
@@ -148,6 +227,18 @@ public struct FullScreenPlayerView: View {
         }
         .fullScreenCover(isPresented: $appState.isLyricsScreenPresented) {
             LyricsScreenView(appState: appState)
+        }
+        .onAppear {
+            gyro.setActive(appState.isGyroscope3DCoverEnabled && !appState.isLyricsScreenPresented)
+        }
+        .onDisappear {
+            gyro.stop()
+        }
+        .onChange(of: appState.isGyroscope3DCoverEnabled) { _, enabled in
+            gyro.setActive(enabled && !appState.isLyricsScreenPresented)
+        }
+        .onChange(of: appState.isLyricsScreenPresented) { _, lyricsOpen in
+            gyro.setActive(appState.isGyroscope3DCoverEnabled && !lyricsOpen)
         }
     }
 
@@ -312,6 +403,18 @@ public struct FullScreenPlayerView: View {
                         Label(
                             appState.isLyricsDisabled(for: current) ? "Включить текст для трека" : "Отключить текст для трека",
                             systemImage: appState.isLyricsDisabled(for: current) ? "text.quote" : "eye.slash"
+                        )
+                    }
+
+                    Divider()
+
+                    Button {
+                        appState.haptics.softSelection()
+                        appState.isGyroscope3DCoverEnabled.toggle()
+                    } label: {
+                        Label(
+                            appState.isGyroscope3DCoverEnabled ? "Выключить 3D-гироскоп обложки" : "Включить 3D-гироскоп обложки",
+                            systemImage: appState.isGyroscope3DCoverEnabled ? "gyroscope" : "cube.transparent"
                         )
                     }
                 }
