@@ -39,32 +39,34 @@ public struct ClassicKaraokeLyricsView: View {
         self.onSeekToTime = onSeekToTime
     }
 
+    private static func nodeId(for line: LyricLineItem) -> String {
+        "classic_line_\(line.id)"
+    }
+
     private var documentSignature: String {
         "\(document.lines.count)|\(document.lines.first?.text ?? "")|\(fontSizePreset.rawValue)|\(showTranslation)"
     }
 
-    private var activeLineId: String? {
-        guard document.kind != .plain, activeLineIndex >= 0, activeLineIndex < document.lines.count else {
-            return document.lines.first?.id
+    private var activeLineNodeId: String? {
+        guard document.kind != .plain else { return nil }
+        if activeLineIndex >= 0 && activeLineIndex < document.lines.count {
+            return Self.nodeId(for: document.lines[activeLineIndex])
         }
-        return document.lines[activeLineIndex].id
+        if let first = document.lines.first {
+            return Self.nodeId(for: first)
+        }
+        return nil
     }
 
     public var body: some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottomTrailing) {
-                TimelineView(.animation(minimumInterval: 1.0 / 90.0, paused: !isPlaying)) { context in
-                    let _ = context.date
-                    let computed = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
-                    Color.clear
-                        .onChange(of: computed) { _, nextIdx in
-                            if activeLineIndex != nextIdx {
-                                withAnimation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54)) {
-                                    activeLineIndex = nextIdx
-                                }
-                            }
-                        }
-                }
+                ClassicActiveLineDriver(
+                    lines: document.lines,
+                    isPlaying: isPlaying,
+                    liveTimeProvider: liveTimeProvider,
+                    activeLineIndex: $activeLineIndex
+                )
                 .frame(width: 0, height: 0)
                 .allowsHitTesting(false)
 
@@ -72,7 +74,7 @@ public struct ClassicKaraokeLyricsView: View {
                     ZStack(alignment: .topLeading) {
                         #if canImport(UIKit)
                         LyricsSmoothScrollBridge(
-                            targetNodeId: activeLineId,
+                            targetNodeId: activeLineNodeId,
                             nodeFrames: nodeFrames,
                             documentSignature: documentSignature,
                             syncTriggerToken: syncTriggerToken,
@@ -86,88 +88,38 @@ public struct ClassicKaraokeLyricsView: View {
                             Spacer().frame(height: 32)
 
                             ForEach(Array(document.lines.enumerated()), id: \.element.id) { index, line in
-                                let isActive = document.kind == .plain
-                                    ? (selectedPlainLineIndex == index)
-                                    : (index == activeLineIndex)
-                                let isPast = document.kind != .plain && activeLineIndex >= 0 && index < activeLineIndex
-                                let inactiveAlpha: Double = document.kind == .plain
-                                    ? 0.46
-                                    : (isPast ? 0.36 : 0.28)
-
-                                Button {
-                                    if document.kind == .plain {
-                                        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.38)) {
-                                            selectedPlainLineIndex = (selectedPlainLineIndex == index) ? nil : index
-                                        }
-                                    } else {
-                                        activeLineIndex = index
-                                        isUserBrowsing = false
-                                        syncTriggerToken &+= 1
-                                        onSeekToTime(line.time)
-                                        #if !canImport(UIKit)
-                                        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.56)) {
-                                            proxy.scrollTo(line.id, anchor: UnitPoint(x: 0.5, y: 0.34))
-                                        }
-                                        #endif
-                                    }
-                                } label: {
-                                    HStack(alignment: .center, spacing: 10) {
-                                        if document.kind == .plain && isActive {
-                                            Capsule()
-                                                .fill(accentColor)
-                                                .frame(width: 3.5)
-                                                .padding(.vertical, 3)
-                                        }
-
-                                        VStack(alignment: .leading, spacing: 5) {
-                                            Text(line.text)
-                                                .font(.system(size: 24 * fontSizePreset.scaleFactor, weight: .bold, design: .rounded))
-                                                .foregroundStyle(
-                                                    isActive
-                                                        ? Color.white
-                                                        : Color.white.opacity(inactiveAlpha)
-                                                )
-                                                .lineLimit(1)
-                                                .minimumScaleFactor(0.30)
-                                                .allowsTightening(true)
-                                                .overlay(alignment: .leading) {
-                                                    if isActive && document.kind != .plain {
-                                                        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !isPlaying)) { context in
-                                                            let _ = context.date
-                                                            let lineDuration = max(0.25, line.endTime - line.time)
-                                                            let lineProgress = HarmonoidMeshEngine.clamp(
-                                                                (liveTimeProvider() - line.time) / lineDuration,
-                                                                0.0,
-                                                                1.0
-                                                            )
-                                                            GeometryReader { geo in
-                                                                Capsule()
-                                                                    .fill(accentColor.opacity(0.45))
-                                                                    .frame(width: geo.size.width * lineProgress, height: 3)
-                                                                    .frame(maxHeight: .infinity, alignment: .bottomLeading)
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                            if showTranslation, let tr = line.translation, !tr.isEmpty {
-                                                Text(tr)
-                                                    .font(.system(size: 15 * fontSizePreset.scaleFactor, weight: .medium, design: .rounded))
-                                                    .foregroundStyle(isActive ? accentColor : Color.white.opacity(0.32))
-                                                    .lineLimit(1)
-                                                    .minimumScaleFactor(0.35)
-                                                    .allowsTightening(true)
+                                let rowNodeId = Self.nodeId(for: line)
+                                ClassicKaraokeLineRow(
+                                    line: line,
+                                    index: index,
+                                    activeLineIndex: activeLineIndex,
+                                    selectedPlainLineIndex: selectedPlainLineIndex,
+                                    syncKind: document.kind,
+                                    isPlaying: isPlaying,
+                                    liveTimeProvider: liveTimeProvider,
+                                    accentColor: accentColor,
+                                    scaleFactor: fontSizePreset.scaleFactor,
+                                    showTranslation: showTranslation,
+                                    onTap: {
+                                        if document.kind == .plain {
+                                            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.38)) {
+                                                selectedPlainLineIndex = (selectedPlainLineIndex == index) ? nil : index
                                             }
+                                        } else {
+                                            activeLineIndex = index
+                                            isUserBrowsing = false
+                                            syncTriggerToken &+= 1
+                                            onSeekToTime(line.time)
+                                            #if !canImport(UIKit)
+                                            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.56)) {
+                                                proxy.scrollTo(rowNodeId, anchor: UnitPoint(x: 0.5, y: 0.34))
+                                            }
+                                            #endif
                                         }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     }
-                                    .padding(.vertical, 4)
-                                    .scaleEffect(isActive ? 1.0 : 0.962, anchor: .leading)
-                                    .animation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54), value: isActive)
-                                }
-                                .buttonStyle(.plain)
-                                .reportLyricNodeFrame(id: line.id)
-                                .id(line.id)
+                                )
+                                .reportLyricNodeFrame(id: rowNodeId)
+                                .id(rowNodeId)
                             }
 
                             Spacer().frame(height: 200)
@@ -184,7 +136,7 @@ public struct ClassicKaraokeLyricsView: View {
                     activeLineIndex = idx
                     #if !canImport(UIKit)
                     if idx >= 0 && idx < document.lines.count {
-                        proxy.scrollTo(document.lines[idx].id, anchor: UnitPoint(x: 0.5, y: 0.34))
+                        proxy.scrollTo(Self.nodeId(for: document.lines[idx]), anchor: UnitPoint(x: 0.5, y: 0.34))
                     }
                     #endif
                 }
@@ -195,7 +147,7 @@ public struct ClassicKaraokeLyricsView: View {
                     activeLineIndex = idx
                     #if !canImport(UIKit)
                     if idx >= 0 && idx < document.lines.count {
-                        proxy.scrollTo(document.lines[idx].id, anchor: UnitPoint(x: 0.5, y: 0.34))
+                        proxy.scrollTo(Self.nodeId(for: document.lines[idx]), anchor: UnitPoint(x: 0.5, y: 0.34))
                     }
                     #endif
                 }
@@ -211,7 +163,7 @@ public struct ClassicKaraokeLyricsView: View {
                         #if !canImport(UIKit)
                         if idx >= 0 && idx < document.lines.count {
                             withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.62)) {
-                                proxy.scrollTo(document.lines[idx].id, anchor: UnitPoint(x: 0.5, y: 0.34))
+                                proxy.scrollTo(Self.nodeId(for: document.lines[idx]), anchor: UnitPoint(x: 0.5, y: 0.34))
                             }
                         }
                         #endif
@@ -231,6 +183,130 @@ public struct ClassicKaraokeLyricsView: View {
                     .padding(.bottom, 16)
                     .transition(.scale.combined(with: .opacity))
                 }
+            }
+        }
+    }
+}
+
+private struct ClassicActiveLineDriver: View {
+    let lines: [LyricLineItem]
+    let isPlaying: Bool
+    let liveTimeProvider: () -> Double
+    @Binding var activeLineIndex: Int
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 90.0, paused: !isPlaying)) { context in
+            let _ = context.date
+            let computed = LRCParser.findActiveLineIndex(lines: lines, currentTime: liveTimeProvider())
+            Color.clear
+                .onChange(of: computed) { _, nextIdx in
+                    if activeLineIndex != nextIdx {
+                        withAnimation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54)) {
+                            activeLineIndex = nextIdx
+                        }
+                    }
+                }
+        }
+    }
+}
+
+private struct ClassicKaraokeLineRow: View {
+    let line: LyricLineItem
+    let index: Int
+    let activeLineIndex: Int
+    let selectedPlainLineIndex: Int?
+    let syncKind: ParsedLyricsSyncKind
+    let isPlaying: Bool
+    let liveTimeProvider: () -> Double
+    let accentColor: Color
+    let scaleFactor: CGFloat
+    let showTranslation: Bool
+    let onTap: () -> Void
+
+    private var isActive: Bool {
+        if syncKind == .plain {
+            return selectedPlainLineIndex == index
+        }
+        return index == activeLineIndex
+    }
+
+    private var inactiveAlpha: Double {
+        if syncKind == .plain {
+            return 0.46
+        }
+        let isPast = activeLineIndex >= 0 && index < activeLineIndex
+        return isPast ? 0.36 : 0.28
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(alignment: .center, spacing: 10) {
+                if syncKind == .plain && isActive {
+                    Capsule()
+                        .fill(accentColor)
+                        .frame(width: 3.5)
+                        .padding(.vertical, 3)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(line.text)
+                        .font(.system(size: 24 * scaleFactor, weight: .bold, design: .rounded))
+                        .foregroundStyle(isActive ? Color.white : Color.white.opacity(inactiveAlpha))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.30)
+                        .allowsTightening(true)
+                        .overlay(alignment: .leading) {
+                            if isActive && syncKind != .plain {
+                                ClassicActiveLineUnderline(
+                                    startTime: line.time,
+                                    endTime: line.endTime,
+                                    isPlaying: isPlaying,
+                                    liveTimeProvider: liveTimeProvider,
+                                    accentColor: accentColor
+                                )
+                            }
+                        }
+
+                    if showTranslation, let tr = line.translation, !tr.isEmpty {
+                        Text(tr)
+                            .font(.system(size: 15 * scaleFactor, weight: .medium, design: .rounded))
+                            .foregroundStyle(isActive ? accentColor : Color.white.opacity(0.32))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.35)
+                            .allowsTightening(true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 4)
+            .scaleEffect(isActive ? 1.0 : 0.962, anchor: .leading)
+            .animation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54), value: isActive)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ClassicActiveLineUnderline: View {
+    let startTime: Double
+    let endTime: Double
+    let isPlaying: Bool
+    let liveTimeProvider: () -> Double
+    let accentColor: Color
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !isPlaying)) { context in
+            let _ = context.date
+            let lineDuration = max(0.25, endTime - startTime)
+            let lineProgress = HarmonoidMeshEngine.clamp(
+                (liveTimeProvider() - startTime) / lineDuration,
+                0.0,
+                1.0
+            )
+            GeometryReader { geo in
+                Capsule()
+                    .fill(accentColor.opacity(0.45))
+                    .frame(width: geo.size.width * lineProgress, height: 3)
+                    .frame(maxHeight: .infinity, alignment: .bottomLeading)
             }
         }
     }
