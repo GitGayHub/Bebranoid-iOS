@@ -637,7 +637,7 @@ public final class ArtworkService: @unchecked Sendable {
     }
 
     public func invalidateCachedSyncPath(forTrackId trackId: String, cacheKey: String? = nil) {
-        _ = withLock {
+        withLock {
             syncCoverPathCache.removeValue(forKey: trackId)
             if let cacheKey {
                 checkedTracksWithoutEmbeddedArt.remove(cacheKey)

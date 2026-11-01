@@ -78,8 +78,8 @@ private struct AlbumGridCard: View {
                     remoteURL: album.remoteArtworkURL,
                     fallbackSeed: "\(album.name)|\(album.artist)",
                     cornerRadius: 18,
-                    sizeTier: .albumGrid,
-                    showFavoriteOverlay: album.isFavoriteVirtualAlbum && album.coverPath == nil && repTrack == nil
+                    showFavoriteOverlay: album.isFavoriteVirtualAlbum && album.coverPath == nil && repTrack == nil,
+                    sizeTier: .albumGrid
                 )
                 .aspectRatio(1.0, contentMode: .fit)
                 .shadow(color: .black.opacity(0.32), radius: 10, x: 0, y: 5)

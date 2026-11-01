@@ -114,7 +114,8 @@ enum SingleLineLyricsFitHelper {
         availableWidth: CGFloat
     ) -> CGFloat {
         guard !syllables.isEmpty, availableWidth > 40 else { return 1.0 }
-        let cacheKey = "syl|\(syllables.first?.id ?? "")|\(syllables.count)|\(Int(baseFontSize * 10))|\(Int(availableWidth))"
+        let joinedText = syllables.map(\.text).joined(separator: "\u{1F}")
+        let cacheKey = "syl|\(joinedText)|\(Int(baseFontSize * 10))|\(Int(baseSpacing * 10))|\(Int(availableWidth))"
         cacheLock.lock()
         if let hit = scaleCache[cacheKey] {
             cacheLock.unlock()

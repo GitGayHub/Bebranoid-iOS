@@ -93,8 +93,8 @@ public struct AlbumDetailView: View {
                 remoteURL: liveAlbum.remoteArtworkURL,
                 fallbackSeed: "\(liveAlbum.name)|\(liveAlbum.artist)",
                 cornerRadius: 22,
-                sizeTier: .fullPlayer,
-                showFavoriteOverlay: liveAlbum.isFavoriteVirtualAlbum && liveAlbum.coverPath == nil && repTrack == nil
+                showFavoriteOverlay: liveAlbum.isFavoriteVirtualAlbum && liveAlbum.coverPath == nil && repTrack == nil,
+                sizeTier: .fullPlayer
             )
             .frame(width: 190, height: 190)
             .shadow(color: .black.opacity(0.42), radius: 18, x: 0, y: 10)
