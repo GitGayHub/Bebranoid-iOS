@@ -70,6 +70,10 @@ public struct PlaylistsGridView: View {
                     }
                     Spacer().frame(height: 110)
                 }
+                .refreshable {
+                    appState.haptics.softSelection()
+                    await appState.refreshFullLibraryAndYouTubePlaylists()
+                }
             }
             .navigationTitle("Плейлисты")
             .navigationDestination(for: Playlist.self) { playlist in
@@ -98,35 +102,52 @@ private struct PlaylistGridCard: View {
     let appState: BebranoidAppState
 
     var body: some View {
+        let isFav = !playlist.isRecentAutoPlaylist && appState.isFavoritePlaylist(playlist.id)
+        let repTrack = playlist.tracksSnapshot.first(where: { $0.coverPath != nil || $0.remoteArtworkURL != nil }) ?? playlist.tracksSnapshot.first
+
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
                 ArtworkThumbnailView(
-                    track: playlist.tracksSnapshot.first,
-                    localPath: playlist.customCoverPath ?? playlist.tracksSnapshot.first?.coverPath,
-                    remoteURL: playlist.remoteArtworkURL ?? playlist.tracksSnapshot.first?.remoteArtworkURL,
+                    track: repTrack,
+                    localPath: playlist.customCoverPath ?? repTrack?.coverPath,
+                    remoteURL: playlist.remoteArtworkURL ?? repTrack?.remoteArtworkURL,
                     fallbackSeed: playlist.name,
                     cornerRadius: 18,
                     sizeTier: .albumGrid
                 )
                 .aspectRatio(1.0, contentMode: .fit)
 
-                if playlist.isYouTubePlaylist {
-                    Text("YouTube")
-                        .font(.system(size: 10, weight: .heavy))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.red.opacity(0.88), in: Capsule())
-                        .foregroundStyle(.white)
-                        .padding(8)
-                } else if playlist.isRecentAutoPlaylist {
-                    Text("Авто")
-                        .font(.system(size: 10, weight: .heavy))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(appState.accentSwiftUIColor, in: Capsule())
-                        .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                        .padding(8)
+                HStack(spacing: 5) {
+                    if !playlist.isRecentAutoPlaylist {
+                        Button {
+                            appState.toggleFavoritePlaylist(playlist.id)
+                        } label: {
+                            Image(systemName: isFav ? "heart.fill" : "heart")
+                                .font(.system(size: 11, weight: .bold))
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .foregroundStyle(isFav ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.88))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if playlist.isYouTubePlaylist {
+                        Text("YouTube")
+                            .font(.system(size: 10, weight: .heavy))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.red.opacity(0.88), in: Capsule())
+                            .foregroundStyle(.white)
+                    } else if playlist.isRecentAutoPlaylist {
+                        Text("Авто")
+                            .font(.system(size: 10, weight: .heavy))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(appState.accentSwiftUIColor, in: Capsule())
+                            .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                    }
                 }
+                .padding(8)
             }
 
             Text(playlist.name)
@@ -139,13 +160,50 @@ private struct PlaylistGridCard: View {
                 .foregroundStyle(.white.opacity(0.62))
         }
         .contextMenu {
+            if let first = playlist.tracksSnapshot.first {
+                Button {
+                    appState.isShuffleEnabled = false
+                    appState.playTrack(first, in: playlist.tracksSnapshot)
+                } label: {
+                    Label("Слушать", systemImage: "play.fill")
+                }
+            }
+
             if !playlist.isRecentAutoPlaylist {
+                Button {
+                    appState.toggleFavoritePlaylist(playlist.id)
+                } label: {
+                    Label(
+                        isFav ? "Убрать из избранных" : "Лайкнуть (на 1-е место в Альбомах)",
+                        systemImage: isFav ? "heart.slash" : "heart.fill"
+                    )
+                }
+
+                if playlist.isYouTubePlaylist {
+                    Button {
+                        Task { await appState.refreshPlaylist(playlist) }
+                    } label: {
+                        Label("Обновить плейлист YouTube", systemImage: "arrow.clockwise")
+                    }
+                }
+
                 Button(role: .destructive) {
                     appState.deletePlaylist(id: playlist.id)
                 } label: {
                     Label("Удалить плейлист", systemImage: "trash")
                 }
             }
+        } preview: {
+            LiquidGlassContextPreviewCard(
+                track: repTrack,
+                localPath: playlist.customCoverPath ?? repTrack?.coverPath,
+                remoteURL: playlist.remoteArtworkURL ?? repTrack?.remoteArtworkURL,
+                fallbackSeed: playlist.name,
+                title: playlist.name,
+                subtitle: "\(playlist.tracksSnapshot.count) треков",
+                badgeText: isFav ? "ЛЮБИМЫЙ ПЛЕЙЛИСТ" : (playlist.isYouTubePlaylist ? "YOUTUBE" : nil),
+                accentColor: appState.accentSwiftUIColor
+            )
         }
     }
 }
@@ -214,6 +272,20 @@ public struct PlaylistDetailView: View {
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 11)
                                     .background(Color.white.opacity(0.14), in: Capsule())
+                            }
+
+                            if !livePlaylist.isRecentAutoPlaylist {
+                                let isFav = appState.isFavoritePlaylist(livePlaylist.id)
+                                Button {
+                                    appState.toggleFavoritePlaylist(livePlaylist.id)
+                                } label: {
+                                    Label(isFav ? "В избранном" : "Лайк", systemImage: isFav ? "heart.fill" : "heart")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(isFav ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 11)
+                                        .background(Color.white.opacity(0.14), in: Capsule())
+                                }
                             }
 
                             if !playlistTracks.isEmpty {
@@ -329,6 +401,10 @@ public struct PlaylistDetailView: View {
 
                     Spacer().frame(height: 110)
                 }
+            }
+            .refreshable {
+                appState.haptics.softSelection()
+                await appState.refreshPlaylist(livePlaylist)
             }
         }
         .navigationTitle(livePlaylist.name)

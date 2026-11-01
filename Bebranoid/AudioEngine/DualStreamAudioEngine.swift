@@ -4,7 +4,7 @@ import Combine
 
 /// Двухпоточный аудио-движок Bebranoid (`src/App.jsx` 1:1).
 /// Реализует:
-/// - Два независимых дека (`Deck A` и `Deck B`) на базе `AVAudioEngine`
+/// - Два независимых дека (`Deck A` и `Deck B`) на базе `AVAudioEngine` с защитой от несовпадения форматов моно/стерео и смены маршрутов (AirPods / Bluetooth / LiveContainer)
 /// - Настоящий перекрывающийся кроссфейд (0.5–30 с, по умолчанию 6 с) с синхронным `crossfadeProgress` для `HarmonoidMeshView`
 /// - Мгновенный hard-cut при ручном выборе трека или нажатии Next / Prev
 /// - Корректную отмену кроссфейда при постановке на паузу
@@ -45,6 +45,8 @@ public final class DualStreamAudioEngine: ObservableObject {
     private let deckA = DeckAudioFXChain()
     private let deckB = DeckAudioFXChain()
     private var activeDeckIsA: Bool = true
+    private var needsGraphReconnect: Bool = false
+    private var didFireNaturalEndForCurrentGen: Bool = false
 
     private var primaryAudioFile: AVAudioFile?
     private var secondaryAudioFile: AVAudioFile?
@@ -99,16 +101,40 @@ public final class DualStreamAudioEngine: ObservableObject {
         activeDeckIsA ? deckB : deckA
     }
 
-    private func setupEngineGraph() {
+    private func currentValidBusFormat() -> AVAudioFormat? {
         let format = engine.outputNode.outputFormat(forBus: 0)
-        let validFormat = (format.sampleRate > 0 && format.channelCount > 0)
-            ? format
-            : AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)
+        if format.sampleRate > 0 && format.channelCount > 0 {
+            return format
+        }
+        return AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)
+    }
 
+    private func setupEngineGraph() {
+        let validFormat = currentValidBusFormat()
         deckA.attachAndConnect(to: engine, format: validFormat)
         deckB.attachAndConnect(to: engine, format: validFormat)
         applyFXToBothDecks()
         updateDeckVolumes()
+        needsGraphReconnect = false
+    }
+
+    private func rebuildEngineConnectionsIfNeeded() {
+        guard needsGraphReconnect else { return }
+        if engine.isRunning {
+            engine.stop()
+        }
+        let validFormat = currentValidBusFormat()
+        deckA.connectGraph(in: engine, busFormat: validFormat)
+        deckB.connectGraph(in: engine, busFormat: validFormat)
+        if let pf = primaryAudioFile {
+            primaryDeck.preparePlayerConnection(for: pf, in: engine)
+        }
+        if let sf = secondaryAudioFile {
+            secondaryDeck.preparePlayerConnection(for: sf, in: engine)
+        }
+        applyFXToBothDecks()
+        updateDeckVolumes()
+        needsGraphReconnect = false
     }
 
     public func configureAudioSession() {
@@ -118,16 +144,28 @@ public final class DualStreamAudioEngine: ObservableObject {
             try session.setCategory(.playback, mode: .default, policy: .longFormAudio, options: [])
             try session.setActive(true)
         } catch {
-            // AudioSession может быть недоступна в headless CI окружении
+            // AudioSession может быть недоступна в headless CI окружении или временно удерживаться контейнером
         }
         #endif
     }
 
-    private func ensureEngineRunning() {
+    @discardableResult
+    private func ensureEngineRunning() -> Bool {
         configureAudioSession()
+        rebuildEngineConnectionsIfNeeded()
         if !engine.isRunning {
-            try? engine.start()
+            engine.prepare()
+            do {
+                try engine.start()
+            } catch {
+                // Повторная попытка с пересборкой соединений после смены аудио-маршрута / LiveContainer
+                needsGraphReconnect = true
+                rebuildEngineConnectionsIfNeeded()
+                engine.prepare()
+                try? engine.start()
+            }
         }
+        return engine.isRunning
     }
 
     // MARK: - Playback Controls
@@ -137,6 +175,7 @@ public final class DualStreamAudioEngine: ObservableObject {
         cancelActiveCrossfade()
         scheduleGeneration &+= 1
         let currentGen = scheduleGeneration
+        didFireNaturalEndForCurrentGen = false
 
         let initialPos = max(0.0, timeSec)
         primaryStartTimeOffset = initialPos
@@ -160,23 +199,30 @@ public final class DualStreamAudioEngine: ObservableObject {
 
         do {
             let audioFile = try AVAudioFile(forReading: fileURL)
-            primaryAudioFile = audioFile
             let sr = audioFile.processingFormat.sampleRate
             let totalFrames = audioFile.length
-            let computedDuration = sr > 0 ? Double(totalFrames) / sr : inspected.duration
+            guard sr > 0, totalFrames > 0 else {
+                isPlaying = false
+                return
+            }
+
+            primaryAudioFile = audioFile
+            let computedDuration = Double(totalFrames) / sr
             duration = computedDuration > 0.5 ? computedDuration : max(computedDuration, track.duration)
 
-            ensureEngineRunning()
             primaryDeck.deckMixerNode.outputVolume = 0.0
             primaryDeck.playerNode.stop()
             primaryDeck.resetDSPState()
+            primaryDeck.preparePlayerConnection(for: audioFile, in: engine)
+
+            let engineReady = ensureEngineRunning()
 
             let clampedStart = max(0.0, min(timeSec, max(0.0, duration - 0.05)))
             let startFrame = AVAudioFramePosition(clampedStart * sr)
             primaryStartTimeOffset = clampedStart
             let remainingFrames = AVAudioFrameCount(max(0, totalFrames - startFrame))
 
-            if remainingFrames > 0 {
+            if remainingFrames > 0 && engineReady {
                 primaryDeck.playerNode.scheduleSegment(
                     audioFile,
                     startingFrame: startFrame,
@@ -187,10 +233,14 @@ public final class DualStreamAudioEngine: ObservableObject {
                     Task { @MainActor [weak self] in
                         guard let self,
                               self.scheduleGeneration == currentGen,
+                              !self.didFireNaturalEndForCurrentGen,
                               self.isPlaying,
                               !self.isCrossfading else { return }
-                        if self.duration > 0 && (self.duration - self.currentTime) < max(4.0, self.duration * 0.08) {
+                        let liveNow = self.livePlaybackTime
+                        if self.duration > 0 && (self.duration - liveNow) < max(4.5, self.duration * 0.09) {
+                            self.didFireNaturalEndForCurrentGen = true
                             self.isPlaying = false
+                            self.smoothClock.stop()
                             self.onTrackNaturallyEnded?()
                         }
                     }
@@ -205,28 +255,39 @@ public final class DualStreamAudioEngine: ObservableObject {
             smoothClock.forceSetTime(clampedStart)
             currentTime = clampedStart
 
-            if autoPlay {
+            if autoPlay && engineReady && remainingFrames > 0 {
                 primaryDeck.playerNode.play()
                 isPlaying = true
-                smoothClock.start()
+                smoothClock.start(highFrequencyForCrossfade: false)
             } else {
                 isPlaying = false
+                smoothClock.stop()
             }
         } catch {
             isPlaying = false
+            smoothClock.stop()
         }
     }
 
     public func play() {
-        guard primaryAudioFile != nil else { return }
-        ensureEngineRunning()
+        guard let audioFile = primaryAudioFile else { return }
+        guard ensureEngineRunning() else {
+            isPlaying = false
+            return
+        }
         updateDeckVolumes()
         if !primaryDeck.playerNode.isPlaying {
+            // Если после смены маршрута буфер был сброшен — перепланируем с текущей позиции
+            let sr = audioFile.processingFormat.sampleRate
+            if sr > 0 && (primaryDeck.playerNode.lastRenderTime == nil || needsGraphReconnect) {
+                seek(to: currentTime, forcePlayAfterSeek: true)
+                return
+            }
             primaryDeck.playerNode.play()
         }
         lastTickWallTime = ProcessInfo.processInfo.systemUptime
         isPlaying = true
-        smoothClock.start()
+        smoothClock.start(highFrequencyForCrossfade: isCrossfading)
     }
 
     /// Пауза. Мгновенно глушит микшер и сбрасывает буферы реверберации (`resetDSPState`), чтобы в `Slowed + Reverb` не звучало эхо после паузы.
@@ -236,8 +297,10 @@ public final class DualStreamAudioEngine: ObservableObject {
         }
         primaryDeck.deckMixerNode.outputVolume = 0.0
         secondaryDeck.deckMixerNode.outputVolume = 0.0
-        primaryDeck.playerNode.pause()
-        secondaryDeck.playerNode.stop()
+        if engine.isRunning {
+            primaryDeck.playerNode.pause()
+            secondaryDeck.playerNode.stop()
+        }
         primaryDeck.resetDSPState()
         secondaryDeck.resetDSPState()
         isPlaying = false
@@ -252,7 +315,7 @@ public final class DualStreamAudioEngine: ObservableObject {
         }
     }
 
-    public func seek(to targetSeconds: Double) {
+    public func seek(to targetSeconds: Double, forcePlayAfterSeek: Bool = false) {
         guard let audioFile = primaryAudioFile else { return }
         if isCrossfading {
             cancelActiveCrossfade()
@@ -264,15 +327,20 @@ public final class DualStreamAudioEngine: ObservableObject {
         let startFrame = AVAudioFramePosition(clamped * sr)
         let remainingFrames = AVAudioFrameCount(max(0, audioFile.length - startFrame))
 
-        let wasPlaying = isPlaying
+        let shouldPlay = isPlaying || forcePlayAfterSeek
         scheduleGeneration &+= 1
         let currentGen = scheduleGeneration
+        didFireNaturalEndForCurrentGen = false
+
         primaryDeck.deckMixerNode.outputVolume = 0.0
         primaryDeck.playerNode.stop()
         primaryDeck.resetDSPState()
+        primaryDeck.preparePlayerConnection(for: audioFile, in: engine)
         primaryStartTimeOffset = clamped
 
-        if remainingFrames > 0 {
+        let engineReady = ensureEngineRunning()
+
+        if remainingFrames > 0 && engineReady {
             primaryDeck.playerNode.scheduleSegment(
                 audioFile,
                 startingFrame: startFrame,
@@ -283,10 +351,14 @@ public final class DualStreamAudioEngine: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self,
                           self.scheduleGeneration == currentGen,
+                          !self.didFireNaturalEndForCurrentGen,
                           self.isPlaying,
                           !self.isCrossfading else { return }
-                    if self.duration > 0 && (self.duration - self.currentTime) < max(4.0, self.duration * 0.08) {
+                    let liveNow = self.livePlaybackTime
+                    if self.duration > 0 && (self.duration - liveNow) < max(4.5, self.duration * 0.09) {
+                        self.didFireNaturalEndForCurrentGen = true
                         self.isPlaying = false
+                        self.smoothClock.stop()
                         self.onTrackNaturallyEnded?()
                     }
                 }
@@ -299,10 +371,11 @@ public final class DualStreamAudioEngine: ObservableObject {
         smoothClock.forceSetTime(clamped)
         currentTime = clamped
 
-        if wasPlaying {
-            ensureEngineRunning()
+        if shouldPlay && engineReady && remainingFrames > 0 {
             updateDeckVolumes()
             primaryDeck.playerNode.play()
+            isPlaying = true
+            smoothClock.start(highFrequencyForCrossfade: false)
         }
     }
 
@@ -320,9 +393,16 @@ public final class DualStreamAudioEngine: ObservableObject {
 
         guard let nextItem = onRequestNextTrackForCrossfade?(),
               let nextFile = try? AVAudioFile(forReading: nextItem.fileURL),
-              nextFile.length > 0 else {
+              nextFile.length > 0,
+              nextFile.processingFormat.sampleRate > 0 else {
             return
         }
+
+        secondaryDeck.playerNode.stop()
+        secondaryDeck.resetDSPState()
+        secondaryDeck.preparePlayerConnection(for: nextFile, in: engine)
+
+        guard ensureEngineRunning() else { return }
 
         secondaryAudioFile = nextFile
         secondaryStartTimeOffset = 0
@@ -331,11 +411,10 @@ public final class DualStreamAudioEngine: ObservableObject {
         isCrossfading = true
         crossfadeProgress = 0.0
 
-        ensureEngineRunning()
-        secondaryDeck.playerNode.stop()
         secondaryDeck.playerNode.scheduleFile(nextFile, at: nil, completionHandler: nil)
         secondaryDeck.deckMixerNode.outputVolume = 0.0
         secondaryDeck.playerNode.play()
+        smoothClock.setCrossfadeHighFrequency(true)
     }
 
     private func updateCrossfadeStep() {
@@ -361,7 +440,11 @@ public final class DualStreamAudioEngine: ObservableObject {
 
         // Останавливаем старый основной дек и меняем роли деков без остановки звука
         primaryDeck.playerNode.stop()
+        primaryDeck.resetDSPState()
         activeDeckIsA.toggle()
+
+        scheduleGeneration &+= 1
+        didFireNaturalEndForCurrentGen = false
 
         primaryAudioFile = promotedFile
         primaryStartTimeOffset = 0
@@ -369,6 +452,7 @@ public final class DualStreamAudioEngine: ObservableObject {
         crossfadingNextTrack = nil
         isCrossfading = false
         crossfadeProgress = 0.0
+        smoothClock.setCrossfadeHighFrequency(false)
 
         activeTrack = promotedTrack
         let sr = promotedFile.processingFormat.sampleRate
@@ -387,13 +471,16 @@ public final class DualStreamAudioEngine: ObservableObject {
     public func cancelActiveCrossfade() {
         guard isCrossfading else {
             crossfadeProgress = 0.0
+            smoothClock.setCrossfadeHighFrequency(false)
             return
         }
         secondaryDeck.playerNode.stop()
+        secondaryDeck.resetDSPState()
         secondaryAudioFile = nil
         crossfadingNextTrack = nil
         isCrossfading = false
         crossfadeProgress = 0.0
+        smoothClock.setCrossfadeHighFrequency(false)
         updateDeckVolumes()
     }
 
@@ -432,7 +519,8 @@ public final class DualStreamAudioEngine: ObservableObject {
             }
         }
 
-        guard let nodeTime = deck.playerNode.lastRenderTime,
+        guard engine.isRunning,
+              let nodeTime = deck.playerNode.lastRenderTime,
               let playerTime = deck.playerNode.playerTime(forNodeTime: nodeTime),
               playerTime.sampleRate > 0 else {
             return currentTime
@@ -447,7 +535,7 @@ public final class DualStreamAudioEngine: ObservableObject {
     private func handleClockTick(_ time: Double) {
         currentTime = time
         let now = ProcessInfo.processInfo.systemUptime
-        let dt = max(0.0, min(0.5, now - lastTickWallTime))
+        let dt = max(0.0, min(0.6, now - lastTickWallTime))
         lastTickWallTime = now
 
         if isPlaying {
@@ -467,16 +555,34 @@ public final class DualStreamAudioEngine: ObservableObject {
             if remaining <= crossfadeDuration && crossfadeEnabled {
                 startCrossfadeIfNeeded(remainingSeconds: remaining)
             }
-            if remaining <= 0.08 && isPlaying {
+            if remaining <= 0.12 && isPlaying && !didFireNaturalEndForCurrentGen {
+                didFireNaturalEndForCurrentGen = true
                 isPlaying = false
+                smoothClock.stop()
                 onTrackNaturallyEnded?()
             }
         }
     }
 
-    // MARK: - iOS Audio Session Interruptions & Route Changes
+    // MARK: - iOS Audio Session Interruptions, Route & Hardware Configuration Changes
 
     private func setupAudioSessionNotifications() {
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.needsGraphReconnect = true
+                if self.isPlaying {
+                    let resumePos = self.currentTime
+                    self.rebuildEngineConnectionsIfNeeded()
+                    self.seek(to: resumePos, forcePlayAfterSeek: true)
+                }
+            }
+        }
+
         #if os(iOS)
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
@@ -516,9 +622,37 @@ public final class DualStreamAudioEngine: ObservableObject {
                   let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
                 return
             }
-            if reason == .oldDeviceUnavailable {
-                Task { @MainActor [weak self] in
-                    self?.pause()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                switch reason {
+                case .oldDeviceUnavailable:
+                    self.pause()
+                case .newDeviceAvailable, .categoryChange:
+                    self.needsGraphReconnect = true
+                    if self.isPlaying {
+                        let resumePos = self.currentTime
+                        self.rebuildEngineConnectionsIfNeeded()
+                        self.seek(to: resumePos, forcePlayAfterSeek: true)
+                    }
+                default:
+                    break
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let wasPlaying = self.isPlaying
+                let resumePos = self.currentTime
+                self.needsGraphReconnect = true
+                self.setupEngineGraph()
+                if wasPlaying {
+                    self.seek(to: resumePos, forcePlayAfterSeek: true)
                 }
             }
         }

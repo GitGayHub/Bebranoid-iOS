@@ -81,7 +81,7 @@ public struct ArtworkThumbnailView: View {
             guard let tr = track else { return }
             let resolvedId = note.userInfo?["trackId"] as? String
             if resolvedId == tr.id {
-                ArtworkService.shared.invalidateCachedSyncPath(forTrackId: tr.id)
+                ArtworkService.shared.invalidateCachedSyncPath(forTrackId: tr.id, cacheKey: tr.cacheKey)
                 Task { await loadArtworkOffMainThreadIfNeeded(forceReload: true) }
             }
         }
@@ -92,7 +92,7 @@ public struct ArtworkThumbnailView: View {
                   note.userInfo?["percent"] == nil else {
                 return
             }
-            ArtworkService.shared.invalidateCachedSyncPath(forTrackId: tr.id)
+            ArtworkService.shared.invalidateCachedSyncPath(forTrackId: tr.id, cacheKey: tr.cacheKey)
             Task { await loadArtworkOffMainThreadIfNeeded(forceReload: true) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .telegramAuthStateDidChange)) { note in
@@ -109,6 +109,7 @@ public struct ArtworkThumbnailView: View {
 
     @ViewBuilder
     private var artworkImageLayer: some View {
+        let syncCached = ArtworkService.shared.memoryCachedImage(forKey: taskIdentifier, tier: sizeTier)
         if enableSmoothTransition {
             ZStack {
                 if let prev = outgoingCGImage {
@@ -117,7 +118,7 @@ public struct ArtworkThumbnailView: View {
                         .scaledToFill()
                 }
 
-                if let current = displayedCGImage {
+                if let current = displayedCGImage ?? (displayedKey == taskIdentifier ? nil : syncCached) {
                     Image(decorative: current, scale: 1.0, orientation: .up)
                         .resizable()
                         .scaledToFill()
@@ -130,7 +131,7 @@ public struct ArtworkThumbnailView: View {
                 }
             }
         } else {
-            if let cgImage = asyncLoadedCGImage ?? ArtworkService.shared.memoryCachedImage(forKey: taskIdentifier, tier: sizeTier) {
+            if let cgImage = asyncLoadedCGImage ?? syncCached {
                 Image(decorative: cgImage, scale: 1.0, orientation: .up)
                     .resizable()
                     .scaledToFill()
@@ -170,12 +171,12 @@ public struct ArtworkThumbnailView: View {
         displayedCGImage = newImage
         incomingAlpha = 0.0
 
-        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.72)) {
+        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.48)) {
             incomingAlpha = 1.0
         }
 
         cleanupOutgoingTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 760_000_000)
+            try? await Task.sleep(nanoseconds: 520_000_000)
             guard !Task.isCancelled else { return }
             outgoingCGImage = nil
         }
@@ -206,6 +207,7 @@ public struct ArtworkThumbnailView: View {
 
         let capturedTrack = track
         let capturedLocalPath = localPath
+        let capturedRemoteURL = remoteURL
         let cgResult: CGImage? = await Task.detached(priority: .utility) {
             if let lp = capturedLocalPath, !lp.isEmpty, ArtworkService.shared.isValidImageFile(atPath: lp) {
                 if let cg = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: lp), tier: tier) {
@@ -226,6 +228,13 @@ public struct ArtworkThumbnailView: View {
                     return cg
                 }
             }
+            if let rem = capturedRemoteURL, !rem.isEmpty {
+                if let savedURL = await ArtworkService.shared.downloadStandaloneRemoteCover(urlString: rem, cacheKey: key),
+                   let cg = ArtworkService.shared.loadCGImage(from: savedURL, tier: tier) {
+                    ArtworkService.shared.storeMemoryCachedImage(cg, forKey: key, tier: tier)
+                    return cg
+                }
+            }
             return nil
         }.value
 
@@ -234,30 +243,16 @@ public struct ArtworkThumbnailView: View {
         }
     }
 
+    /// Единая строгая чёрная заглушка без цветных градиентов 1:1 с десктопной версией (`Cover.jsx`: `rgba(5, 5, 5, 0.92)` + серебристая нота)
     private var fallbackCover: some View {
-        let pair = Self.gradientColors(for: fallbackSeed)
-        return ZStack {
-            LinearGradient(
-                colors: [pair.0, pair.1],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Image(systemName: "music.note")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.65))
+        GeometryReader { geo in
+            let iconSize = max(14.0, min(42.0, min(geo.size.width, geo.size.height) * 0.36))
+            ZStack {
+                Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0)
+                Image(systemName: "music.note")
+                    .font(.system(size: iconSize, weight: .regular))
+                    .foregroundStyle(Color(red: 218.0 / 255.0, green: 218.0 / 255.0, blue: 228.0 / 255.0).opacity(0.62))
+            }
         }
-    }
-
-    private static func gradientColors(for seed: String) -> (Color, Color) {
-        var hash: UInt64 = 5381
-        for byte in seed.utf8 {
-            hash = ((hash << 5) &+ hash) &+ UInt64(byte)
-        }
-        let hue1 = Double(hash % 360) / 360.0
-        let hue2 = Double((hash / 7 + 48) % 360) / 360.0
-        return (
-            Color(hue: hue1, saturation: 0.62, brightness: 0.42),
-            Color(hue: hue2, saturation: 0.72, brightness: 0.24)
-        )
     }
 }

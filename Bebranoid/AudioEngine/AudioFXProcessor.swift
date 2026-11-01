@@ -3,6 +3,7 @@ import AVFAudio
 
 /// Граф DSP-эффектов для одного дека (`src/App.jsx` `ensureFxGraph`, `applyAudioFxMode`, `createImpulseResponse`).
 /// Включает:
+/// - `inputConverterMixer`: согласующий микшер формата входа, исключающий краши `AVAudioEngine` при переключении между моно (1ch), стерео (2ch) и разными частотами дискретизации (`44.1 / 48 / 96 кГц`)
 /// - `AVAudioUnitVarispeed`: натуральный сдвиг высоты тона при изменении скорости (`slowed`, `speedup`, как `preservesPitch = false`)
 /// - `AVAudioUnitTimePitch`: независимое изменение скорости без изменения высоты тона в режиме `normal`
 /// - `AVAudioUnitEQ`:
@@ -11,11 +12,15 @@ import AVFAudio
 /// - `AVAudioUnitReverb`: пространственная реверберация (`largeHall2` / синтетический 2.8s эквивалент)
 public final class DeckAudioFXChain {
     public let playerNode = AVAudioPlayerNode()
+    public let inputConverterMixer = AVAudioMixerNode()
     public let varispeedUnit = AVAudioUnitVarispeed()
     public let timePitchUnit = AVAudioUnitTimePitch()
     public let eqUnit = AVAudioUnitEQ(numberOfBands: 2)
     public let reverbUnit = AVAudioUnitReverb()
     public let deckMixerNode = AVAudioMixerNode()
+
+    private var currentPlayerFormat: AVAudioFormat?
+    private var downstreamFormat: AVAudioFormat?
 
     public init() {
         configureInitialNodes()
@@ -45,19 +50,50 @@ public final class DeckAudioFXChain {
 
     /// Прикрепляет узлы дека к `AVAudioEngine` и соединяет их в единую цепочку
     public func attachAndConnect(to engine: AVAudioEngine, format: AVAudioFormat?) {
-        engine.attach(playerNode)
-        engine.attach(varispeedUnit)
-        engine.attach(timePitchUnit)
-        engine.attach(eqUnit)
-        engine.attach(reverbUnit)
-        engine.attach(deckMixerNode)
+        let nodes: [AVAudioNode] = [
+            playerNode,
+            inputConverterMixer,
+            varispeedUnit,
+            timePitchUnit,
+            eqUnit,
+            reverbUnit,
+            deckMixerNode
+        ]
+        for node in nodes where node.engine == nil {
+            engine.attach(node)
+        }
+        connectGraph(in: engine, busFormat: format)
+    }
 
-        engine.connect(playerNode, to: varispeedUnit, format: format)
-        engine.connect(varispeedUnit, to: timePitchUnit, format: format)
-        engine.connect(timePitchUnit, to: eqUnit, format: format)
-        engine.connect(eqUnit, to: reverbUnit, format: format)
-        engine.connect(reverbUnit, to: deckMixerNode, format: format)
-        engine.connect(deckMixerNode, to: engine.mainMixerNode, format: format)
+    /// Безопасно пересобирает соединения дека (например, после смены маршрута AirPods / Bluetooth)
+    public func connectGraph(in engine: AVAudioEngine, busFormat: AVAudioFormat?) {
+        downstreamFormat = busFormat
+        let playerFmt = currentPlayerFormat ?? busFormat
+        engine.connect(playerNode, to: inputConverterMixer, format: playerFmt)
+        engine.connect(inputConverterMixer, to: varispeedUnit, format: busFormat)
+        engine.connect(varispeedUnit, to: timePitchUnit, format: busFormat)
+        engine.connect(timePitchUnit, to: eqUnit, format: busFormat)
+        engine.connect(eqUnit, to: reverbUnit, format: busFormat)
+        engine.connect(reverbUnit, to: deckMixerNode, format: busFormat)
+        engine.connect(deckMixerNode, to: engine.mainMixerNode, format: busFormat)
+    }
+
+    /// Гарантирует точное совпадение числа каналов и частоты между `playerNode` и конкретным `AVAudioFile` перед `scheduleSegment` / `scheduleFile`,
+    /// полностью исключая краши `NSInternalInconsistencyException` на моно-треках и нестандартных частотах!
+    public func preparePlayerConnection(for audioFile: AVAudioFile, in engine: AVAudioEngine) {
+        let fileFormat = audioFile.processingFormat
+        guard fileFormat.sampleRate > 0 && fileFormat.channelCount > 0 else { return }
+
+        if let existing = currentPlayerFormat,
+           existing.channelCount == fileFormat.channelCount,
+           abs(existing.sampleRate - fileFormat.sampleRate) < 0.5 {
+            return
+        }
+
+        playerNode.stop()
+        engine.disconnectNodeOutput(playerNode)
+        engine.connect(playerNode, to: inputConverterMixer, format: fileFormat)
+        currentPlayerFormat = fileFormat
     }
 
     /// Применяет текущие настройки AudioFXMode, пользовательской скорости и Bass Boost

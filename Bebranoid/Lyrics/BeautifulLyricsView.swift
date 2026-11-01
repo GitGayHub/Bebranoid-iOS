@@ -17,6 +17,7 @@ public struct BeautifulLyricsView: View {
     public let onSeekToTime: (Double) -> Void
 
     @State private var activeLineIndex: Int = -1
+    @State private var activeInterludeId: String? = nil
     @State private var isUserBrowsing: Bool = false
     @State private var selectedPlainLineIndex: Int? = nil
     @State private var nodeFrames: [String: CGRect] = [:]
@@ -48,9 +49,12 @@ public struct BeautifulLyricsView: View {
         "\(document.lines.count)|\(document.lines.first?.text ?? "")|\(fontSizePreset.rawValue)|\(showTranslation)"
     }
 
-    private func targetNodeId(for lineIndex: Int) -> String? {
+    private func targetNodeId(for lineIndex: Int, interludeId: String?) -> String? {
         guard document.kind != .plain else { return nil }
         if lineIndex < 0 {
+            if let interludeId {
+                return interludeId
+            }
             if let introNode = nodes.first(where: {
                 if case .interlude(let id, _, _) = $0 { return id == "interlude_intro" }
                 return false
@@ -65,7 +69,10 @@ public struct BeautifulLyricsView: View {
         }) {
             return activeVocal.id
         }
-        return nil
+        if let interludeId {
+            return interludeId
+        }
+        return nodes.first?.id
     }
 
     public var body: some View {
@@ -76,9 +83,11 @@ public struct BeautifulLyricsView: View {
                 ZStack(alignment: .bottomTrailing) {
                     ActiveLineIndexDriverView(
                         lines: document.lines,
+                        nodes: nodes,
                         isPlaying: isPlaying,
                         liveTimeProvider: liveTimeProvider,
-                        activeLineIndex: $activeLineIndex
+                        activeLineIndex: $activeLineIndex,
+                        activeInterludeId: $activeInterludeId
                     )
                     .frame(width: 0, height: 0)
                     .allowsHitTesting(false)
@@ -87,7 +96,7 @@ public struct BeautifulLyricsView: View {
                         ZStack(alignment: .topLeading) {
                             #if canImport(UIKit)
                             LyricsSmoothScrollBridge(
-                                targetNodeId: targetNodeId(for: activeLineIndex),
+                                targetNodeId: targetNodeId(for: activeLineIndex, interludeId: activeInterludeId),
                                 nodeFrames: nodeFrames,
                                 documentSignature: documentSignature,
                                 syncTriggerToken: syncTriggerToken,
@@ -103,15 +112,18 @@ public struct BeautifulLyricsView: View {
                                 ForEach(nodes) { node in
                                     switch node {
                                     case .interlude(let id, let start, let end):
-                                        InterludeDotsLiveContainer(
-                                            id: id,
-                                            startTime: start,
-                                            endTime: end,
-                                            isPlaying: isPlaying,
-                                            liveTimeProvider: liveTimeProvider
-                                        )
-                                        .reportLyricNodeFrame(id: id)
-                                        .id(id)
+                                        if activeInterludeId == id {
+                                            InterludeDotsLiveContainer(
+                                                id: id,
+                                                startTime: start,
+                                                endTime: end,
+                                                isPlaying: isPlaying,
+                                                liveTimeProvider: liveTimeProvider
+                                            )
+                                            .reportLyricNodeFrame(id: id)
+                                            .id(id)
+                                            .transition(.opacity.combined(with: .scale(scale: 0.84, anchor: .leading)))
+                                        }
 
                                     case .vocal(let group):
                                         BeautifulVocalLineRow(
@@ -135,6 +147,7 @@ public struct BeautifulLyricsView: View {
                                                         }
                                                     }
                                                 } else {
+                                                    HapticsManager.shared.lightTap()
                                                     activeLineIndex = group.lineIndex
                                                     isUserBrowsing = false
                                                     syncTriggerToken &+= 1
@@ -163,10 +176,12 @@ public struct BeautifulLyricsView: View {
                         nodeFrames = updatedFrames
                     }
                     .onAppear {
-                        let initialIdx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
+                        let now = liveTimeProvider()
+                        let initialIdx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: now)
                         activeLineIndex = initialIdx
+                        activeInterludeId = ActiveLineIndexDriverView.findVisibleInterludeId(in: nodes, timestamp: now)
                         #if !canImport(UIKit)
-                        if let tid = targetNodeId(for: initialIdx) {
+                        if let tid = targetNodeId(for: initialIdx, interludeId: activeInterludeId) {
                             proxy.scrollTo(tid, anchor: UnitPoint(x: 0.5, y: 0.34))
                         }
                         #endif
@@ -174,17 +189,19 @@ public struct BeautifulLyricsView: View {
                     .onChange(of: document.lines.count) { _, _ in
                         selectedPlainLineIndex = nil
                         isUserBrowsing = false
-                        let idx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
+                        let now = liveTimeProvider()
+                        let idx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: now)
                         activeLineIndex = idx
+                        activeInterludeId = ActiveLineIndexDriverView.findVisibleInterludeId(in: nodes, timestamp: now)
                         #if !canImport(UIKit)
-                        if let tid = targetNodeId(for: idx) {
+                        if let tid = targetNodeId(for: idx, interludeId: activeInterludeId) {
                             proxy.scrollTo(tid, anchor: UnitPoint(x: 0.5, y: 0.34))
                         }
                         #endif
                     }
                     #if !canImport(UIKit)
                     .onChange(of: activeLineIndex) { _, newIdx in
-                        guard !isUserBrowsing, let tid = targetNodeId(for: newIdx) else { return }
+                        guard !isUserBrowsing, let tid = targetNodeId(for: newIdx, interludeId: activeInterludeId) else { return }
                         withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.62)) {
                             proxy.scrollTo(tid, anchor: UnitPoint(x: 0.5, y: 0.34))
                         }
@@ -193,14 +210,15 @@ public struct BeautifulLyricsView: View {
 
                     if isUserBrowsing && document.kind != .plain {
                         Button {
-                            let currentIdx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
+                            HapticsManager.shared.lightTap()
+                            let now = liveTimeProvider()
+                            let currentIdx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: now)
                             activeLineIndex = currentIdx
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                                isUserBrowsing = false
-                            }
+                            activeInterludeId = ActiveLineIndexDriverView.findVisibleInterludeId(in: nodes, timestamp: now)
+                            isUserBrowsing = false
                             syncTriggerToken &+= 1
                             #if !canImport(UIKit)
-                            if let tid = targetNodeId(for: currentIdx) {
+                            if let tid = targetNodeId(for: currentIdx, interludeId: activeInterludeId) {
                                 withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.62)) {
                                     proxy.scrollTo(tid, anchor: UnitPoint(x: 0.5, y: 0.34))
                                 }
@@ -210,17 +228,19 @@ public struct BeautifulLyricsView: View {
                             HStack(spacing: 6) {
                                 Image(systemName: "arrow.up.and.down.circle.fill")
                                 Text("Синхр.")
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .font(.system(size: 13.5, weight: .semibold, design: .rounded))
                             }
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
                             .liquidGlassCapsule(tint: accentColor, isProminent: false)
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .padding(.trailing, 20)
                         .padding(.bottom, 16)
                         .transition(.scale.combined(with: .opacity))
+                        .zIndex(10)
                     }
                 }
             }
@@ -230,20 +250,44 @@ public struct BeautifulLyricsView: View {
 
 private struct ActiveLineIndexDriverView: View {
     let lines: [LyricLineItem]
+    let nodes: [BeautifulTimelineNode]
     let isPlaying: Bool
     let liveTimeProvider: () -> Double
     @Binding var activeLineIndex: Int
+    @Binding var activeInterludeId: String?
+
+    static func findVisibleInterludeId(in nodes: [BeautifulTimelineNode], timestamp: Double) -> String? {
+        for node in nodes {
+            if case .interlude(let id, let start, let end) = node {
+                if timestamp >= start - 0.15 && timestamp <= end + 0.25 {
+                    let st = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: timestamp)
+                    if st.isVisible {
+                        return id
+                    }
+                }
+            }
+        }
+        return nil
+    }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 90.0, paused: !isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 45.0, paused: !isPlaying)) { context in
             let _ = context.date
             let now = liveTimeProvider()
-            let computed = LRCParser.findActiveLineIndex(lines: lines, currentTime: now)
+            let computedLine = LRCParser.findActiveLineIndex(lines: lines, currentTime: now)
+            let computedInterlude = Self.findVisibleInterludeId(in: nodes, timestamp: now)
             Color.clear
-                .onChange(of: computed) { _, newValue in
+                .onChange(of: computedLine) { _, newValue in
                     if activeLineIndex != newValue {
-                        withAnimation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54)) {
+                        withAnimation(.timingCurve(0.18, 0.92, 0.26, 1.0, duration: 0.62)) {
                             activeLineIndex = newValue
+                        }
+                    }
+                }
+                .onChange(of: computedInterlude) { _, newInterlude in
+                    if activeInterludeId != newInterlude {
+                        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.34)) {
+                            activeInterludeId = newInterlude
                         }
                     }
                 }
@@ -251,6 +295,10 @@ private struct ActiveLineIndexDriverView: View {
     }
 }
 
+/// Абсолютно плавный GPU-индикатор ожидания из 3 точек:
+/// 1) Монтируется ТОЛЬКО для единственного активного интерлюда (0 лишних `TimelineView` в неактивных паузах!)
+/// 2) Имеет фиксированную высоту `36 pt` без покадрового изменения `frame(height:)`, исключая перестроение всего `VStack` и лаги!
+/// 3) Свечение точек рисуется быстрым `RadialGradient` ореолом без тяжёлого размытия Гаусса `.shadow(radius:)` на каждом кадре.
 private struct InterludeDotsLiveContainer: View {
     let id: String
     let startTime: Double
@@ -259,32 +307,49 @@ private struct InterludeDotsLiveContainer: View {
     let liveTimeProvider: () -> Double
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 90.0, paused: !isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { context in
             let _ = context.date
             let now = liveTimeProvider()
             let state = InterludeEngine.evaluate(startTime: startTime, endTime: endTime, timestamp: now)
-            if state.isVisible {
-                HStack(spacing: 6.5) {
-                    ForEach(0..<state.dots.count, id: \.self) { idx in
-                        let dot = state.dots[idx]
-                        let baseWhiteAlpha = dot.isLit ? 0.96 : 0.72
+
+            HStack(spacing: 8.5) {
+                ForEach(0..<state.dots.count, id: \.self) { idx in
+                    let dot = state.dots[idx]
+                    let baseWhiteAlpha = dot.isLit ? 0.98 : 0.68
+                    let glowStrength = dot.glow * state.groupOpacity * state.expansionProgress
+
+                    ZStack {
+                        if glowStrength > 0.02 {
+                            Circle()
+                                .fill(
+                                    RadialGradient(
+                                        colors: [
+                                            Color.white.opacity(0.65 * glowStrength),
+                                            Color.white.opacity(0.18 * glowStrength),
+                                            Color.clear
+                                        ],
+                                        center: .center,
+                                        startRadius: 1,
+                                        endRadius: 13
+                                    )
+                                )
+                                .frame(width: 26, height: 26)
+                                .scaleEffect(CGFloat(0.85 + 0.30 * dot.glow))
+                        }
+
                         Circle()
                             .fill(Color.white.opacity(baseWhiteAlpha * dot.opacity))
-                            .frame(width: 8.0, height: 8.0)
+                            .frame(width: 8.5, height: 8.5)
                             .scaleEffect(CGFloat(dot.scale))
-                            .offset(y: CGFloat(dot.yOffset))
-                            .shadow(
-                                color: Color.white.opacity(dot.glow * 0.85 * state.groupOpacity),
-                                radius: CGFloat(3.0 + 7.5 * dot.glow)
-                            )
                     }
+                    .frame(width: 12, height: 12)
+                    .offset(y: CGFloat(dot.yOffset))
                 }
-                .scaleEffect(CGFloat(state.groupScale), anchor: .leading)
-                .opacity(state.groupOpacity)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: CGFloat(34.0 * state.expansionProgress))
-                .opacity(state.expansionProgress)
             }
+            .scaleEffect(CGFloat(state.groupScale * (0.82 + 0.18 * state.expansionProgress)), anchor: .leading)
+            .opacity(state.groupOpacity * state.expansionProgress)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 36.0)
         }
     }
 }
@@ -343,9 +408,10 @@ private struct BeautifulVocalLineRow: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     if !group.syllables.isEmpty && syncKind != .plain {
-                        // Однострочная раскладка слогов с автоподбором размера под ширину экрана (никогда не переносится на 2 строки!)
+                        // Неактивные строки рендерятся одним лёгким `Text` с предкэшированным `fitScale` (в 20 раз меньше вью в дереве SwiftUI!),
+                        // а пословный `TimelineView` работает строго на 1 активной строке (60 FPS без перегрева iPhone!)
                         if isLineActive {
-                            TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !isPlaying)) { context in
+                            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { context in
                                 let _ = context.date
                                 SyllableSingleLineView(
                                     syllables: group.syllables,
@@ -354,13 +420,21 @@ private struct BeautifulVocalLineRow: View {
                                     availableWidth: effectiveLineWidth
                                 )
                             }
+                            .frame(minHeight: ceil(31.0 * scaleFactor), alignment: .leading)
                         } else {
-                            SyllableSingleLineView(
-                                syllables: group.syllables,
-                                lineMode: .inactive(opacity: nonActiveLineOpacity),
-                                scaleFactor: scaleFactor,
+                            let inactiveFit = SingleLineLyricsFitHelper.fitScaleForSyllables(
+                                group.syllables,
+                                baseFontSize: 26.0 * scaleFactor,
+                                baseSpacing: 5.8 * scaleFactor,
                                 availableWidth: effectiveLineWidth
                             )
+                            Text(group.mainText)
+                                .font(.system(size: 26 * scaleFactor * inactiveFit, weight: .bold, design: .rounded))
+                                .foregroundStyle(Color.white.opacity(nonActiveLineOpacity))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.30)
+                                .allowsTightening(true)
+                                .frame(minHeight: ceil(31.0 * scaleFactor), alignment: .leading)
                         }
                     } else {
                         Text(group.mainText)
@@ -373,12 +447,7 @@ private struct BeautifulVocalLineRow: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.30)
                             .allowsTightening(true)
-                            .shadow(
-                                color: Color.white.opacity(isLineActive ? 0.18 : 0.0),
-                                radius: 7,
-                                x: 0,
-                                y: 0
-                            )
+                            .frame(minHeight: ceil(31.0 * scaleFactor), alignment: .leading)
                     }
 
                     if let bg = group.backgroundText, !bg.isEmpty {
@@ -411,11 +480,12 @@ private struct BeautifulVocalLineRow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .scaleEffect(isLineActive ? 1.0 : (syncKind == .plain ? 0.98 : 0.962), anchor: .leading)
+            .scaleEffect(isLineActive ? 1.0 : (syncKind == .plain ? 0.98 : 0.956), anchor: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .animation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54), value: isLineActive)
+        .animation(.timingCurve(0.18, 0.92, 0.26, 1.0, duration: 0.62), value: isLineActive)
+        .animation(.timingCurve(0.18, 0.92, 0.26, 1.0, duration: 0.62), value: nonActiveLineOpacity)
     }
 }
 
@@ -523,17 +593,25 @@ private struct SyllableWordSpanView: View {
                 }
             }()
 
-            Text(syllable.text)
-                .font(font)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: true)
-                .foregroundStyle(style)
-                .shadow(
-                    color: Color.white.opacity(glowOpacity),
-                    radius: syllable.isEmphasized ? 8 : 5,
-                    x: 0,
-                    y: 0
-                )
+            if isActive {
+                Text(syllable.text)
+                    .font(font)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .foregroundStyle(style)
+                    .shadow(
+                        color: Color.white.opacity(glowOpacity),
+                        radius: syllable.isEmphasized ? 6 : 4,
+                        x: 0,
+                        y: 0
+                    )
+            } else {
+                Text(syllable.text)
+                    .font(font)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .foregroundStyle(style)
+            }
         }
     }
 }

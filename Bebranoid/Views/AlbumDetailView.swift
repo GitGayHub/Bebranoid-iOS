@@ -17,7 +17,9 @@ public struct AlbumDetailView: View {
     }
 
     private var liveAlbum: Album {
-        appState.computedAlbums.first(where: { $0.name == album.name }) ?? album
+        appState.computedAlbums.first(where: { $0.id == album.id })
+            ?? appState.computedAlbums.first(where: { $0.name == album.name })
+            ?? album
     }
 
     public var body: some View {
@@ -47,6 +49,15 @@ public struct AlbumDetailView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .refreshable {
+                appState.haptics.softSelection()
+                if let plId = liveAlbum.linkedPlaylistId,
+                   let pl = appState.libraryState.playlists.first(where: { $0.id == plId }) {
+                    await appState.refreshPlaylist(pl)
+                } else {
+                    await appState.refreshFullLibraryAndYouTubePlaylists()
+                }
+            }
         }
         .navigationTitle(liveAlbum.name)
         #if os(iOS)
@@ -73,14 +84,17 @@ public struct AlbumDetailView: View {
     }
 
     private var headerHeroView: some View {
-        VStack(spacing: 14) {
+        let repTrack = liveAlbum.customCoverPath == nil ? (liveAlbum.representativeTrack ?? liveAlbum.tracks.first) : nil
+
+        return VStack(spacing: 14) {
             ArtworkThumbnailView(
-                track: liveAlbum.customCoverPath == nil ? liveAlbum.tracks.first : nil,
+                track: repTrack,
                 localPath: liveAlbum.coverPath,
                 remoteURL: liveAlbum.remoteArtworkURL,
                 fallbackSeed: "\(liveAlbum.name)|\(liveAlbum.artist)",
                 cornerRadius: 22,
-                showFavoriteOverlay: liveAlbum.isFavoriteVirtualAlbum && liveAlbum.coverPath == nil
+                sizeTier: .fullPlayer,
+                showFavoriteOverlay: liveAlbum.isFavoriteVirtualAlbum && liveAlbum.coverPath == nil && repTrack == nil
             )
             .frame(width: 190, height: 190)
             .shadow(color: .black.opacity(0.42), radius: 18, x: 0, y: 10)
@@ -96,7 +110,7 @@ public struct AlbumDetailView: View {
                     .foregroundStyle(.white.opacity(0.68))
             }
 
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Button {
                     if let first = liveAlbum.tracks.first {
                         appState.isShuffleEnabled = false
@@ -106,10 +120,11 @@ public struct AlbumDetailView: View {
                     Label("Слушать", systemImage: "play.fill")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                        .padding(.horizontal, 20)
+                        .padding(.horizontal, 18)
                         .padding(.vertical, 11)
-                        .background(appState.accentSwiftUIColor, in: Capsule())
+                        .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
                 }
+                .buttonStyle(.plain)
 
                 Button {
                     guard !liveAlbum.tracks.isEmpty else { return }
@@ -120,17 +135,45 @@ public struct AlbumDetailView: View {
                     Label("Перемешать", systemImage: "shuffle")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 18)
+                        .padding(.horizontal, 16)
                         .padding(.vertical, 11)
-                        .background(Color.white.opacity(0.14), in: Capsule())
+                        .liquidGlassCapsule(tint: .white, isProminent: false)
+                }
+                .buttonStyle(.plain)
+
+                if !liveAlbum.isFavoriteVirtualAlbum {
+                    let isFav: Bool = {
+                        if let plId = liveAlbum.linkedPlaylistId {
+                            return appState.isFavoritePlaylist(plId)
+                        }
+                        return appState.isFavoriteAlbum(liveAlbum.name)
+                    }()
+
+                    Button {
+                        if let plId = liveAlbum.linkedPlaylistId {
+                            appState.toggleFavoritePlaylist(plId)
+                        } else {
+                            appState.toggleFavoriteAlbum(liveAlbum.name)
+                        }
+                    } label: {
+                        Image(systemName: isFav ? "heart.fill" : "heart")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(isFav ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white)
+                            .frame(width: 40, height: 40)
+                            .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: false)
+                    }
+                    .buttonStyle(.plain)
                 }
 
-                PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                    Image(systemName: "photo.badge.plus")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                        .background(Color.white.opacity(0.12), in: Circle())
+                if liveAlbum.linkedPlaylistId == nil {
+                    PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                        Image(systemName: "photo.badge.plus")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 40, height: 40)
+                            .liquidGlassCircle(tint: .white, isHighlighted: false)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }

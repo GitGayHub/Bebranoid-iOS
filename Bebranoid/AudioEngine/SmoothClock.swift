@@ -2,13 +2,16 @@ import Foundation
 import Combine
 
 /// Высокоточный 60/120 Гц интерполятор позиции воспроизведения (`src/lib/smoothClock.js`).
-/// Обеспечивает идеально плавное движение слайдера, послогового караоке и кроссфейда без рывков.
+/// Обеспечивает идеально плавное движение слайдера, послогового караоке и кроссфейда без рывков
+/// и без лишних пробуждений CPU (интерполяция выполняется аналитически по системному `systemUptime`,
+/// а фоновая сверка с аппаратным аудио-узлом работает на экономичной частоте 4 Гц, повышаясь до 30 Гц только на время кроссфейда).
 @MainActor
 public final class SmoothClock: ObservableObject {
     @Published public private(set) var currentTime: Double = 0.0
     @Published public private(set) var isRunning: Bool = false
 
     private var timer: Timer?
+    private var currentInterval: TimeInterval = 0.25
     private var anchorAudioTime: Double = 0.0
     private var anchorWallTime: TimeInterval = 0.0
     private var effectiveRate: Double = 1.0
@@ -25,19 +28,32 @@ public final class SmoothClock: ObservableObject {
         self.tickHandler = onTick
     }
 
-    public func start() {
-        guard timer == nil else { return }
+    public func start(highFrequencyForCrossfade: Bool = false) {
+        let desiredInterval: TimeInterval = highFrequencyForCrossfade ? (1.0 / 30.0) : 0.25
+        if timer != nil && abs(currentInterval - desiredInterval) < 0.005 {
+            return
+        }
+        timer?.invalidate()
+        timer = nil
+        currentInterval = desiredInterval
         isRunning = true
         syncFromHardware()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        let newTimer = Timer(timeInterval: desiredInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
                 self?.step()
             }
         }
-        if let timer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
+        newTimer.tolerance = highFrequencyForCrossfade ? 0.005 : 0.04
+        RunLoop.main.add(newTimer, forMode: .common)
+        timer = newTimer
+    }
+
+    public func setCrossfadeHighFrequency(_ enabled: Bool) {
+        guard isRunning else { return }
+        let desiredInterval: TimeInterval = enabled ? (1.0 / 30.0) : 0.25
+        guard abs(currentInterval - desiredInterval) >= 0.005 else { return }
+        start(highFrequencyForCrossfade: enabled)
     }
 
     /// Возвращает высокоточную интерполированную позицию в реальном времени (120 Гц ProMotion) без ожидания публикации `@Published`.
@@ -45,7 +61,7 @@ public final class SmoothClock: ObservableObject {
         guard isRunning, effectiveRate > 0 else {
             return currentTime
         }
-        let dt = max(0.0, min(0.50, uptime - anchorWallTime))
+        let dt = max(0.0, min(1.50, uptime - anchorWallTime))
         return max(0.0, anchorAudioTime + dt * effectiveRate)
     }
 
@@ -77,7 +93,9 @@ public final class SmoothClock: ObservableObject {
             anchorAudioTime = sample.time
             anchorWallTime = now
             effectiveRate = 0.0
-            currentTime = sample.time
+            if abs(currentTime - sample.time) > 0.01 {
+                currentTime = sample.time
+            }
             tickHandler?(currentTime)
             return
         }
@@ -87,8 +105,6 @@ public final class SmoothClock: ObservableObject {
         let extrapolated = anchorAudioTime + dt * sample.rate
         let drift = abs(extrapolated - sample.time)
 
-        // Если расхождение с аппаратным временем больше 85 мс — пересинхронизируем по аппаратному сэмплу,
-        // иначе плавно двигаем якорь вперёд на каждом тике, чтобы `interpolatedTime()` никогда не застревал!
         if drift > 0.085 {
             anchorAudioTime = sample.time
             anchorWallTime = now

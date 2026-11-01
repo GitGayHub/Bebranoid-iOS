@@ -26,6 +26,17 @@ public struct FullScreenPlayerView: View {
     @State private var isCover3DPreviewPresented: Bool = false
     @State private var coverLongPressTask: Task<Void, Never>? = nil
 
+    // Слоты обложек исходного максимального качества (`.originalSource`) без мигания при свайпе и переключении трека
+    @State private var prevCoverTrackId: String? = nil
+    @State private var prevCoverImage: CGImage? = nil
+    @State private var activeCoverTrackId: String? = nil
+    @State private var activeCoverImage: CGImage? = nil
+    @State private var nextCoverTrackId: String? = nil
+    @State private var nextCoverImage: CGImage? = nil
+    @State private var crossfadeOutgoingImage: CGImage? = nil
+    @State private var crossfadeIncomingAlpha: Double = 1.0
+    @State private var crossfadeCleanupTask: Task<Void, Never>? = nil
+
     @StateObject private var gyro = GyroscopeMotionManager()
 
     public init(appState: BebranoidAppState) {
@@ -62,6 +73,7 @@ public struct FullScreenPlayerView: View {
                     nextPalette: appState.nextTrackPalette,
                     crossfadeProgress: effectiveCrossfade,
                     isReducedMotion: appState.isReducedMotionEnabled || dragDismissOffset > 2,
+                    isOccluded: appState.isLyricsScreenPresented,
                     fixedAnimationTime: fixedTime
                 )
 
@@ -168,10 +180,12 @@ public struct FullScreenPlayerView: View {
             LyricsScreenView(appState: appState)
         }
         .onAppear {
+            syncAndPreloadCarouselCovers(initialMount: true)
             gyro.setActive(appState.isGyroscope3DCoverEnabled && !appState.isLyricsScreenPresented && !isCover3DPreviewPresented)
         }
         .onDisappear {
             coverLongPressTask?.cancel()
+            crossfadeCleanupTask?.cancel()
             gyro.stop()
         }
         .onChange(of: appState.isGyroscope3DCoverEnabled) { _, enabled in
@@ -186,13 +200,279 @@ public struct FullScreenPlayerView: View {
         .onChange(of: track?.id) { _, _ in
             isDraggingSlider = false
             draggedTime = 0.0
+            handleTrackChangedForCarousel()
             if !isCompletingDiscSwipe {
-                trackChangeSettleScale = 0.974
-                withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.58)) {
+                trackChangeSettleScale = 0.978
+                withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.46)) {
                     trackChangeSettleScale = 1.0
                 }
             }
         }
+        .onChange(of: appState.upcomingNextTrack?.id) { _, _ in
+            preloadAdjacentSlotsAsync()
+        }
+        .onChange(of: appState.adjacentPreviousTrack?.id) { _, _ in
+            preloadAdjacentSlotsAsync()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .artworkDidResolve)) { note in
+            let resolvedId = note.userInfo?["trackId"] as? String
+            if let cur = track, resolvedId == cur.id {
+                reloadActiveOriginalCoverAsync(for: cur, upgradeSmoothly: true)
+            } else {
+                preloadAdjacentSlotsAsync(forceReloadId: resolvedId)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .trackDownloadProgressDidChange)) { note in
+            guard note.userInfo?["percent"] == nil,
+                  let key = note.userInfo?["cacheKey"] as? String else { return }
+            if let cur = track, cur.cacheKey == key {
+                ArtworkService.shared.invalidateCachedSyncPath(forTrackId: cur.id, cacheKey: cur.cacheKey)
+                reloadActiveOriginalCoverAsync(for: cur, upgradeSmoothly: true)
+            } else {
+                preloadAdjacentSlotsAsync()
+            }
+        }
+    }
+
+    // MARK: - Zero-Blink Native Original-Quality Cover Slot Management
+
+    private func syncLookupOriginalCover(for targetTrack: Track?) -> CGImage? {
+        guard let targetTrack else { return nil }
+        if let customPath = appState.libraryState.customAlbumCovers[targetTrack.album],
+           !customPath.isEmpty,
+           ArtworkService.shared.isValidImageFile(atPath: customPath) {
+            if let mem = ArtworkService.shared.memoryCachedImage(forKey: customPath, tier: .originalSource) {
+                return mem
+            }
+            if let cg = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: customPath), tier: .originalSource) {
+                ArtworkService.shared.storeMemoryCachedImage(cg, forKey: customPath, tier: .originalSource)
+                return cg
+            }
+        }
+        if let mem = ArtworkService.shared.memoryCachedImage(forKey: targetTrack.id, tier: .originalSource) {
+            return mem
+        }
+        if let syncHit = ArtworkService.shared.resolveLocalCoverURLSync(
+            for: targetTrack,
+            customAlbumCovers: appState.libraryState.customAlbumCovers,
+            siblingTracks: appState.libraryState.tracks
+        ), let cg = ArtworkService.shared.loadCGImage(from: syncHit.url, tier: .originalSource) {
+            ArtworkService.shared.storeMemoryCachedImage(cg, forKey: targetTrack.id, tier: .originalSource)
+            return cg
+        }
+        return nil
+    }
+
+    private func syncAndPreloadCarouselCovers(initialMount: Bool) {
+        if let cur = track {
+            if initialMount || activeCoverTrackId != cur.id {
+                activeCoverTrackId = cur.id
+                activeCoverImage = syncLookupOriginalCover(for: cur)
+                crossfadeOutgoingImage = nil
+                crossfadeIncomingAlpha = 1.0
+                if activeCoverImage == nil {
+                    reloadActiveOriginalCoverAsync(for: cur, upgradeSmoothly: false)
+                } else if appState.cacheIndex.isCached(cur) {
+                    // Убеждаемся, что загружена 100% исходная встроенная обложка максимального качества
+                    reloadActiveOriginalCoverAsync(for: cur, upgradeSmoothly: true)
+                }
+            }
+        } else {
+            activeCoverTrackId = nil
+            activeCoverImage = nil
+        }
+        preloadAdjacentSlotsAsync()
+    }
+
+    private func handleTrackChangedForCarousel() {
+        guard let newTrack = track else {
+            activeCoverTrackId = nil
+            activeCoverImage = nil
+            crossfadeOutgoingImage = nil
+            return
+        }
+
+        // Если трек уже синхронно продвинут свайпом пальца (`completeDiscFlick`) — НЕ трогаем `activeCoverImage`,
+        // чтобы не было ни малейшего мигания или повторного фейда!
+        if activeCoverTrackId == newTrack.id {
+            if activeCoverImage == nil {
+                reloadActiveOriginalCoverAsync(for: newTrack, upgradeSmoothly: true)
+            }
+            preloadAdjacentSlotsAsync()
+            return
+        }
+
+        let previousDisplayed = activeCoverImage
+        let preloadedCandidate: CGImage? = {
+            if newTrack.id == nextCoverTrackId, let nxt = nextCoverImage { return nxt }
+            if newTrack.id == prevCoverTrackId, let prv = prevCoverImage { return prv }
+            return syncLookupOriginalCover(for: newTrack)
+        }()
+
+        crossfadeCleanupTask?.cancel()
+        crossfadeOutgoingImage = previousDisplayed
+        activeCoverTrackId = newTrack.id
+        activeCoverImage = preloadedCandidate
+
+        if previousDisplayed != nil || preloadedCandidate != nil {
+            crossfadeIncomingAlpha = 0.0
+            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.38)) {
+                crossfadeIncomingAlpha = 1.0
+            }
+            crossfadeCleanupTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 410_000_000)
+                guard !Task.isCancelled else { return }
+                crossfadeOutgoingImage = nil
+            }
+        } else {
+            crossfadeOutgoingImage = nil
+            crossfadeIncomingAlpha = 1.0
+        }
+
+        if preloadedCandidate == nil || appState.cacheIndex.isCached(newTrack) {
+            reloadActiveOriginalCoverAsync(for: newTrack, upgradeSmoothly: true)
+        }
+        preloadAdjacentSlotsAsync()
+    }
+
+    private func reloadActiveOriginalCoverAsync(for targetTrack: Track, upgradeSmoothly: Bool) {
+        let customCovers = appState.libraryState.customAlbumCovers
+        let siblings = appState.libraryState.tracks
+        Task {
+            let decoded: CGImage? = await Task.detached(priority: .userInitiated) {
+                if let customPath = customCovers[targetTrack.album],
+                   !customPath.isEmpty,
+                   ArtworkService.shared.isValidImageFile(atPath: customPath),
+                   let cg = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: customPath), tier: .originalSource) {
+                    ArtworkService.shared.storeMemoryCachedImage(cg, forKey: customPath, tier: .originalSource)
+                    return cg
+                }
+                if let syncHit = ArtworkService.shared.resolveLocalCoverURLSync(
+                    for: targetTrack,
+                    customAlbumCovers: customCovers,
+                    siblingTracks: siblings
+                ), let cg = ArtworkService.shared.loadCGImage(from: syncHit.url, tier: .originalSource) {
+                    ArtworkService.shared.storeMemoryCachedImage(cg, forKey: targetTrack.id, tier: .originalSource)
+                    return cg
+                }
+                if let resolved = await ArtworkService.shared.resolveArtwork(
+                    for: targetTrack,
+                    customAlbumCovers: customCovers,
+                    siblingTracks: siblings
+                ), let fileURL = resolved.fileURL,
+                   let cg = ArtworkService.shared.loadCGImage(from: fileURL, tier: .originalSource) {
+                    ArtworkService.shared.storeMemoryCachedImage(cg, forKey: targetTrack.id, tier: .originalSource)
+                    return cg
+                }
+                return nil
+            }.value
+
+            await MainActor.run {
+                guard self.track?.id == targetTrack.id else { return }
+                guard let decoded else { return }
+                if let curImg = self.activeCoverImage,
+                   curImg === decoded || (curImg.width >= decoded.width && curImg.height >= decoded.height && self.activeCoverTrackId == targetTrack.id) {
+                    return
+                }
+                if upgradeSmoothly, let existing = self.activeCoverImage {
+                    self.crossfadeCleanupTask?.cancel()
+                    self.crossfadeOutgoingImage = existing
+                    self.activeCoverImage = decoded
+                    self.crossfadeIncomingAlpha = 0.0
+                    withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.34)) {
+                        self.crossfadeIncomingAlpha = 1.0
+                    }
+                    self.crossfadeCleanupTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 360_000_000)
+                        guard !Task.isCancelled else { return }
+                        self.crossfadeOutgoingImage = nil
+                    }
+                } else {
+                    self.activeCoverImage = decoded
+                }
+            }
+        }
+    }
+
+    private func preloadAdjacentSlotsAsync(forceReloadId: String? = nil) {
+        let prevTrack = appState.adjacentPreviousTrack
+        let nextTrack = appState.upcomingNextTrack
+        let customCovers = appState.libraryState.customAlbumCovers
+        let siblings = appState.libraryState.tracks
+
+        if let prevTrack {
+            if prevCoverTrackId != prevTrack.id || forceReloadId == prevTrack.id {
+                prevCoverTrackId = prevTrack.id
+                prevCoverImage = syncLookupOriginalCover(for: prevTrack)
+                if prevCoverImage == nil || forceReloadId == prevTrack.id {
+                    Task {
+                        let cg = await Self.resolveOriginalCGImageOffMain(for: prevTrack, customCovers: customCovers, siblings: siblings)
+                        await MainActor.run {
+                            if self.appState.adjacentPreviousTrack?.id == prevTrack.id {
+                                self.prevCoverTrackId = prevTrack.id
+                                self.prevCoverImage = cg
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            prevCoverTrackId = nil
+            prevCoverImage = nil
+        }
+
+        if let nextTrack {
+            if nextCoverTrackId != nextTrack.id || forceReloadId == nextTrack.id {
+                nextCoverTrackId = nextTrack.id
+                nextCoverImage = syncLookupOriginalCover(for: nextTrack)
+                if nextCoverImage == nil || forceReloadId == nextTrack.id {
+                    Task {
+                        let cg = await Self.resolveOriginalCGImageOffMain(for: nextTrack, customCovers: customCovers, siblings: siblings)
+                        await MainActor.run {
+                            if self.appState.upcomingNextTrack?.id == nextTrack.id {
+                                self.nextCoverTrackId = nextTrack.id
+                                self.nextCoverImage = cg
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            nextCoverTrackId = nil
+            nextCoverImage = nil
+        }
+    }
+
+    nonisolated private static func resolveOriginalCGImageOffMain(
+        for targetTrack: Track,
+        customCovers: [String: String],
+        siblings: [Track]
+    ) async -> CGImage? {
+        if let customPath = customCovers[targetTrack.album],
+           !customPath.isEmpty,
+           ArtworkService.shared.isValidImageFile(atPath: customPath),
+           let cg = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: customPath), tier: .originalSource) {
+            ArtworkService.shared.storeMemoryCachedImage(cg, forKey: customPath, tier: .originalSource)
+            return cg
+        }
+        if let syncHit = ArtworkService.shared.resolveLocalCoverURLSync(
+            for: targetTrack,
+            customAlbumCovers: customCovers,
+            siblingTracks: siblings
+        ), let cg = ArtworkService.shared.loadCGImage(from: syncHit.url, tier: .originalSource) {
+            ArtworkService.shared.storeMemoryCachedImage(cg, forKey: targetTrack.id, tier: .originalSource)
+            return cg
+        }
+        if let resolved = await ArtworkService.shared.resolveArtwork(
+            for: targetTrack,
+            customAlbumCovers: customCovers,
+            siblingTracks: siblings
+        ), let fileURL = resolved.fileURL,
+           let cg = ArtworkService.shared.loadCGImage(from: fileURL, tier: .originalSource) {
+            ArtworkService.shared.storeMemoryCachedImage(cg, forKey: targetTrack.id, tier: .originalSource)
+            return cg
+        }
+        return nil
     }
 
     // MARK: - Cover Carousel & 3D Touch
@@ -206,123 +486,79 @@ public struct FullScreenPlayerView: View {
     ) -> some View {
         let tiltX = (appState.isGyroscope3DCoverEnabled && abs(coverHorizontalOffset) < 2) ? gyro.tiltXDegrees : 0.0
         let tiltY = (appState.isGyroscope3DCoverEnabled && abs(coverHorizontalOffset) < 2) ? gyro.tiltYDegrees : 0.0
-        let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 20.0)
         let swipeRatio = min(1.0, abs(coverHorizontalOffset) / max(1.0, discStride))
         let outgoingScale = 1.0 - 0.10 * swipeRatio
-        let outgoingOpacity = 1.0 - 0.32 * swipeRatio
+        let outgoingOpacity = 1.0 - 0.30 * swipeRatio
+        let isRimPaused = appState.isReducedMotionEnabled
+            || appState.isLyricsScreenPresented
+            || isCover3DPreviewPresented
+            || dragDismissOffset > 1
 
         ZStack {
-            // Соседний предыдущий диск слева (появляется при свайпе вправо)
-            if coverHorizontalOffset > 1, let prevTrack = appState.adjacentPreviousTrack {
+            // Соседний предыдущий диск слева (плавно въезжает при свайпе вправо без мигания)
+            if coverHorizontalOffset > 1, appState.adjacentPreviousTrack != nil {
                 let incomingProgress = min(1.0, coverHorizontalOffset / discStride)
-                adjacentDiscCard(track: prevTrack, coverSide: coverSide)
-                    .scaleEffect(0.88 + 0.12 * incomingProgress)
-                    .opacity(0.45 + 0.55 * incomingProgress)
-                    .offset(x: -discStride + coverHorizontalOffset)
-                    .allowsHitTesting(false)
-            }
-
-            // Соседний следующий диск справа (появляется при свайпе влево)
-            if coverHorizontalOffset < -1, let nextTrack = appState.upcomingNextTrack {
-                let incomingProgress = min(1.0, -coverHorizontalOffset / discStride)
-                let nextAccent = appState.nextTrackAccent ?? liveAccentRGB
-                CoverLivingRimShellView(
-                    accentRGB: nextAccent,
+                Sculpted3DCoverSlabView(
+                    primaryImage: prevCoverImage,
+                    outgoingImage: nil,
+                    incomingAlpha: 1.0,
+                    accentRGB: liveAccentRGB,
                     cornerRadius: 28,
-                    isPaused: true
-                ) {
-                    ArtworkThumbnailView(
-                        track: nextTrack,
-                        localPath: appState.libraryState.customAlbumCovers[nextTrack.album] ?? nextTrack.coverPath,
-                        remoteURL: nextTrack.remoteArtworkURL,
-                        fallbackSeed: "\(nextTrack.album)|\(nextTrack.artist)",
-                        cornerRadius: 25.5,
-                        sizeTier: .fullPlayer,
-                        enableSmoothTransition: true,
-                        showBorder: false
-                    )
-                }
+                    coverSide: coverSide,
+                    tiltX: 0,
+                    tiltY: 0,
+                    specularOffset: .zero,
+                    isRimPaused: true
+                )
                 .frame(width: coverSide, height: coverSide)
                 .shadow(color: Color.black.opacity(0.45), radius: 22, x: 0, y: 14)
                 .scaleEffect((appState.isPlaying ? 1.0 : 0.93) * (0.88 + 0.12 * incomingProgress))
-                .opacity(0.45 + 0.55 * incomingProgress)
+                .opacity(0.48 + 0.52 * incomingProgress)
+                .offset(x: -discStride + coverHorizontalOffset)
+                .allowsHitTesting(false)
+            }
+
+            // Соседний следующий диск справа (плавно въезжает при свайпе влево без мигания)
+            if coverHorizontalOffset < -1, appState.upcomingNextTrack != nil {
+                let incomingProgress = min(1.0, -coverHorizontalOffset / discStride)
+                let nextAccent = appState.nextTrackAccent ?? liveAccentRGB
+                Sculpted3DCoverSlabView(
+                    primaryImage: nextCoverImage,
+                    outgoingImage: nil,
+                    incomingAlpha: 1.0,
+                    accentRGB: nextAccent,
+                    cornerRadius: 28,
+                    coverSide: coverSide,
+                    tiltX: 0,
+                    tiltY: 0,
+                    specularOffset: .zero,
+                    isRimPaused: true
+                )
+                .frame(width: coverSide, height: coverSide)
+                .shadow(color: Color.black.opacity(0.45), radius: 22, x: 0, y: 14)
+                .scaleEffect((appState.isPlaying ? 1.0 : 0.93) * (0.88 + 0.12 * incomingProgress))
+                .opacity(0.48 + 0.52 * incomingProgress)
                 .offset(x: discStride + coverHorizontalOffset)
                 .allowsHitTesting(false)
             }
 
-            // Центральный активный 3D-диск
-            let resolvedLocalCoverPath = track.flatMap { appState.libraryState.customAlbumCovers[$0.album] ?? $0.coverPath }
-            let coverFallbackSeed = "\(track?.album ?? "")|\(track?.artist ?? "")"
+            // Центральный 3D-диск с исходным качеством и единой живой обводкой по всему 3D-объёму
             let pressScale: CGFloat = isPressingCover ? 0.972 : 1.0
 
             ZStack(alignment: .bottom) {
-                // Идеальное 3D-продолжение крайних пикселей самой обложки по бокам при наклоне гироскопа
-                if appState.isGyroscope3DCoverEnabled && tiltMagnitude > 0.015 {
-                    ForEach((1...8).reversed(), id: \.self) { sliceIdx in
-                        let frac = Double(sliceIdx) / 8.0
-                        ArtworkThumbnailView(
-                            track: track,
-                            localPath: resolvedLocalCoverPath,
-                            remoteURL: track?.remoteArtworkURL,
-                            fallbackSeed: coverFallbackSeed,
-                            cornerRadius: 28,
-                            sizeTier: .fullPlayer,
-                            enableSmoothTransition: true,
-                            showBorder: false
-                        )
-                        .frame(width: coverSide, height: coverSide)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                .fill(Color.black.opacity(0.14 + 0.34 * frac))
-                        )
-                        .offset(
-                            x: CGFloat(-tiltY * 0.44 * frac),
-                            y: CGFloat(tiltX * 0.44 * frac)
-                        )
-                        .allowsHitTesting(false)
-                    }
-                }
-
-                // Живой бегущий ободок вокруг обложки (с монохромной серебристо-платиновой защитой для Ч/Б обложек!)
-                CoverLivingRimShellView(
+                Sculpted3DCoverSlabView(
+                    primaryImage: activeCoverImage,
+                    outgoingImage: crossfadeOutgoingImage,
+                    incomingAlpha: crossfadeIncomingAlpha,
                     accentRGB: liveAccentRGB,
                     cornerRadius: 28,
-                    isPaused: appState.isReducedMotionEnabled || dragDismissOffset > 1 || abs(coverHorizontalOffset) > 1
-                ) {
-                    ArtworkThumbnailView(
-                        track: track,
-                        localPath: resolvedLocalCoverPath,
-                        remoteURL: track?.remoteArtworkURL,
-                        fallbackSeed: coverFallbackSeed,
-                        cornerRadius: 25.5,
-                        sizeTier: .fullPlayer,
-                        enableSmoothTransition: true,
-                        showBorder: false
-                    )
-                }
+                    coverSide: coverSide,
+                    tiltX: tiltX,
+                    tiltY: tiltY,
+                    specularOffset: gyro.specularUnitOffset,
+                    isRimPaused: isRimPaused || abs(coverHorizontalOffset) > 2
+                )
                 .frame(width: coverSide, height: coverSide)
-                .overlay {
-                    if appState.isGyroscope3DCoverEnabled && tiltMagnitude > 0.01 {
-                        let lightCenter = UnitPoint(
-                            x: max(0.05, min(0.95, 0.5 - gyro.specularUnitOffset.width * 0.42)),
-                            y: max(0.05, min(0.95, 0.38 - gyro.specularUnitOffset.height * 0.42))
-                        )
-                        RoundedRectangle(cornerRadius: 28, style: .continuous)
-                            .fill(
-                                RadialGradient(
-                                    colors: [
-                                        Color.white.opacity(0.16 * tiltMagnitude),
-                                        Color.white.opacity(0.03 * tiltMagnitude),
-                                        Color.clear
-                                    ],
-                                    center: lightCenter,
-                                    startRadius: 8,
-                                    endRadius: coverSide * 0.78
-                                )
-                            )
-                            .allowsHitTesting(false)
-                    }
-                }
 
                 if let pct = activeDownloadPercent {
                     VStack(spacing: 6) {
@@ -349,43 +585,27 @@ public struct FullScreenPlayerView: View {
             .rotation3DEffect(
                 .degrees(tiltX),
                 axis: (x: 1, y: 0, z: 0),
-                perspective: 0.52
+                perspective: 0.50
             )
             .rotation3DEffect(
                 .degrees(tiltY),
                 axis: (x: 0, y: 1, z: 0),
-                perspective: 0.52
+                perspective: 0.50
             )
             .scaleEffect((appState.isPlaying ? 1.0 : 0.93) * trackChangeSettleScale * outgoingScale * pressScale)
             .opacity(outgoingOpacity)
-            .rotationEffect(.degrees(Double(coverHorizontalOffset) * 0.028))
+            .rotationEffect(.degrees(Double(coverHorizontalOffset) * 0.026))
             .offset(x: coverHorizontalOffset)
             .shadow(
-                color: Color.black.opacity(0.50),
-                radius: 28,
-                x: CGFloat(-tiltY * 0.85),
-                y: 16 + CGFloat(tiltX * 0.75)
+                color: Color.black.opacity(0.48),
+                radius: 26,
+                x: CGFloat(-tiltY * 0.80),
+                y: 15 + CGFloat(tiltX * 0.70)
             )
             .animation(.spring(response: 0.34, dampingFraction: 0.80), value: appState.isPlaying)
             .animation(.spring(response: 0.22, dampingFraction: 0.76), value: isPressingCover)
             .highPriorityGesture(coverInteractiveAnd3DTouchGesture(discStride: discStride))
         }
-    }
-
-    private func adjacentDiscCard(track: Track, coverSide: CGFloat) -> some View {
-        ArtworkThumbnailView(
-            track: track,
-            localPath: appState.libraryState.customAlbumCovers[track.album] ?? track.coverPath,
-            remoteURL: track.remoteArtworkURL,
-            fallbackSeed: "\(track.album)|\(track.artist)",
-            cornerRadius: 28,
-            sizeTier: .fullPlayer,
-            enableSmoothTransition: true,
-            showBorder: true
-        )
-        .frame(width: coverSide, height: coverSide)
-        .shadow(color: Color.black.opacity(0.45), radius: 22, x: 0, y: 14)
-        .scaleEffect(appState.isPlaying ? 1.0 : 0.93)
     }
 
     private var headerDismissGesture: some Gesture {
@@ -535,23 +755,38 @@ public struct FullScreenPlayerView: View {
     private func completeDiscFlick(toNext: Bool, discStride: CGFloat) {
         isCompletingDiscSwipe = true
         let targetOffset = toNext ? -discStride : discStride
-        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.24)) {
+        let promotedTrack = toNext ? appState.upcomingNextTrack : appState.adjacentPreviousTrack
+        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.23)) {
             coverHorizontalOffset = targetOffset
         }
 
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 245_000_000)
+            try? await Task.sleep(nanoseconds: 232_000_000)
             var tx = Transaction()
             tx.disablesAnimations = true
             withTransaction(tx) {
+                // Синхронно перекладываем уже отрисованную на экране обложку соседнего трека в центральный слот
+                // ДО обнуления `coverHorizontalOffset = 0`, чтобы в кадре x=0 осталась та же самая текстура CGImage без мигания!
+                crossfadeCleanupTask?.cancel()
+                crossfadeOutgoingImage = nil
+                crossfadeIncomingAlpha = 1.0
                 if toNext {
+                    prevCoverTrackId = activeCoverTrackId
+                    prevCoverImage = activeCoverImage
+                    activeCoverTrackId = promotedTrack?.id
+                    activeCoverImage = nextCoverImage ?? syncLookupOriginalCover(for: promotedTrack)
                     appState.skipToNext(isManualUserAction: true)
                 } else {
+                    nextCoverTrackId = activeCoverTrackId
+                    nextCoverImage = activeCoverImage
+                    activeCoverTrackId = promotedTrack?.id
+                    activeCoverImage = prevCoverImage ?? syncLookupOriginalCover(for: promotedTrack)
                     appState.skipToPreviousTrackForced()
                 }
                 coverHorizontalOffset = 0
                 isCompletingDiscSwipe = false
             }
+            preloadAdjacentSlotsAsync()
         }
     }
 
@@ -769,7 +1004,7 @@ public struct FullScreenPlayerView: View {
         let effectiveDuration = appState.duration > 0 ? appState.duration : (track?.duration ?? 0.0)
         let maxDur = max(1.0, effectiveDuration)
 
-        return TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !appState.isPlaying && !isDraggingSlider)) { context in
+        return TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: (!appState.isPlaying && !isDraggingSlider) || appState.isLyricsScreenPresented)) { context in
             let _ = context.date
             let liveTime = appState.isPlaying ? appState.audioEngine.livePlaybackTime : appState.currentTime
             let rawPos = isDraggingSlider ? draggedTime : liveTime
@@ -890,7 +1125,7 @@ private struct Cover3DTouchPreviewOverlay: View {
         ZStack {
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .overlay(Color.black.opacity(0.28))
+                .overlay(Color.black.opacity(0.10))
                 .ignoresSafeArea()
                 .onTapGesture {
                     onDismiss()
@@ -911,7 +1146,7 @@ private struct Cover3DTouchPreviewOverlay: View {
                             remoteURL: track.remoteArtworkURL,
                             fallbackSeed: "\(track.album)|\(track.artist)",
                             cornerRadius: 29.5,
-                            sizeTier: .fullPlayer,
+                            sizeTier: .originalSource,
                             enableSmoothTransition: true,
                             showBorder: false
                         )
@@ -1122,15 +1357,146 @@ public struct InteractiveSeekBarView: View {
     }
 }
 
-/// Живой бегущий световой ободок вокруг обложки (`.andro-cover-living-shell` + `.andro-cover-living-spin` из `C:\VibeCoding\Bebranoid\src\index.css`):
-/// для Ч/Б обложек (`chroma < 0.09`) строит благородный серебристо-платиновый градиент без паразитного жёлтого или фиолетового оттенка.
-private struct CoverLivingRimShellView<FaceContent: View>: View {
+/// Монолитная 3D-плита обложки (`Sculpted3DCoverSlabView`), объединяющая:
+/// - Исходное разрешение обложки (`.originalSource`, 1 общий `CGImage` буфер без дублирования декодера)
+/// - Плавный бесшовный кроссфейд при переключении кнопками и мгновенную подстановку при свайпе пальцем
+/// - Синхронную бегущую световую обводку (`AngularGradient`), проходящую как по передней грани, так и по всему продлённому 3D-торцу!
+private struct Sculpted3DCoverSlabView: View {
+    let primaryImage: CGImage?
+    let outgoingImage: CGImage?
+    let incomingAlpha: Double
     let accentRGB: MeshRGB
     let cornerRadius: CGFloat
-    let isPaused: Bool
-    @ViewBuilder let faceContent: () -> FaceContent
+    let coverSide: CGFloat
+    let tiltX: Double
+    let tiltY: Double
+    let specularOffset: CGSize
+    let isRimPaused: Bool
 
-    private func mixColor(accentWeight: Double, baseR: Double, baseG: Double, baseB: Double) -> Color {
+    var body: some View {
+        let isMonochrome = HarmonoidMeshEngine.chroma(accentRGB.r, accentRGB.g, accentRGB.b) < 0.09
+        let norm = accentRGB.normalizedDouble
+        let pureAccent = isMonochrome
+            ? Color(red: 0.90, green: 0.91, blue: 0.94)
+            : Color(red: norm.r, green: norm.g, blue: norm.b)
+        let stops = CoverLivingRimGradientBuilder.buildStops(accentRGB: accentRGB, isMonochrome: isMonochrome)
+        let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 20.0)
+        let innerRadius = max(4.0, cornerRadius - 2.4)
+
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isRimPaused)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let angleDeg = (t.truncatingRemainder(dividingBy: 8.0) / 8.0) * 360.0
+            let rimGradient = AngularGradient(
+                gradient: Gradient(stops: stops),
+                center: .center,
+                startAngle: .degrees(angleDeg),
+                endAngle: .degrees(angleDeg + 360.0)
+            )
+
+            ZStack {
+                // Продлённый 3D-объём при наклоне гироскопа: каждый слой несёт и пиксели края обложки, И синхронно бегущую световую обводку!
+                if tiltMagnitude > 0.012 {
+                    ForEach((1...5).reversed(), id: \.self) { sliceIdx in
+                        let frac = Double(sliceIdx) / 5.0
+                        ZStack {
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .fill(rimGradient)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                        .fill(Color.black.opacity(0.10 + 0.34 * frac))
+                                )
+
+                            coverFaceLayer(innerRadius: innerRadius)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: innerRadius, style: .continuous)
+                                        .fill(Color.black.opacity(0.14 + 0.32 * frac))
+                                )
+                                .padding(2.4)
+                        }
+                        .offset(
+                            x: CGFloat(-tiltY * 0.46 * frac),
+                            y: CGFloat(tiltX * 0.46 * frac)
+                        )
+                        .allowsHitTesting(false)
+                    }
+                }
+
+                // Лицевая грань с живой обводкой и мягким зеркальным бликом гироскопа
+                ZStack {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(rimGradient)
+
+                    coverFaceLayer(innerRadius: innerRadius)
+                        .padding(2.4)
+                }
+                .overlay {
+                    if tiltMagnitude > 0.012 {
+                        let lightCenter = UnitPoint(
+                            x: max(0.05, min(0.95, 0.5 - specularOffset.width * 0.42)),
+                            y: max(0.05, min(0.95, 0.38 - specularOffset.height * 0.42))
+                        )
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        Color.white.opacity(0.15 * tiltMagnitude),
+                                        Color.white.opacity(0.025 * tiltMagnitude),
+                                        Color.clear
+                                    ],
+                                    center: lightCenter,
+                                    startRadius: 8,
+                                    endRadius: coverSide * 0.78
+                                )
+                            )
+                            .allowsHitTesting(false)
+                    }
+                }
+            }
+        }
+        .shadow(color: pureAccent.opacity(isMonochrome ? 0.20 : 0.34), radius: 13, x: 0, y: 0)
+        .shadow(color: pureAccent.opacity(isMonochrome ? 0.24 : 0.38), radius: 3.5, x: 0, y: 0)
+        .animation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.55), value: accentRGB)
+    }
+
+    @ViewBuilder
+    private func coverFaceLayer(innerRadius: CGFloat) -> some View {
+        ZStack {
+            if let out = outgoingImage {
+                Image(decorative: out, scale: 1.0, orientation: .up)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+            }
+
+            if let cur = primaryImage {
+                Image(decorative: cur, scale: 1.0, orientation: .up)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+                    .opacity(outgoingImage != nil ? incomingAlpha : 1.0)
+            } else {
+                uniformBlackPlaceholder
+                    .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+                    .opacity(outgoingImage != nil ? incomingAlpha : 1.0)
+            }
+        }
+        .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+        .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
+        .clipShape(RoundedRectangle(cornerRadius: innerRadius, style: .continuous))
+    }
+
+    private var uniformBlackPlaceholder: some View {
+        ZStack {
+            Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0)
+            Image(systemName: "music.note")
+                .font(.system(size: max(28, coverSide * 0.22), weight: .regular))
+                .foregroundStyle(Color(red: 218.0 / 255.0, green: 218.0 / 255.0, blue: 228.0 / 255.0).opacity(0.60))
+        }
+    }
+}
+
+private enum CoverLivingRimGradientBuilder {
+    static func mixColor(accentRGB: MeshRGB, accentWeight: Double, baseR: Double, baseG: Double, baseB: Double) -> Color {
         let norm = accentRGB.normalizedDouble
         let w = min(1.0, max(0.0, accentWeight))
         let r = norm.r * w + baseR * (1.0 - w)
@@ -1139,48 +1505,59 @@ private struct CoverLivingRimShellView<FaceContent: View>: View {
         return Color(red: r, green: g, blue: b)
     }
 
+    static func buildStops(accentRGB: MeshRGB, isMonochrome: Bool) -> [Gradient.Stop] {
+        if isMonochrome {
+            let graphite = Color(red: 0.14, green: 0.15, blue: 0.17)
+            let silver = Color(red: 0.72, green: 0.74, blue: 0.78)
+            let platinum = Color(red: 0.96, green: 0.97, blue: 0.99)
+            return [
+                .init(color: graphite, location: 0.0 / 360.0),
+                .init(color: silver, location: 55.0 / 360.0),
+                .init(color: platinum, location: 100.0 / 360.0),
+                .init(color: silver, location: 160.0 / 360.0),
+                .init(color: graphite, location: 220.0 / 360.0),
+                .init(color: platinum, location: 280.0 / 360.0),
+                .init(color: graphite, location: 1.0)
+            ]
+        } else {
+            let norm = accentRGB.normalizedDouble
+            let pureAccent = Color(red: norm.r, green: norm.g, blue: norm.b)
+            let dark50 = mixColor(accentRGB: accentRGB, accentWeight: 0.50, baseR: 0.067, baseG: 0.067, baseB: 0.067)
+            let dark48 = mixColor(accentRGB: accentRGB, accentWeight: 0.48, baseR: 0.067, baseG: 0.067, baseB: 0.067)
+            let bright82 = mixColor(accentRGB: accentRGB, accentWeight: 0.82, baseR: 1.0, baseG: 1.0, baseB: 1.0)
+            let bright78 = mixColor(accentRGB: accentRGB, accentWeight: 0.78, baseR: 1.0, baseG: 1.0, baseB: 1.0)
+            return [
+                .init(color: dark50, location: 0.0 / 360.0),
+                .init(color: pureAccent, location: 55.0 / 360.0),
+                .init(color: bright82, location: 100.0 / 360.0),
+                .init(color: pureAccent, location: 160.0 / 360.0),
+                .init(color: dark48, location: 220.0 / 360.0),
+                .init(color: bright78, location: 280.0 / 360.0),
+                .init(color: dark50, location: 1.0)
+            ]
+        }
+    }
+}
+
+/// Живой бегущий световой ободок вокруг обложки (используется в 3D Touch увеличении)
+private struct CoverLivingRimShellView<FaceContent: View>: View {
+    let accentRGB: MeshRGB
+    let cornerRadius: CGFloat
+    let isPaused: Bool
+    @ViewBuilder let faceContent: () -> FaceContent
+
     var body: some View {
         let isMonochrome = HarmonoidMeshEngine.chroma(accentRGB.r, accentRGB.g, accentRGB.b) < 0.09
         let norm = accentRGB.normalizedDouble
         let pureAccent = isMonochrome
             ? Color(red: 0.90, green: 0.91, blue: 0.94)
             : Color(red: norm.r, green: norm.g, blue: norm.b)
-
-        let stops: [Gradient.Stop] = {
-            if isMonochrome {
-                let graphite = Color(red: 0.14, green: 0.15, blue: 0.17)
-                let silver = Color(red: 0.72, green: 0.74, blue: 0.78)
-                let platinum = Color(red: 0.96, green: 0.97, blue: 0.99)
-                return [
-                    .init(color: graphite, location: 0.0 / 360.0),
-                    .init(color: silver, location: 55.0 / 360.0),
-                    .init(color: platinum, location: 100.0 / 360.0),
-                    .init(color: silver, location: 160.0 / 360.0),
-                    .init(color: graphite, location: 220.0 / 360.0),
-                    .init(color: platinum, location: 280.0 / 360.0),
-                    .init(color: graphite, location: 1.0)
-                ]
-            } else {
-                let dark50 = mixColor(accentWeight: 0.50, baseR: 0.067, baseG: 0.067, baseB: 0.067)
-                let dark48 = mixColor(accentWeight: 0.48, baseR: 0.067, baseG: 0.067, baseB: 0.067)
-                let bright82 = mixColor(accentWeight: 0.82, baseR: 1.0, baseG: 1.0, baseB: 1.0)
-                let bright78 = mixColor(accentWeight: 0.78, baseR: 1.0, baseG: 1.0, baseB: 1.0)
-                return [
-                    .init(color: dark50, location: 0.0 / 360.0),
-                    .init(color: pureAccent, location: 55.0 / 360.0),
-                    .init(color: bright82, location: 100.0 / 360.0),
-                    .init(color: pureAccent, location: 160.0 / 360.0),
-                    .init(color: dark48, location: 220.0 / 360.0),
-                    .init(color: bright78, location: 280.0 / 360.0),
-                    .init(color: dark50, location: 1.0)
-                ]
-            }
-        }()
+        let stops = CoverLivingRimGradientBuilder.buildStops(accentRGB: accentRGB, isMonochrome: isMonochrome)
 
         ZStack {
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: isPaused)) { context in
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isPaused)) { context in
                 let t = context.date.timeIntervalSinceReferenceDate
-                let angleDeg = (t.truncatingRemainder(dividingBy: 7.5) / 7.5) * 360.0
+                let angleDeg = (t.truncatingRemainder(dividingBy: 8.0) / 8.0) * 360.0
 
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(
@@ -1194,9 +1571,9 @@ private struct CoverLivingRimShellView<FaceContent: View>: View {
             }
 
             faceContent()
-                .background(Color(red: 0.02, green: 0.02, blue: 0.02))
-                .clipShape(RoundedRectangle(cornerRadius: max(4, cornerRadius - 2.5), style: .continuous))
-                .padding(2.5)
+                .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
+                .clipShape(RoundedRectangle(cornerRadius: max(4, cornerRadius - 2.4), style: .continuous))
+                .padding(2.4)
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .shadow(color: pureAccent.opacity(isMonochrome ? 0.22 : 0.36), radius: 14, x: 0, y: 0)

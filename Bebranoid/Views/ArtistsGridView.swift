@@ -33,6 +33,10 @@ public struct ArtistsGridView: View {
                     .padding(16)
                     Spacer().frame(height: 110)
                 }
+                .refreshable {
+                    appState.haptics.softSelection()
+                    await appState.refreshFullLibraryAndYouTubePlaylists()
+                }
             }
             .navigationTitle("Артисты (\(appState.computedArtists.count))")
             .navigationDestination(for: ArtistSummary.self) { artist in
@@ -50,10 +54,12 @@ private struct ArtistGridCard: View {
         VStack(spacing: 10) {
             ZStack(alignment: .topTrailing) {
                 ArtworkThumbnailView(
+                    track: artist.representativeTrack,
                     localPath: artist.representativeCoverPath,
                     remoteURL: artist.representativeRemoteArtwork,
                     fallbackSeed: artist.displayName,
-                    cornerRadius: 65
+                    cornerRadius: 65,
+                    sizeTier: .albumGrid
                 )
                 .frame(width: 120, height: 120)
                 .clipShape(Circle())
@@ -82,6 +88,14 @@ private struct ArtistGridCard: View {
         .frame(maxWidth: .infinity)
         .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .contextMenu {
+            if let first = artist.tracks.first {
+                Button {
+                    appState.playTrack(first, in: artist.tracks)
+                } label: {
+                    Label("Слушать все", systemImage: "play.fill")
+                }
+            }
+
             Button {
                 appState.toggleFavoriteArtist(artist.normalizedKey)
             } label: {
@@ -90,6 +104,18 @@ private struct ArtistGridCard: View {
                     systemImage: artist.isPinnedFavorite ? "pin.slash" : "pin.fill"
                 )
             }
+        } preview: {
+            LiquidGlassContextPreviewCard(
+                track: artist.representativeTrack,
+                localPath: artist.representativeCoverPath,
+                remoteURL: artist.representativeRemoteArtwork,
+                fallbackSeed: artist.displayName,
+                title: artist.displayName,
+                subtitle: "\(artist.tracks.count) треков • \(artist.albums.count) альбомов",
+                badgeText: artist.isPinnedFavorite ? "ЗАКРЕПЛЁННЫЙ АРТИСТ" : "ИСПОЛНИТЕЛЬ",
+                accentColor: appState.accentSwiftUIColor,
+                isCircularArtwork: true
+            )
         }
     }
 }
@@ -111,10 +137,12 @@ public struct ArtistDetailView: View {
                 VStack(spacing: 16) {
                     VStack(spacing: 10) {
                         ArtworkThumbnailView(
+                            track: artist.representativeTrack,
                             localPath: artist.representativeCoverPath,
                             remoteURL: artist.representativeRemoteArtwork,
                             fallbackSeed: artist.displayName,
-                            cornerRadius: 70
+                            cornerRadius: 70,
+                            sizeTier: .fullPlayer
                         )
                         .frame(width: 140, height: 140)
                         .clipShape(Circle())

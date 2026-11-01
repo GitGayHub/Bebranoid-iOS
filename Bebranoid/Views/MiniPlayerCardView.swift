@@ -108,7 +108,7 @@ public struct MiniPlayerCardView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
 
-                TimelineView(.animation(minimumInterval: 0.12, paused: !appState.isPlaying)) { context in
+                TimelineView(.animation(minimumInterval: 0.20, paused: !appState.isPlaying || appState.isFullScreenPlayerPresented)) { context in
                     let _ = context.date
                     let livePos = appState.isPlaying ? appState.audioEngine.livePlaybackTime : appState.currentTime
                     let effDur = appState.duration > 0 ? appState.duration : track.duration

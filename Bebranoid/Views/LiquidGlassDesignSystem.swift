@@ -15,6 +15,7 @@ public struct LiquidGlassCardModifier: ViewModifier {
     public var tintColor: Color
     public var tintOpacity: Double
     public var isInteractive: Bool
+    public var isSheer: Bool
 
     public func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -22,27 +23,32 @@ public struct LiquidGlassCardModifier: ViewModifier {
         if #available(iOS 26.0, *) {
             content
                 .background {
+                    if !isSheer {
+                        shape
+                            .fill(.ultraThinMaterial)
+                            .opacity(0.36)
+                    }
                     shape
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.10),
+                                    Color.white.opacity(isSheer ? 0.08 : 0.11),
                                     tintColor.opacity(tintOpacity),
-                                    Color.black.opacity(0.08)
+                                    Color.white.opacity(0.02)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                 }
-                .glassEffect(isInteractive ? .regular.interactive() : .regular, in: shape)
+                .glassEffect(isInteractive ? .clear.interactive() : .clear, in: shape)
                 .overlay {
                     shape
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.45),
-                                    tintColor.opacity(0.28),
+                                    Color.white.opacity(0.50),
+                                    tintColor.opacity(0.30),
                                     Color.white.opacity(0.08),
                                     Color.white.opacity(0.24)
                                 ],
@@ -52,7 +58,7 @@ public struct LiquidGlassCardModifier: ViewModifier {
                             lineWidth: 0.9
                         )
                 }
-                .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 10)
+                .shadow(color: Color.black.opacity(isSheer ? 0.12 : 0.22), radius: isSheer ? 10 : 16, x: 0, y: isSheer ? 5 : 8)
         } else {
             fallbackGlassBody(content: content, shape: shape)
         }
@@ -64,15 +70,19 @@ public struct LiquidGlassCardModifier: ViewModifier {
     @ViewBuilder
     private func fallbackGlassBody(content: Content, shape: RoundedRectangle) -> some View {
         content
-            .background(.ultraThinMaterial, in: shape)
             .background {
+                if !isSheer {
+                    shape
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.76)
+                }
                 shape
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.13),
+                                Color.white.opacity(isSheer ? 0.09 : 0.13),
                                 tintColor.opacity(tintOpacity),
-                                Color.black.opacity(0.12)
+                                Color.white.opacity(0.02)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -85,17 +95,17 @@ public struct LiquidGlassCardModifier: ViewModifier {
                         LinearGradient(
                             colors: [
                                 Color.white.opacity(0.48),
-                                tintColor.opacity(0.30),
-                                Color.white.opacity(0.07),
-                                Color.white.opacity(0.24)
+                                tintColor.opacity(0.28),
+                                Color.white.opacity(0.08),
+                                Color.white.opacity(0.22)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 1.0
+                        lineWidth: 0.95
                     )
             }
-            .shadow(color: Color.black.opacity(0.32), radius: 20, x: 0, y: 10)
+            .shadow(color: Color.black.opacity(isSheer ? 0.14 : 0.24), radius: isSheer ? 10 : 18, x: 0, y: isSheer ? 5 : 9)
     }
 }
 
@@ -111,21 +121,24 @@ public struct LiquidGlassCapsuleModifier: ViewModifier {
                 .background {
                     if isProminent {
                         Capsule()
-                            .fill(tintColor.opacity(0.86))
+                            .fill(tintColor.opacity(0.88))
                     } else {
                         Capsule()
-                            .fill(tintColor.opacity(0.10))
+                            .fill(.ultraThinMaterial)
+                            .opacity(0.28)
+                        Capsule()
+                            .fill(tintColor.opacity(0.08))
                     }
                 }
-                .glassEffect(isInteractive ? .regular.interactive() : .regular, in: Capsule())
+                .glassEffect(isInteractive ? .clear.interactive() : .clear, in: Capsule())
                 .overlay {
                     Capsule()
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(isProminent ? 0.55 : 0.42),
+                                    Color.white.opacity(isProminent ? 0.58 : 0.46),
                                     Color.white.opacity(0.08),
-                                    tintColor.opacity(0.25)
+                                    tintColor.opacity(0.26)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
@@ -150,17 +163,17 @@ public struct LiquidGlassCapsuleModifier: ViewModifier {
                     Capsule()
                         .strokeBorder(Color.white.opacity(0.38), lineWidth: 0.85)
                 )
-                .shadow(color: tintColor.opacity(0.38), radius: 10, x: 0, y: 4)
+                .shadow(color: tintColor.opacity(0.34), radius: 10, x: 0, y: 4)
         } else {
             content
-                .background(.ultraThinMaterial, in: Capsule())
+                .background(.ultraThinMaterial.opacity(0.72), in: Capsule())
                 .background(tintColor.opacity(0.08), in: Capsule())
                 .overlay(
                     Capsule()
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.42),
+                                    Color.white.opacity(0.44),
                                     Color.white.opacity(0.10),
                                     Color.white.opacity(0.22)
                                 ],
@@ -183,16 +196,24 @@ public struct LiquidGlassCircleModifier: ViewModifier {
         if #available(iOS 26.0, *) {
             content
                 .background {
-                    Circle()
-                        .fill(isHighlighted ? tintColor.opacity(0.86) : Color.white.opacity(0.06))
+                    if isHighlighted {
+                        Circle()
+                            .fill(tintColor.opacity(0.88))
+                    } else {
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                            .opacity(0.28)
+                        Circle()
+                            .fill(Color.white.opacity(0.06))
+                    }
                 }
-                .glassEffect(.regular.interactive(), in: Circle())
+                .glassEffect(.clear.interactive(), in: Circle())
                 .overlay {
                     Circle()
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.48),
+                                    Color.white.opacity(0.50),
                                     Color.white.opacity(0.10),
                                     tintColor.opacity(0.24)
                                 ],
@@ -213,7 +234,7 @@ public struct LiquidGlassCircleModifier: ViewModifier {
     @ViewBuilder
     private func fallbackCircle(content: Content) -> some View {
         content
-            .background(.ultraThinMaterial, in: Circle())
+            .background(.ultraThinMaterial.opacity(0.72), in: Circle())
             .background(isHighlighted ? tintColor.opacity(0.85) : Color.white.opacity(0.06), in: Circle())
             .overlay(
                 Circle()
@@ -232,41 +253,207 @@ public struct LiquidGlassCircleModifier: ViewModifier {
     }
 }
 
-/// Прозрачный рефракционный фон для всех всплывающих штор (`Sheet`), сквозь который просвечивается живой `HarmonoidMeshView`
+/// Кристально прозрачный рефракционный фон Apple Liquid Glass для всех всплывающих штор (`Sheet`) и модальных меню,
+/// сквозь который отчётливо просвечивается обложка, текст или живой `HarmonoidMeshView` под окном.
 public struct LiquidGlassSheetBackdrop: View {
     public var accentColor: Color
+    public var cornerRadius: CGFloat
 
-    public init(accentColor: Color) {
+    public init(accentColor: Color, cornerRadius: CGFloat = LiquidGlassDesign.sheetCornerRadius) {
         self.accentColor = accentColor
+        self.cornerRadius = cornerRadius
     }
 
     public var body: some View {
+        let sheetShape = UnevenRoundedRectangle(
+            topLeadingRadius: cornerRadius,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: 0,
+            topTrailingRadius: cornerRadius,
+            style: .continuous
+        )
+
+        #if os(iOS) && compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            ZStack {
+                sheetShape
+                    .fill(.ultraThinMaterial)
+                    .opacity(0.42)
+
+                RadialGradient(
+                    colors: [
+                        accentColor.opacity(0.13),
+                        accentColor.opacity(0.03),
+                        Color.clear
+                    ],
+                    center: .topLeading,
+                    startRadius: 8,
+                    endRadius: 360
+                )
+                .clipShape(sheetShape)
+
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.12),
+                        Color.white.opacity(0.02),
+                        Color.clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(sheetShape)
+            }
+            .glassEffect(.clear, in: sheetShape)
+            .overlay {
+                sheetShape
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.56),
+                                accentColor.opacity(0.30),
+                                Color.white.opacity(0.10)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1.0
+                    )
+            }
+            .ignoresSafeArea()
+        } else {
+            fallbackSheetBackdrop(sheetShape: sheetShape)
+        }
+        #else
+        fallbackSheetBackdrop(sheetShape: sheetShape)
+        #endif
+    }
+
+    @ViewBuilder
+    private func fallbackSheetBackdrop(sheetShape: UnevenRoundedRectangle) -> some View {
         ZStack {
-            Rectangle()
+            sheetShape
                 .fill(.ultraThinMaterial)
+                .opacity(0.68)
 
             RadialGradient(
                 colors: [
-                    accentColor.opacity(0.20),
-                    accentColor.opacity(0.05),
+                    accentColor.opacity(0.13),
+                    accentColor.opacity(0.03),
                     Color.clear
                 ],
                 center: .topLeading,
-                startRadius: 12,
-                endRadius: 380
+                startRadius: 8,
+                endRadius: 360
             )
+            .clipShape(sheetShape)
 
             LinearGradient(
                 colors: [
-                    Color.white.opacity(0.10),
-                    Color.clear,
-                    Color.black.opacity(0.22)
+                    Color.white.opacity(0.12),
+                    Color.clear
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
+            .clipShape(sheetShape)
+        }
+        .overlay {
+            sheetShape
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.50),
+                            accentColor.opacity(0.26),
+                            Color.white.opacity(0.08)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1.0
+                )
         }
         .ignoresSafeArea()
+    }
+}
+
+/// Прозрачная стеклянная карточка предпросмотра для нативных контекстных всплывающих меню Apple (`contextMenu ... preview:`).
+public struct LiquidGlassContextPreviewCard: View {
+    public let track: Track?
+    public let localPath: String?
+    public let remoteURL: String?
+    public let fallbackSeed: String
+    public let title: String
+    public let subtitle: String
+    public let badgeText: String?
+    public let accentColor: Color
+    public var isCircularArtwork: Bool = false
+
+    public init(
+        track: Track? = nil,
+        localPath: String? = nil,
+        remoteURL: String? = nil,
+        fallbackSeed: String,
+        title: String,
+        subtitle: String,
+        badgeText: String? = nil,
+        accentColor: Color,
+        isCircularArtwork: Bool = false
+    ) {
+        self.track = track
+        self.localPath = localPath
+        self.remoteURL = remoteURL
+        self.fallbackSeed = fallbackSeed
+        self.title = title
+        self.subtitle = subtitle
+        self.badgeText = badgeText
+        self.accentColor = accentColor
+        self.isCircularArtwork = isCircularArtwork
+    }
+
+    public var body: some View {
+        HStack(spacing: 14) {
+            ArtworkThumbnailView(
+                track: track,
+                localPath: localPath,
+                remoteURL: remoteURL,
+                fallbackSeed: fallbackSeed,
+                cornerRadius: isCircularArtwork ? 36 : 14,
+                sizeTier: .albumGrid
+            )
+            .frame(width: 72, height: 72)
+            .clipShape(
+                isCircularArtwork
+                    ? AnyShape(Circle())
+                    : AnyShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            )
+            .shadow(color: .black.opacity(0.28), radius: 10, x: 0, y: 5)
+
+            VStack(alignment: .leading, spacing: 4) {
+                if let badgeText, !badgeText.isEmpty {
+                    Text(badgeText)
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(accentColor.opacity(0.22), in: Capsule())
+                        .foregroundStyle(accentColor)
+                }
+
+                Text(title)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                Text(subtitle)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 4)
+        }
+        .padding(16)
+        .frame(width: 310, alignment: .leading)
+        .liquidGlassCard(cornerRadius: 24, tint: accentColor, tintOpacity: 0.10, isInteractive: false, isSheer: false)
     }
 }
 
@@ -275,14 +462,16 @@ public extension View {
         cornerRadius: CGFloat = LiquidGlassDesign.cardCornerRadius,
         tint: Color = .white,
         tintOpacity: Double = 0.06,
-        isInteractive: Bool = false
+        isInteractive: Bool = false,
+        isSheer: Bool = false
     ) -> some View {
         modifier(
             LiquidGlassCardModifier(
                 cornerRadius: cornerRadius,
                 tintColor: tint,
                 tintOpacity: tintOpacity,
-                isInteractive: isInteractive
+                isInteractive: isInteractive,
+                isSheer: isSheer
             )
         )
     }

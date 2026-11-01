@@ -1,14 +1,36 @@
 import Foundation
 
-/// Менеджер фоновых загрузок `URLSession` (`background` configuration) и пакетного кеширования треков.
+/// Менеджер загрузок `URLSession` с автоматической защитой совместимости с LiveContainer / Sideload окружениями
+/// (внутри LiveContainer фоновый идентификатор чужого Bundle ID может приводить к принудительному завершению со стороны `nsurlsessiond`).
 public final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     public static let shared = BackgroundDownloadManager()
 
-    private lazy var backgroundSession: URLSession = {
-        let config = URLSessionConfiguration.background(withIdentifier: "com.bebranoid.ios.background-downloads")
-        config.isDiscretionary = false
-        config.sessionSendsLaunchEvents = true
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    /// Определяет, запущено ли приложение внутри хост-процесса LiveContainer
+    public static var isRunningInsideLiveContainer: Bool {
+        let env = ProcessInfo.processInfo.environment
+        if env["LC_HOME_PATH"] != nil || env["LIVECONTAINER"] != nil {
+            return true
+        }
+        if let bundleId = Bundle.main.bundleIdentifier,
+           bundleId.lowercased().contains("livecontainer") {
+            return true
+        }
+        return false
+    }
+
+    private lazy var downloadSession: URLSession = {
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.bebranoid.ios"
+        if Self.isRunningInsideLiveContainer || bundleId != "com.bebranoid.ios" {
+            let config = URLSessionConfiguration.default
+            config.waitsForConnectivity = true
+            config.timeoutIntervalForResource = 300
+            return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        } else {
+            let config = URLSessionConfiguration.background(withIdentifier: "\(bundleId).background-downloads")
+            config.isDiscretionary = false
+            config.sessionSendsLaunchEvents = true
+            return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        }
     }()
 
     private let lock = NSLock()
@@ -19,7 +41,7 @@ public final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelega
     }
 
     public func scheduleBackgroundDownload(from remoteURL: URL, to destinationURL: URL) {
-        let task = backgroundSession.downloadTask(with: remoteURL)
+        let task = downloadSession.downloadTask(with: remoteURL)
         lock.lock()
         destinationByTaskId[task.taskIdentifier] = destinationURL
         lock.unlock()

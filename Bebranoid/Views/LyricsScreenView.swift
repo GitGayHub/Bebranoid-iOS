@@ -330,7 +330,7 @@ public struct LyricsScreenView: View {
         let maxDur = max(1.0, effectiveDuration)
 
         return VStack(spacing: 12) {
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !appState.isPlaying && !isDraggingSlider)) { context in
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !appState.isPlaying && !isDraggingSlider)) { context in
                 let _ = context.date
                 let livePos = appState.isPlaying ? appState.audioEngine.livePlaybackTime : appState.currentTime
                 let rawPos = isDraggingSlider ? draggedTime : livePos

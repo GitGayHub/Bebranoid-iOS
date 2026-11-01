@@ -64,8 +64,49 @@ struct SingleLineSyllableRowLayout: Layout {
     }
 }
 
-/// Расчёт точного коэффициента масштабирования (`fitScale`), чтобы любая длинная строка гарантированно помещалась в **1 строку**
+/// Расчёт и потокобезопасное кэширование точного коэффициента масштабирования (`fitScale`),
+/// чтобы любая длинная строка гарантированно помещалась в **1 строку** без повторных замеров `NSString.size` на каждом кадре!
 enum SingleLineLyricsFitHelper {
+    private static let cacheLock = NSLock()
+    private static var scaleCache: [String: CGFloat] = [:]
+
+    static func fitScaleForText(
+        _ text: String,
+        baseFontSize: CGFloat,
+        availableWidth: CGFloat
+    ) -> CGFloat {
+        guard !text.isEmpty, availableWidth > 40 else { return 1.0 }
+        let cacheKey = "txt|\(text)|\(Int(baseFontSize * 10))|\(Int(availableWidth))"
+        cacheLock.lock()
+        if let hit = scaleCache[cacheKey] {
+            cacheLock.unlock()
+            return hit
+        }
+        cacheLock.unlock()
+
+        #if canImport(UIKit)
+        let baseSysFont = UIFont.systemFont(ofSize: baseFontSize, weight: .bold)
+        let roundedFont: UIFont = {
+            if let desc = baseSysFont.fontDescriptor.withDesign(.rounded) {
+                return UIFont(descriptor: desc, size: baseFontSize)
+            }
+            return baseSysFont
+        }()
+        let measured = ceil((text as NSString).size(withAttributes: [.font: roundedFont]).width) * 1.045 + 4.0
+        #else
+        let measured = CGFloat(text.count) * baseFontSize * 0.58 + 6.0
+        #endif
+
+        let result: CGFloat = (measured <= availableWidth) ? 1.0 : max(0.30, min(1.0, availableWidth / measured))
+        cacheLock.lock()
+        if scaleCache.count > 2500 {
+            scaleCache.removeAll(keepingCapacity: true)
+        }
+        scaleCache[cacheKey] = result
+        cacheLock.unlock()
+        return result
+    }
+
     static func fitScaleForSyllables(
         _ syllables: [BeautifulSyllableMetadata],
         baseFontSize: CGFloat,
@@ -73,6 +114,13 @@ enum SingleLineLyricsFitHelper {
         availableWidth: CGFloat
     ) -> CGFloat {
         guard !syllables.isEmpty, availableWidth > 40 else { return 1.0 }
+        let cacheKey = "syl|\(syllables.first?.id ?? "")|\(syllables.count)|\(Int(baseFontSize * 10))|\(Int(availableWidth))"
+        cacheLock.lock()
+        if let hit = scaleCache[cacheKey] {
+            cacheLock.unlock()
+            return hit
+        }
+        cacheLock.unlock()
 
         #if canImport(UIKit)
         let baseSysFont = UIFont.systemFont(ofSize: baseFontSize, weight: .bold)
@@ -95,17 +143,24 @@ enum SingleLineLyricsFitHelper {
         let totalNaturalWidth = CGFloat(totalChars) * baseFontSize * 0.58 + spacingsWidth + 6.0
         #endif
 
-        if totalNaturalWidth <= availableWidth {
-            return 1.0
+        let result: CGFloat = (totalNaturalWidth <= availableWidth)
+            ? 1.0
+            : max(0.30, min(1.0, availableWidth / totalNaturalWidth))
+
+        cacheLock.lock()
+        if scaleCache.count > 2500 {
+            scaleCache.removeAll(keepingCapacity: true)
         }
-        return max(0.30, min(1.0, availableWidth / totalNaturalWidth))
+        scaleCache[cacheKey] = result
+        cacheLock.unlock()
+        return result
     }
 }
 
 #if canImport(UIKit)
-/// Нативный 120 Гц ProMotion-движок прокрутки `UIScrollView` на базе аналитической пружины `Spring`.
-/// Исключает ступенчатые рывки `ScrollViewProxy.scrollTo`, сохраняет инерцию скорости при быстрых переходах строк
-/// и мгновенно уступает управление пальцу пользователя при касании экрана.
+/// Нативный ProMotion-движок прокрутки `UIScrollView` на базе аналитической пружины `Spring`.
+/// Автоматически усыпляет `CADisplayLink` (`isPaused = true`) между переходами строк (0% расхода CPU в покое),
+/// обеспечивает сливочное перетекание между строками и 100% безотказный возврат по кнопке «Синхр.».
 struct LyricsSmoothScrollBridge: UIViewRepresentable {
     let targetNodeId: String?
     let nodeFrames: [String: CGRect]
@@ -134,6 +189,7 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.isUserBrowsingBinding = $isUserBrowsing
         coordinator.isPlainLyrics = isPlainLyrics
+        let framesCountChanged = coordinator.nodeFrames.count != nodeFrames.count
         coordinator.nodeFrames = nodeFrames
         coordinator.attachIfNeeded(from: uiView)
 
@@ -142,6 +198,7 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
             coordinator.lastDocumentSignature = documentSignature
             coordinator.lastTargetNodeId = targetNodeId
             coordinator.lastSyncTriggerToken = syncTriggerToken
+            coordinator.hasPerformedInitialPositioning = false
             coordinator.scrollToNode(id: targetNodeId, animated: false)
             return
         }
@@ -149,7 +206,7 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
         if coordinator.lastSyncTriggerToken != syncTriggerToken {
             coordinator.lastSyncTriggerToken = syncTriggerToken
             coordinator.lastTargetNodeId = targetNodeId
-            coordinator.scrollToNode(id: targetNodeId, animated: true)
+            coordinator.forceResync(to: targetNodeId)
             return
         }
 
@@ -158,8 +215,8 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
             if !isUserBrowsing && !isPlainLyrics {
                 coordinator.scrollToNode(id: targetNodeId, animated: true)
             }
-        } else if !isUserBrowsing && !isPlainLyrics && !coordinator.hasPerformedInitialPositioning {
-            coordinator.scrollToNode(id: targetNodeId, animated: false)
+        } else if !isUserBrowsing && !isPlainLyrics && (!coordinator.hasPerformedInitialPositioning || framesCountChanged) {
+            coordinator.scrollToNode(id: targetNodeId, animated: coordinator.hasPerformedInitialPositioning)
         }
     }
 
@@ -189,10 +246,13 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
         var hasPerformedInitialPositioning: Bool = false
 
         private weak var scrollView: UIScrollView?
+        private var hasAttachedPanTarget: Bool = false
         private var displayLink: CADisplayLink?
         private var lastTimestamp: CFTimeInterval = 0
-        private var spring = Spring(initialValue: 0.0, dampingRatio: 0.96, frequency: 1.38)
+        // Мягкая сливочная пружина Apple Music (`dampingRatio: 0.98`, `frequency: 1.08`) без резких рывков
+        private var spring = Spring(initialValue: 0.0, dampingRatio: 0.98, frequency: 1.08)
         private var wasUserTouchingLastFrame: Bool = false
+        private var ignoreResidualDecelerationUntil: CFTimeInterval = 0
         private var autoResumeTask: Task<Void, Never>? = nil
 
         init(isUserBrowsing: Binding<Bool>) {
@@ -202,18 +262,25 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
 
         func attachIfNeeded(from view: UIView) {
             if let existing = scrollView, existing.window != nil {
-                ensureDisplayLinkRunning()
+                ensureDisplayLinkCreated()
                 return
             }
             var cursor: UIView? = view.superview
             while let current = cursor {
                 if let found = current as? UIScrollView {
+                    if scrollView !== found {
+                        hasAttachedPanTarget = false
+                    }
                     scrollView = found
+                    if !hasAttachedPanTarget {
+                        found.panGestureRecognizer.addTarget(self, action: #selector(handleScrollPanGesture(_:)))
+                        hasAttachedPanTarget = true
+                    }
                     let currentY = Double(found.contentOffset.y)
                     spring.setGoal(currentY, replaceVelocity: true)
-                    ensureDisplayLinkRunning()
-                    if !hasPerformedInitialPositioning, let target = lastTargetNodeId {
-                        scrollToNode(id: target, animated: false)
+                    ensureDisplayLinkCreated()
+                    if !hasPerformedInitialPositioning {
+                        scrollToNode(id: lastTargetNodeId, animated: false)
                     }
                     return
                 }
@@ -221,16 +288,73 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
             }
         }
 
-        private func computeClampedOffsetY(for nodeId: String, in sv: UIScrollView) -> CGFloat? {
-            guard let rect = nodeFrames[nodeId], sv.bounds.height > 20 else { return nil }
-            let desiredY = rect.midY - sv.bounds.height * 0.34
+        @objc private func handleScrollPanGesture(_ gesture: UIPanGestureRecognizer) {
+            guard !isPlainLyrics else { return }
+            switch gesture.state {
+            case .began, .changed:
+                ignoreResidualDecelerationUntil = 0
+                autoResumeTask?.cancel()
+                if !isUserBrowsingBinding.wrappedValue {
+                    isUserBrowsingBinding.wrappedValue = true
+                }
+                wakeDisplayLink()
+            default:
+                wakeDisplayLink()
+            }
+        }
+
+        private func computeClampedOffsetY(for nodeId: String?, in sv: UIScrollView) -> CGFloat? {
+            guard sv.bounds.height > 20 else { return nil }
             let minY = -sv.adjustedContentInset.top
             let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
-            return min(maxY, max(minY, desiredY))
+
+            if let nodeId, let rect = nodeFrames[nodeId] {
+                let desiredY = rect.midY - sv.bounds.height * 0.34
+                return min(maxY, max(minY, desiredY))
+            }
+            if nodeId == nil && !nodeFrames.isEmpty {
+                return minY
+            }
+            return nil
+        }
+
+        /// Гарантированный возврат к активной строке по кнопке «Синхр.»:
+        /// мгновенно гасит остаточную инерцию `UIScrollView`, блокирует ложный `isDecelerating` и плавно доводит пружину до цели!
+        func forceResync(to id: String?) {
+            guard !isPlainLyrics, let sv = scrollView else { return }
+            autoResumeTask?.cancel()
+            wasUserTouchingLastFrame = false
+            ignoreResidualDecelerationUntil = CACurrentMediaTime() + 0.65
+
+            // Мгновенно останавливаем нативную инерцию UIScrollView в текущей точке
+            let frozenOffset = sv.contentOffset
+            sv.setContentOffset(frozenOffset, animated: false)
+
+            if isUserBrowsingBinding.wrappedValue {
+                isUserBrowsingBinding.wrappedValue = false
+            }
+
+            let minY = -sv.adjustedContentInset.top
+            let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
+            let goalY: CGFloat = {
+                if let resolved = computeClampedOffsetY(for: id, in: sv) {
+                    return resolved
+                }
+                if let earliest = nodeFrames.values.min(by: { $0.minY < $1.minY }) {
+                    return min(maxY, max(minY, earliest.midY - sv.bounds.height * 0.34))
+                }
+                return minY
+            }()
+
+            hasPerformedInitialPositioning = true
+            spring.position = Double(frozenOffset.y)
+            spring.velocity = 0.0
+            spring.setGoal(Double(goalY), replaceVelocity: false)
+            wakeDisplayLink()
         }
 
         func scrollToNode(id: String?, animated: Bool) {
-            guard !isPlainLyrics, let id, let sv = scrollView else { return }
+            guard !isPlainLyrics, let sv = scrollView else { return }
             guard let goalY = computeClampedOffsetY(for: id, in: sv) else { return }
             hasPerformedInitialPositioning = true
 
@@ -240,38 +364,52 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
                 return
             }
 
-            // Сохраняем текущую инерцию `spring.velocity`, если скролл уже плавно скользит к предыдущей строке!
             if spring.sleeping {
                 spring.position = Double(sv.contentOffset.y)
                 spring.velocity = 0.0
             }
             spring.setGoal(Double(goalY), replaceVelocity: false)
-            ensureDisplayLinkRunning()
+            wakeDisplayLink()
         }
 
-        private func ensureDisplayLinkRunning() {
+        private func ensureDisplayLinkCreated() {
             guard displayLink == nil else { return }
             let proxy = WeakDisplayLinkTarget(coordinator: self)
             let link = CADisplayLink(target: proxy, selector: #selector(WeakDisplayLinkTarget.step(_:)))
             if #available(iOS 15.0, *) {
                 link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
             }
+            link.isPaused = false
             link.add(to: .main, forMode: .common)
             lastTimestamp = 0
             displayLink = link
         }
 
+        private func wakeDisplayLink() {
+            ensureDisplayLinkCreated()
+            if displayLink?.isPaused == true {
+                lastTimestamp = 0
+                displayLink?.isPaused = false
+            }
+        }
+
         fileprivate func handleFrame(_ link: CADisplayLink) {
-            guard let sv = scrollView else { return }
+            guard let sv = scrollView else {
+                link.isPaused = true
+                return
+            }
+            if isPlainLyrics {
+                link.isPaused = true
+                return
+            }
+
             let now = link.timestamp
             let dt: Double = (lastTimestamp > 0) ? min(0.05, max(1.0 / 240.0, now - lastTimestamp)) : (1.0 / 120.0)
             lastTimestamp = now
 
-            if isPlainLyrics {
-                return
-            }
+            let effectiveDecelerating = sv.isDecelerating && (CACurrentMediaTime() >= ignoreResidualDecelerationUntil)
+            let userActive = sv.isTracking || sv.isDragging || effectiveDecelerating
 
-            let userActive = sv.isTracking || sv.isDragging || sv.isDecelerating
             if userActive {
                 wasUserTouchingLastFrame = true
                 autoResumeTask?.cancel()
@@ -288,18 +426,27 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
                 scheduleIdleAutoResume()
             }
 
-            guard !isUserBrowsingBinding.wrappedValue else { return }
+            if isUserBrowsingBinding.wrappedValue {
+                // В режиме ручного просмотра пальцем (после остановки инерции) усыпляем CADisplayLink до авто-возврата или нажатия «Синхр.»!
+                link.isPaused = true
+                lastTimestamp = 0
+                return
+            }
 
-            // Подстраиваем цель на лету, если `contentSize` обновился после рендера перевода
-            if let activeId = lastTargetNodeId, let updatedGoal = computeClampedOffsetY(for: activeId, in: sv) {
+            if let updatedGoal = computeClampedOffsetY(for: lastTargetNodeId, in: sv) {
                 if abs(Double(updatedGoal) - spring.finalPosition) > 0.5 {
                     spring.setGoal(Double(updatedGoal), replaceVelocity: false)
                 }
             }
 
-            guard !spring.sleeping else { return }
+            if spring.sleeping {
+                link.isPaused = true
+                lastTimestamp = 0
+                return
+            }
+
             let nextY = CGFloat(spring.update(deltaTime: dt))
-            if abs(sv.contentOffset.y - nextY) > 0.08 {
+            if abs(sv.contentOffset.y - nextY) > 0.06 {
                 sv.contentOffset = CGPoint(x: sv.contentOffset.x, y: nextY)
             }
         }
@@ -310,16 +457,17 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
                 try? await Task.sleep(nanoseconds: 4_200_000_000)
                 guard !Task.isCancelled, let self else { return }
                 if self.isUserBrowsingBinding.wrappedValue {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                        self.isUserBrowsingBinding.wrappedValue = false
-                    }
-                    self.scrollToNode(id: self.lastTargetNodeId, animated: true)
+                    self.forceResync(to: self.lastTargetNodeId)
                 }
             }
         }
 
         func teardown() {
             autoResumeTask?.cancel()
+            if let sv = scrollView, hasAttachedPanTarget {
+                sv.panGestureRecognizer.removeTarget(self, action: #selector(handleScrollPanGesture(_:)))
+            }
+            hasAttachedPanTarget = false
             displayLink?.invalidate()
             displayLink = nil
             scrollView = nil

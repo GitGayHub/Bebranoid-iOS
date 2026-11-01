@@ -1,12 +1,15 @@
 import Foundation
 
 public struct Album: Identifiable, Hashable, Sendable {
-    public var id: String { name }
+    public var id: String { linkedPlaylistId.map { "playlist_\($0)" } ?? name }
     public var name: String
     public var artist: String
     public var tracks: [Track]
     public var customCoverPath: String?
+    public var explicitRemoteArtworkURL: String?
     public var isFavoriteVirtualAlbum: Bool
+    public var isLikedFavorite: Bool
+    public var linkedPlaylistId: String?
     public var isHidden: Bool
     public var isExcludedFromShuffle: Bool
 
@@ -15,7 +18,10 @@ public struct Album: Identifiable, Hashable, Sendable {
         artist: String,
         tracks: [Track],
         customCoverPath: String? = nil,
+        explicitRemoteArtworkURL: String? = nil,
         isFavoriteVirtualAlbum: Bool = false,
+        isLikedFavorite: Bool = false,
+        linkedPlaylistId: String? = nil,
         isHidden: Bool = false,
         isExcludedFromShuffle: Bool = false
     ) {
@@ -23,9 +29,21 @@ public struct Album: Identifiable, Hashable, Sendable {
         self.artist = artist
         self.tracks = tracks
         self.customCoverPath = customCoverPath
+        self.explicitRemoteArtworkURL = explicitRemoteArtworkURL
         self.isFavoriteVirtualAlbum = isFavoriteVirtualAlbum
+        self.isLikedFavorite = isLikedFavorite
+        self.linkedPlaylistId = linkedPlaylistId
         self.isHidden = isHidden
         self.isExcludedFromShuffle = isExcludedFromShuffle
+    }
+
+    public var representativeTrack: Track? {
+        tracks.first(where: {
+            ($0.coverPath?.isEmpty == false) ||
+            ($0.coverFileId?.isEmpty == false) ||
+            ($0.remoteArtworkURL?.isEmpty == false) ||
+            ($0.youtubeVideoId?.isEmpty == false)
+        }) ?? tracks.first
     }
 
     public var coverPath: String? {
@@ -44,7 +62,10 @@ public struct Album: Identifiable, Hashable, Sendable {
     }
 
     public var remoteArtworkURL: String? {
-        tracks.first(where: { $0.remoteArtworkURL != nil })?.remoteArtworkURL
+        if let explicitRemoteArtworkURL, !explicitRemoteArtworkURL.isEmpty {
+            return explicitRemoteArtworkURL
+        }
+        return tracks.first(where: { $0.remoteArtworkURL != nil })?.remoteArtworkURL
     }
 
     public var totalDuration: Double {
@@ -72,6 +93,16 @@ public struct ArtistSummary: Identifiable, Hashable, Sendable {
         self.tracks = tracks
         self.albums = albums
         self.isPinnedFavorite = isPinnedFavorite
+    }
+
+    /// Первый трек артиста с наибольшим шансом иметь реальную обложку (`Artists.jsx` `artist.tracks[0]` + smart fallback)
+    public var representativeTrack: Track? {
+        tracks.first(where: {
+            ($0.coverPath?.isEmpty == false) ||
+            ($0.coverFileId?.isEmpty == false) ||
+            ($0.remoteArtworkURL?.isEmpty == false) ||
+            ($0.youtubeVideoId?.isEmpty == false)
+        }) ?? tracks.first
     }
 
     public var representativeCoverPath: String? {

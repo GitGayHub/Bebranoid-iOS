@@ -425,11 +425,8 @@ public struct TelegramAuthView: View {
 
     public var body: some View {
         ZStack {
-            // Рефракционная стеклянная подложка Liquid Glass без закрытия по тапу мимо или свайпу вниз
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay(Color.black.opacity(0.32))
-                .ignoresSafeArea()
+            // Прозрачная рефракционная подложка Apple Liquid Glass — то, что под менюшкой, просвечивается насквозь
+            LiquidGlassSheetBackdrop(accentColor: appState.accentSwiftUIColor, cornerRadius: 0)
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
@@ -574,7 +571,7 @@ public struct TelegramAuthView: View {
                         }
                     }
                     .padding(22)
-                    .liquidGlassCard(cornerRadius: 28, tint: appState.accentSwiftUIColor, tintOpacity: 0.10)
+                    .liquidGlassCard(cornerRadius: 28, tint: appState.accentSwiftUIColor, tintOpacity: 0.08, isSheer: true)
                     .padding(.horizontal, 18)
 
                     Spacer(minLength: 32)

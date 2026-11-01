@@ -358,6 +358,9 @@ public final class TelegramClientService: @unchecked Sendable {
     private var hasLoadedInitialChatLists = false
     private var activeAudioDownloadsCount: Int = 0
     private var lastCoverDownloadTime: TimeInterval = 0
+    private var lastScanProgressPostTime: TimeInterval = 0
+    private var lanBridgeUnreachableUntil: TimeInterval = 0
+    private var activeLANBridgeHost: String? = nil
 
     private static let supportedAudioExtensions: Set<String> = [
         "flac", "alac", "wav", "m4a", "mp3", "aac", "ogg", "opus", "aiff", "wv"
@@ -1242,15 +1245,17 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
-        await loadAllPages(chatList: ["@type": "chatListMain"], maxPages: 30, timeout: 10.0)
-        await loadAllPages(chatList: ["@type": "chatListArchive"], maxPages: 25, timeout: 8.0)
+        // Ограничиваем предзагрузку списков чатов компактным числом страниц (до 400 основных + 200 архивных),
+        // чтобы синхронизация облака стартовала за < 1 с и никогда не зависала на десятках последовательных `loadChats`!
+        await loadAllPages(chatList: ["@type": "chatListMain"], maxPages: 4, timeout: 3.5)
+        await loadAllPages(chatList: ["@type": "chatListArchive"], maxPages: 2, timeout: 3.0)
 
-        let folderIds = withLock { Array(discoveredChatFolderIds) }
+        let folderIds = withLock { Array(discoveredChatFolderIds.prefix(4)) }
         for fid in folderIds {
             await loadAllPages(
                 chatList: ["@type": "chatListFolder", "chat_folder_id": fid],
-                maxPages: 12,
-                timeout: 6.0
+                maxPages: 2,
+                timeout: 2.5
             )
         }
 
@@ -1570,33 +1575,35 @@ public final class TelegramClientService: @unchecked Sendable {
             orderedIds.insert(pid, at: 0)
         }
 
-        // ВАЖНО (`electron/main.js` строки 4541–4544): возвращаем ТОЛЬКО реальные чаты аккаунта без фантомных заглушек!
+        // ВАЖНО (`electron/main.js` строки 4541–4544): сначала мгновенно берём уже известные TDLib чаты из `discoveredChatsById`,
+        // а RPC `getChat` вызываем только для недостающих ID (без сотни медленных `getSupergroup`), исключая подвисания синхронизации!
         let groupChatIds = orderedIds.filter { $0 < 0 }
+        let cachedChatsSnapshot = withLock { discoveredChatsById }
         var summaries: [TelegramChatSummary] = []
         var seenChatIds = Set<String>()
+        var rpcLookupsUsed = 0
 
-        for cid in groupChatIds.prefix(220) {
+        for cid in groupChatIds.prefix(120) {
             let chatIdStr = String(cid)
             guard !seenChatIds.contains(chatIdStr) else { continue }
-            guard let chatDict = try? await bridge.sendAsync([
-                "@type": "getChat",
-                "chat_id": cid
-            ], timeoutSeconds: 4.0), chatDict["id"] != nil else {
-                continue
+
+            let resolvedTitle: String?
+            if let fastCached = cachedChatsSnapshot[cid], fastCached.isGroupOrChannel, !fastCached.title.isEmpty {
+                resolvedTitle = fastCached.title
+            } else if rpcLookupsUsed < 40,
+                      let chatDict = try? await bridge.sendAsync([
+                          "@type": "getChat",
+                          "chat_id": cid
+                      ], timeoutSeconds: 2.2),
+                      chatDict["id"] != nil {
+                rpcLookupsUsed += 1
+                resolvedTitle = (chatDict["title"] as? String) ?? "Chat \(cid)"
+            } else {
+                resolvedTitle = nil
             }
 
-            // Отсеиваем фантомные супергруппы со статусом Left/Banned
-            if let typeDict = chatDict["type"] as? [String: Any],
-               (typeDict["@type"] as? String) == "chatTypeSupergroup",
-               let sgId = Self.extractInt64(from: typeDict["supergroup_id"]),
-               let sg = try? await bridge.sendAsync(["@type": "getSupergroup", "supergroup_id": sgId], timeoutSeconds: 3.0),
-               let statusType = (sg["status"] as? [String: Any])?["@type"] as? String,
-               (statusType == "chatMemberStatusLeft" || statusType == "chatMemberStatusBanned") {
-                continue
-            }
-
+            guard let title = resolvedTitle else { continue }
             seenChatIds.insert(chatIdStr)
-            let title = (chatDict["title"] as? String) ?? "Chat \(cid)"
             let lowerTitle = title.lowercased()
             let isForum = lowerTitle.contains("androsend") && !lowerTitle.contains("архив") && !lowerTitle.contains("📦")
             let isArchive = AppConfig.isArchiveChatId(chatIdStr, configuredArchiveChatId: configuredArchiveChatId)
@@ -1622,7 +1629,7 @@ public final class TelegramClientService: @unchecked Sendable {
         var offsetMessageId: Int64 = 0
         var offsetThreadId: Int64 = 0
 
-        for _ in 0..<20 {
+        for _ in 0..<12 {
             guard let resp = try? await bridge.sendAsync([
                 "@type": "getForumTopics",
                 "chat_id": chatId,
@@ -1632,7 +1639,7 @@ public final class TelegramClientService: @unchecked Sendable {
                 "offset_message_thread_id": offsetThreadId,
                 "offset_forum_topic_id": offsetThreadId,
                 "limit": 100
-            ], timeoutSeconds: 12.0),
+            ], timeoutSeconds: 5.0),
                   let topics = resp["topics"] as? [[String: Any]],
                   !topics.isEmpty else {
                 break
@@ -1934,29 +1941,31 @@ public final class TelegramClientService: @unchecked Sendable {
         var rawMessages: [RawTelegramAudioMessage] = []
         var seenMessageIds = Set<Int>()
 
-        // 1. Сканируем нативные аудиосообщения (`searchMessagesFilterAudio`)
+        // 1. Сканируем нативные аудиосообщения (`searchMessagesFilterAudio`) с жёсткой защитой от зацикливания пагинации
         let audioScan = try await searchMessagesWithFilter(
             chatId: numericChatId,
             chatTitle: resolvedTitle,
             filterType: "searchMessagesFilterAudio",
             forumTopics: forumTopics,
-            maxMessages: maxTracks
+            maxMessages: maxTracks,
+            maxPages: 60
         )
         for msg in audioScan.messages where !seenMessageIds.contains(msg.messageId) {
             seenMessageIds.insert(msg.messageId)
             rawMessages.append(msg)
         }
 
-        // 2. Как в `electron/main.js` (строки 5093–5101): сканируем документы ТОЛЬКО если аудио-поиск не покрыл весь `total_count` или вернул 0 треков
-        let audioComplete = (audioScan.totalCount > 0 && audioScan.totalFetched >= audioScan.totalCount)
-        if !audioComplete || audioScan.totalFetched == 0 {
-            let docScan = try await searchMessagesWithFilter(
-                chatId: numericChatId,
-                chatTitle: resolvedTitle,
-                filterType: "searchMessagesFilterDocument",
-                forumTopics: forumTopics,
-                maxMessages: maxTracks
-            )
+        // 2. Компактный проход по документам (FLAC/WAV без аудио-тега): строго ограничен по страницам (`maxPages: 8`),
+        // чтобы не сканировать бесконечно тысячи не-аудио файлов при `total_count == -1`!
+        let docMaxPages = audioScan.messages.isEmpty ? 20 : 6
+        if let docScan = try? await searchMessagesWithFilter(
+            chatId: numericChatId,
+            chatTitle: resolvedTitle,
+            filterType: "searchMessagesFilterDocument",
+            forumTopics: forumTopics,
+            maxMessages: maxTracks,
+            maxPages: docMaxPages
+        ) {
             for msg in docScan.messages where !seenMessageIds.contains(msg.messageId) {
                 seenMessageIds.insert(msg.messageId)
                 rawMessages.append(msg)
@@ -2020,28 +2029,52 @@ public final class TelegramClientService: @unchecked Sendable {
         chatTitle: String,
         filterType: String,
         forumTopics: [Int: String],
-        maxMessages: Int
+        maxMessages: Int,
+        maxPages: Int = 60
     ) async throws -> (messages: [RawTelegramAudioMessage], totalFetched: Int, totalCount: Int) {
         var results: [RawTelegramAudioMessage] = []
         var fromMessageId: Int64 = 0
         var totalFetched: Int = 0
         var totalCount: Int = 0
+        var seenRawMsgIds = Set<Int64>()
+        var pageIndex = 0
 
-        while results.count < maxMessages {
-            let progressLabel = totalCount > 0
-                ? "Сканирование \(chatTitle): \(totalFetched) / \(totalCount) песен"
-                : "Сканирование \(chatTitle): \(results.count) песен"
-            updateScanProgress(progressLabel)
+        while results.count < maxMessages && pageIndex < maxPages {
+            try Task.checkCancellation()
+            pageIndex += 1
 
-            let resp = try await bridge.sendAsync([
-                "@type": "searchChatMessages",
-                "chat_id": chatId,
-                "query": "",
-                "from_message_id": fromMessageId,
-                "offset": 0,
-                "limit": 100,
-                "filter": ["@type": filterType]
-            ], timeoutSeconds: 20.0)
+            let nowUptime = ProcessInfo.processInfo.systemUptime
+            let shouldPostProgress = withLock { () -> Bool in
+                if nowUptime - lastScanProgressPostTime >= 0.25 || pageIndex == 1 {
+                    lastScanProgressPostTime = nowUptime
+                    return true
+                }
+                return false
+            }
+            if shouldPostProgress {
+                let progressLabel = totalCount > 0
+                    ? "Сканирование \(chatTitle): \(min(totalFetched, totalCount)) / \(totalCount) песен"
+                    : "Сканирование \(chatTitle): \(results.count) песен"
+                updateScanProgress(progressLabel)
+            }
+
+            let resp: [String: Any]
+            do {
+                resp = try await bridge.sendAsync([
+                    "@type": "searchChatMessages",
+                    "chat_id": chatId,
+                    "query": "",
+                    "from_message_id": fromMessageId,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": ["@type": filterType]
+                ], timeoutSeconds: 8.0)
+            } catch {
+                if pageIndex > 1 {
+                    break
+                }
+                throw error
+            }
 
             if let srvTotal = Self.extractInt(from: resp["total_count"]), srvTotal > 0 {
                 totalCount = srvTotal
@@ -2053,9 +2086,12 @@ public final class TelegramClientService: @unchecked Sendable {
 
             totalFetched += messages.count
             var lastMsgId: Int64 = 0
+            var newUniqueInPage = 0
             for msgDict in messages {
                 guard let msgId64 = Self.extractInt64(from: msgDict["id"]) else { continue }
                 lastMsgId = msgId64
+                guard seenRawMsgIds.insert(msgId64).inserted else { continue }
+                newUniqueInPage += 1
 
                 if let parsed = Self.parseTDLibMessage(
                     msgDict,
@@ -2067,13 +2103,18 @@ public final class TelegramClientService: @unchecked Sendable {
                 }
             }
 
-            if lastMsgId == 0 || lastMsgId == fromMessageId {
+            if newUniqueInPage == 0 || lastMsgId == 0 || lastMsgId == fromMessageId {
                 break
             }
             if totalCount > 0 && totalFetched >= totalCount {
                 break
             }
-            fromMessageId = lastMsgId
+            if messages.count < 20 && pageIndex >= 2 && totalCount == 0 {
+                // Последняя короткая страница истории без дальнейших сообщений
+                fromMessageId = lastMsgId
+            } else {
+                fromMessageId = lastMsgId
+            }
         }
 
         return (results, totalFetched, totalCount)
@@ -2196,7 +2237,7 @@ public final class TelegramClientService: @unchecked Sendable {
         guard !trimmedId.isEmpty else { return nil }
 
         let safeBase = storage.safeCacheFilename(for: filename)
-        let targetURL = storage.coversDirectory.appendingPathComponent("\(safeBase).jpg")
+        let targetURL = ArtworkService.shared.thumbsCoversDirectory.appendingPathComponent("\(safeBase)_thumb.jpg")
         if FileManager.default.fileExists(atPath: targetURL.path),
            let attrs = try? FileManager.default.attributesOfItem(atPath: targetURL.path),
            let size = attrs[.size] as? Int64, size > 128 {
@@ -2321,7 +2362,7 @@ public final class TelegramClientService: @unchecked Sendable {
     /// а при устаревшем `file_reference` — разрешает свежий `album_cover_thumbnail` / `thumbnail` из сообщения чата.
     public func downloadCoverForTrack(_ track: Track) async -> String? {
         let safeBase = storage.safeCacheFilename(for: track.cacheKey)
-        let targetURL = storage.coversDirectory.appendingPathComponent("\(safeBase).jpg")
+        let targetURL = ArtworkService.shared.thumbsCoversDirectory.appendingPathComponent("\(safeBase)_thumb.jpg")
         if FileManager.default.fileExists(atPath: targetURL.path),
            let attrs = try? FileManager.default.attributesOfItem(atPath: targetURL.path),
            let size = attrs[.size] as? Int64, size > 128 {
@@ -2609,7 +2650,41 @@ public final class TelegramClientService: @unchecked Sendable {
         }
     }
 
-    // MARK: - Local Wi-Fi PC Audio Bridge (`192.168.147.145:18473`)
+    // MARK: - Local Wi-Fi PC Audio Bridge (`10.236.88.145:18473` / `192.168.147.145:18473`)
+
+    private func resolveReachableLANBridgeHost() async -> String? {
+        let now = ProcessInfo.processInfo.systemUptime
+        let (cachedHost, unreachableUntil) = withLock { (activeLANBridgeHost, lanBridgeUnreachableUntil) }
+        if now < unreachableUntil {
+            return nil
+        }
+        if let cachedHost {
+            return cachedHost
+        }
+
+        for candidateHost in ["10.236.88.145", "192.168.147.145"] {
+            guard let pingURL = URL(string: "http://\(candidateHost):18473/health") else { continue }
+            var req = URLRequest(url: pingURL)
+            req.httpMethod = "HEAD"
+            req.timeoutInterval = 0.30
+            if let (_, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse,
+               (200...404).contains(http.statusCode) {
+                withLock {
+                    activeLANBridgeHost = candidateHost
+                    lanBridgeUnreachableUntil = 0
+                }
+                return candidateHost
+            }
+        }
+
+        // Если локальный мост ПК недоступен — кэшируем пропуск на 5 минут, чтобы треки шли в TDLib за 0 мс без 3.5-секундных задержек!
+        withLock {
+            activeLANBridgeHost = nil
+            lanBridgeUnreachableUntil = ProcessInfo.processInfo.systemUptime + 300.0
+        }
+        return nil
+    }
 
     private func downloadFromPCLANBridgeIfAvailable(
         track: Track,
@@ -2618,9 +2693,13 @@ public final class TelegramClientService: @unchecked Sendable {
         cacheKey: String,
         preemptionToken: DownloadPreemptionToken
     ) async throws -> URL? {
+        guard let bridgeHost = await resolveReachableLANBridgeHost() else {
+            return nil
+        }
+
         var components = URLComponents()
         components.scheme = "http"
-        components.host = "192.168.147.145"
+        components.host = bridgeHost
         components.port = 18473
         components.path = "/audio"
         components.queryItems = [
@@ -2631,9 +2710,19 @@ public final class TelegramClientService: @unchecked Sendable {
         guard let url = components.url else { return nil }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 3.5
+        request.timeoutInterval = 2.0
 
-        let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
+        let asyncBytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch {
+            withLock {
+                activeLANBridgeHost = nil
+                lanBridgeUnreachableUntil = ProcessInfo.processInfo.systemUptime + 180.0
+            }
+            throw error
+        }
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             return nil
         }

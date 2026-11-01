@@ -35,6 +35,10 @@ public struct AlbumsGridView: View {
                     .padding(16)
                     Spacer().frame(height: 110)
                 }
+                .refreshable {
+                    appState.haptics.softSelection()
+                    await appState.refreshFullLibraryAndYouTubePlaylists()
+                }
             }
             .navigationTitle("Альбомы (\(appState.computedAlbums.count))")
             .navigationDestination(for: Album.self) { album in
@@ -64,20 +68,38 @@ private struct AlbumGridCard: View {
     let appState: BebranoidAppState
 
     var body: some View {
+        let repTrack = album.customCoverPath == nil ? (album.representativeTrack ?? album.tracks.first) : nil
+
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
                 ArtworkThumbnailView(
-                    track: album.customCoverPath == nil ? album.tracks.first : nil,
+                    track: repTrack,
                     localPath: album.coverPath,
                     remoteURL: album.remoteArtworkURL,
                     fallbackSeed: "\(album.name)|\(album.artist)",
                     cornerRadius: 18,
-                    showFavoriteOverlay: album.isFavoriteVirtualAlbum && album.coverPath == nil
+                    sizeTier: .albumGrid,
+                    showFavoriteOverlay: album.isFavoriteVirtualAlbum && album.coverPath == nil && repTrack == nil
                 )
                 .aspectRatio(1.0, contentMode: .fit)
                 .shadow(color: .black.opacity(0.32), radius: 10, x: 0, y: 5)
 
                 HStack(spacing: 4) {
+                    if album.isLikedFavorite {
+                        Image(systemName: "heart.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(6)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .foregroundStyle(Color(red: 1.0, green: 0.34, blue: 0.52))
+                    }
+                    if album.linkedPlaylistId != nil {
+                        Text("Плейлист")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .foregroundStyle(appState.accentSwiftUIColor)
+                    }
                     if album.isHidden {
                         Text("Скрыт")
                             .font(.system(size: 10, weight: .bold))
@@ -108,7 +130,43 @@ private struct AlbumGridCard: View {
                 .lineLimit(1)
         }
         .contextMenu {
-            if !album.isFavoriteVirtualAlbum {
+            if let first = album.tracks.first {
+                Button {
+                    appState.isShuffleEnabled = false
+                    appState.playTrack(first, in: album.tracks)
+                } label: {
+                    Label("Слушать", systemImage: "play.fill")
+                }
+
+                Button {
+                    if let rand = album.tracks.randomElement() {
+                        appState.isShuffleEnabled = true
+                        appState.playTrack(rand, in: album.tracks)
+                    }
+                } label: {
+                    Label("Перемешать", systemImage: "shuffle")
+                }
+            }
+
+            if let plId = album.linkedPlaylistId {
+                Button {
+                    appState.toggleFavoritePlaylist(plId)
+                } label: {
+                    Label(
+                        appState.isFavoritePlaylist(plId) ? "Убрать плейлист из избранных" : "Закрепить плейлист в Альбомах",
+                        systemImage: appState.isFavoritePlaylist(plId) ? "heart.slash" : "heart.fill"
+                    )
+                }
+            } else if !album.isFavoriteVirtualAlbum {
+                Button {
+                    appState.toggleFavoriteAlbum(album.name)
+                } label: {
+                    Label(
+                        appState.isFavoriteAlbum(album.name) ? "Убрать альбом из избранных" : "Закрепить в избранных",
+                        systemImage: appState.isFavoriteAlbum(album.name) ? "heart.slash" : "heart.fill"
+                    )
+                }
+
                 Button {
                     appState.toggleAlbumHidden(album.name)
                 } label: {
@@ -127,6 +185,17 @@ private struct AlbumGridCard: View {
                     )
                 }
             }
+        } preview: {
+            LiquidGlassContextPreviewCard(
+                track: repTrack,
+                localPath: album.coverPath,
+                remoteURL: album.remoteArtworkURL,
+                fallbackSeed: "\(album.name)|\(album.artist)",
+                title: album.name,
+                subtitle: "\(album.artist) • \(album.tracks.count) треков",
+                badgeText: album.linkedPlaylistId != nil ? "ЛЮБИМЫЙ ПЛЕЙЛИСТ" : (album.isLikedFavorite ? "ИЗБРАННОЕ" : nil),
+                accentColor: appState.accentSwiftUIColor
+            )
         }
     }
 }

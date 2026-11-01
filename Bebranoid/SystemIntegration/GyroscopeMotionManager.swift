@@ -44,7 +44,7 @@ public final class GyroscopeMotionManager: ObservableObject {
 
         #if canImport(CoreMotion) && os(iOS)
         guard motionManager.isDeviceMotionAvailable else { return }
-        motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
+        motionManager.deviceMotionUpdateInterval = 1.0 / 45.0
         motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, _ in
             guard let self, let motion else { return }
             self.processDeviceMotion(
@@ -97,7 +97,8 @@ public final class GyroscopeMotionManager: ObservableObject {
         let nextX = tiltXDegrees + (targetX - tiltXDegrees) * smoothing
         let nextY = tiltYDegrees + (targetY - tiltYDegrees) * smoothing
 
-        if abs(nextX - tiltXDegrees) > 0.015 || abs(nextY - tiltYDegrees) > 0.015 {
+        // Порог покоя 0.045° исключает паразитные перерисовки SwiftUI, когда iPhone лежит неподвижно или почти не двигается в руке
+        if abs(nextX - tiltXDegrees) > 0.045 || abs(nextY - tiltYDegrees) > 0.045 {
             tiltXDegrees = nextX
             tiltYDegrees = nextY
             specularUnitOffset = CGSize(

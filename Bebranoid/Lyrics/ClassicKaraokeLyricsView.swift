@@ -154,11 +154,10 @@ public struct ClassicKaraokeLyricsView: View {
 
                 if isUserBrowsing && document.kind != .plain {
                     Button {
+                        HapticsManager.shared.lightTap()
                         let idx = LRCParser.findActiveLineIndex(lines: document.lines, currentTime: liveTimeProvider())
                         activeLineIndex = idx
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                            isUserBrowsing = false
-                        }
+                        isUserBrowsing = false
                         syncTriggerToken &+= 1
                         #if !canImport(UIKit)
                         if idx >= 0 && idx < document.lines.count {
@@ -171,17 +170,19 @@ public struct ClassicKaraokeLyricsView: View {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.up.and.down.circle.fill")
                             Text("Синхр.")
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
                         }
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
                         .liquidGlassCapsule(tint: accentColor, isProminent: false)
+                        .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     .padding(.trailing, 20)
                     .padding(.bottom, 16)
                     .transition(.scale.combined(with: .opacity))
+                    .zIndex(10)
                 }
             }
         }
@@ -195,13 +196,13 @@ private struct ClassicActiveLineDriver: View {
     @Binding var activeLineIndex: Int
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 90.0, paused: !isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 45.0, paused: !isPlaying)) { context in
             let _ = context.date
             let computed = LRCParser.findActiveLineIndex(lines: lines, currentTime: liveTimeProvider())
             Color.clear
                 .onChange(of: computed) { _, nextIdx in
                     if activeLineIndex != nextIdx {
-                        withAnimation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54)) {
+                        withAnimation(.timingCurve(0.18, 0.92, 0.26, 1.0, duration: 0.62)) {
                             activeLineIndex = nextIdx
                         }
                     }
@@ -279,8 +280,8 @@ private struct ClassicKaraokeLineRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.vertical, 4)
-            .scaleEffect(isActive ? 1.0 : 0.962, anchor: .leading)
-            .animation(.timingCurve(0.20, 0.96, 0.32, 1.0, duration: 0.54), value: isActive)
+            .scaleEffect(isActive ? 1.0 : 0.956, anchor: .leading)
+            .animation(.timingCurve(0.18, 0.92, 0.26, 1.0, duration: 0.62), value: isActive)
         }
         .buttonStyle(.plain)
     }
@@ -294,7 +295,7 @@ private struct ClassicActiveLineUnderline: View {
     let accentColor: Color
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { context in
             let _ = context.date
             let lineDuration = max(0.25, endTime - startTime)
             let lineProgress = HarmonoidMeshEngine.clamp(

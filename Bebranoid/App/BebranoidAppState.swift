@@ -187,6 +187,9 @@ public final class BebranoidAppState: ObservableObject {
         }
         #endif
         restorePreviousSession()
+        if !availableLibraryTracks.isEmpty {
+            artworkService.prefetchArtistCovers(artists: computedArtists)
+        }
         guard !TelegramClientService.isRunningUnderXCTest else { return }
         Task { [weak self] in
             guard let self else { return }
@@ -321,14 +324,9 @@ public final class BebranoidAppState: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] time in
                 guard let self else { return }
-                let minDelta: Double
-                if self.isLyricsScreenPresented {
-                    minDelta = 0.025 // ~40 Hz для плавного пословного караоке Beautiful Lyrics
-                } else if self.isFullScreenPlayerPresented {
-                    minDelta = 0.08 // 12 Hz для плавного слайдера в полноэкранном плеере
-                } else {
-                    minDelta = 1.0 // 1 Hz для мини-плеера (ноль перерисовок списков при 120 Hz скролле)
-                }
+                // Все анимированные индикаторы (лирика, слайдер плеера, мини-плеер) читают `audioEngine.livePlaybackTime` локально,
+                // поэтому глобальный `@Published currentTime` обновляется редко (0.5–1.0 с), исключая перегрев CPU от перерисовки всего дерева View!
+                let minDelta: Double = (self.isFullScreenPlayerPresented || self.isLyricsScreenPresented) ? 0.50 : 1.0
                 if abs(time - self.currentTime) >= minDelta || time < 0.05 {
                     self.currentTime = time
                 }
@@ -481,7 +479,7 @@ public final class BebranoidAppState: ObservableObject {
                     self.currentTrack = track
                     self.currentTime = 0.0
                     self.duration = track.duration
-                    self.artworkService.invalidateCachedSyncPath(forTrackId: track.id)
+                    self.artworkService.invalidateCachedSyncPath(forTrackId: track.id, cacheKey: track.cacheKey)
                     self.updatePalette(for: track)
                     self.loadLyricsForCurrentTrack()
                     self.persistPlaybackSession()
@@ -711,7 +709,7 @@ public final class BebranoidAppState: ObservableObject {
                     pendingDownloadTrack = nil
                 }
                 guard currentTrack?.id == track.id else { return }
-                artworkService.invalidateCachedSyncPath(forTrackId: track.id)
+                artworkService.invalidateCachedSyncPath(forTrackId: track.id, cacheKey: track.cacheKey)
                 await audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
                 updatePalette(for: track)
                 syncNowPlayingInfo()
@@ -760,7 +758,7 @@ public final class BebranoidAppState: ObservableObject {
             if (try? await telegramClient.ensureTrackDownloaded(track: nextTrack, priority: .nextTrackPrefetch)) != nil {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    self.artworkService.invalidateCachedSyncPath(forTrackId: nextTrack.id)
+                    self.artworkService.invalidateCachedSyncPath(forTrackId: nextTrack.id, cacheKey: nextTrack.cacheKey)
                     if let currentNextIdx = self.peekNextTrackIndex(),
                        currentNextIdx < self.queue.count,
                        self.queue[currentNextIdx].id == nextTrack.id {
@@ -1090,29 +1088,70 @@ public final class BebranoidAppState: ObservableObject {
             return cached
         }
         var albums: [Album] = []
-
-        // 1. Виртуальный альбом «Любимые» всегда первый (`src/views/Albums.jsx`)
         let sourceTracks = availableLibraryTracks
-        let favTracks = sourceTracks.filter { isFavorite($0) }
-        if !favTracks.isEmpty {
+
+        // 1. Виртуальный альбом «Любимые» ВСЕГДА на первом месте (`src/views/Albums.jsx` lines 366-385),
+        // собирая лайкнутые треки из медиатеки и всех плейлистов YouTube без дубликатов
+        var favSeen = Set<String>()
+        var favTracks: [Track] = []
+        for track in sourceTracks where isFavorite(track) {
+            if favSeen.insert(track.cacheKey).inserted {
+                favTracks.append(track)
+            }
+        }
+        for playlist in libraryState.playlists {
+            for track in playlist.tracksSnapshot where isFavorite(track) {
+                if favSeen.insert(track.cacheKey).inserted {
+                    favTracks.append(track)
+                }
+            }
+        }
+        favTracks.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+
+        albums.append(
+            Album(
+                name: AppConfig.favoritesAlbumName,
+                artist: "Ваши избранные треки",
+                tracks: favTracks,
+                customCoverPath: libraryState.customAlbumCovers[AppConfig.favoritesAlbumName],
+                isFavoriteVirtualAlbum: true,
+                isLikedFavorite: true,
+                isHidden: false,
+                isExcludedFromShuffle: false
+            )
+        )
+
+        // 2. Лайкнутые плейлисты закрепляются сразу на первых местах в разделе «Альбомы»
+        let likedPlaylists = libraryState.playlists.filter { libraryState.favoritePlaylistIds.contains($0.id) }
+        for pl in likedPlaylists {
             albums.append(
                 Album(
-                    name: AppConfig.favoritesAlbumName,
-                    artist: "Избранные треки",
-                    tracks: favTracks,
-                    customCoverPath: libraryState.customAlbumCovers[AppConfig.favoritesAlbumName],
-                    isFavoriteVirtualAlbum: true,
+                    name: pl.name,
+                    artist: pl.isYouTubePlaylist ? "YouTube плейлист • Избранное" : "Плейлист • Избранное",
+                    tracks: pl.tracksSnapshot,
+                    customCoverPath: pl.customCoverPath,
+                    explicitRemoteArtworkURL: pl.remoteArtworkURL,
+                    isFavoriteVirtualAlbum: false,
+                    isLikedFavorite: true,
+                    linkedPlaylistId: pl.id,
                     isHidden: false,
                     isExcludedFromShuffle: false
                 )
             )
         }
 
+        // 3. Реальные альбомы из треков (лайкнутые альбомы наверху, затем строгий алфавитный порядок A–Z как в Desktop)
         var grouped: [String: [Track]] = [:]
         for track in sourceTracks {
-            let name = track.album.isEmpty ? "Без альбома" : track.album
+            var name = track.album.isEmpty ? "Без альбома" : track.album
+            if name == AppConfig.favoritesAlbumName {
+                name = "\(AppConfig.favoritesAlbumName) (библиотека)"
+            }
             grouped[name, default: []].append(track)
         }
+
+        var pinnedRegularAlbums: [Album] = []
+        var standardAlbums: [Album] = []
 
         for (albumName, rawTracks) in grouped {
             let isHidden = libraryState.hiddenAlbums.contains(albumName)
@@ -1120,30 +1159,43 @@ public final class BebranoidAppState: ObservableObject {
                 continue
             }
 
-            // Применяем сохранённый ручной порядок треков внутри альбома (`albumOrder`)
             var orderedTracks = rawTracks
             if let savedOrder = libraryState.albumTrackOrders[albumName], !savedOrder.isEmpty {
                 let orderMap = Dictionary(uniqueKeysWithValues: savedOrder.enumerated().map { ($1, $0) })
                 orderedTracks.sort { a, b in
                     let idxA = orderMap[a.cacheKey] ?? Int.max
                     let idxB = orderMap[b.cacheKey] ?? Int.max
-                    return idxA < idxB
+                    if idxA != idxB { return idxA < idxB }
+                    return a.title.localizedStandardCompare(b.title) == .orderedAscending
                 }
+            } else {
+                orderedTracks.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
             }
 
             let dominantArtist = orderedTracks.first?.artist ?? "Разные исполнители"
-            albums.append(
-                Album(
-                    name: albumName,
-                    artist: dominantArtist,
-                    tracks: orderedTracks,
-                    customCoverPath: libraryState.customAlbumCovers[albumName],
-                    isFavoriteVirtualAlbum: false,
-                    isHidden: isHidden,
-                    isExcludedFromShuffle: libraryState.excludedShuffleAlbums.contains(albumName)
-                )
+            let isLiked = libraryState.favoriteAlbumNames.contains(albumName)
+            let built = Album(
+                name: albumName,
+                artist: dominantArtist,
+                tracks: orderedTracks,
+                customCoverPath: libraryState.customAlbumCovers[albumName],
+                isFavoriteVirtualAlbum: false,
+                isLikedFavorite: isLiked,
+                isHidden: isHidden,
+                isExcludedFromShuffle: libraryState.excludedShuffleAlbums.contains(albumName)
             )
+            if isLiked {
+                pinnedRegularAlbums.append(built)
+            } else {
+                standardAlbums.append(built)
+            }
         }
+
+        pinnedRegularAlbums.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        standardAlbums.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+        albums.append(contentsOf: pinnedRegularAlbums)
+        albums.append(contentsOf: standardAlbums)
 
         _cachedAlbums = albums
         return albums
@@ -1178,9 +1230,74 @@ public final class BebranoidAppState: ObservableObject {
             tracksSnapshot: recentTracks,
             customCoverPath: recentTracks.first?.coverPath
         )
-        let result = [recentAuto] + libraryState.playlists
+        let liked = libraryState.playlists.filter { libraryState.favoritePlaylistIds.contains($0.id) }
+        let unliked = libraryState.playlists.filter { !libraryState.favoritePlaylistIds.contains($0.id) }
+        let result = liked + [recentAuto] + unliked
         _cachedPlaylists = result
         return result
+    }
+
+    public func isFavoriteAlbum(_ albumName: String) -> Bool {
+        if albumName == AppConfig.favoritesAlbumName { return true }
+        return libraryState.favoriteAlbumNames.contains(albumName)
+    }
+
+    public func toggleFavoriteAlbum(_ albumName: String) {
+        guard albumName != AppConfig.favoritesAlbumName else { return }
+        haptics.mediumImpact()
+        if libraryState.favoriteAlbumNames.contains(albumName) {
+            libraryState.favoriteAlbumNames.remove(albumName)
+        } else {
+            libraryState.favoriteAlbumNames.insert(albumName)
+        }
+        saveLibraryState()
+    }
+
+    public func isFavoritePlaylist(_ playlistId: String) -> Bool {
+        libraryState.favoritePlaylistIds.contains(playlistId)
+    }
+
+    public func toggleFavoritePlaylist(_ playlistId: String) {
+        guard playlistId != AppConfig.recent30PlaylistId else { return }
+        haptics.mediumImpact()
+        if libraryState.favoritePlaylistIds.contains(playlistId) {
+            libraryState.favoritePlaylistIds.remove(playlistId)
+        } else {
+            libraryState.favoritePlaylistIds.insert(playlistId)
+        }
+        saveLibraryState()
+    }
+
+    /// Обновление конкретного плейлиста (pull-to-refresh внутри YouTube-плейлиста или «Последние 30»)
+    public func refreshPlaylist(_ playlist: Playlist) async {
+        if playlist.isYouTubePlaylist {
+            let source = playlist.sourceUrl ?? (playlist.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
+            guard !source.isEmpty else { return }
+            do {
+                try await importYouTubeURL(source, customTitle: playlist.name)
+            } catch {
+                statusBannerMessage = error.localizedDescription
+            }
+        } else if telegramClient.isAuthorized {
+            await syncTelegramLibrary()
+        }
+    }
+
+    /// Полное обновление медиатеки и всех подключённых YouTube-плейлистов жестом свайпа сверху вниз (pull-to-refresh)
+    public func refreshFullLibraryAndYouTubePlaylists() async {
+        haptics.softSelection()
+        if telegramClient.isAuthorized {
+            await syncTelegramLibrary()
+        }
+        let ytPlaylists = libraryState.playlists.filter { $0.isYouTubePlaylist }
+        for pl in ytPlaylists {
+            let source = pl.sourceUrl ?? (pl.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
+            if !source.isEmpty {
+                try? await importYouTubeURL(source, customTitle: pl.name)
+            }
+        }
+        invalidateLibraryCaches()
+        artworkService.prefetchArtistCovers(artists: computedArtists)
     }
 
     public func toggleAlbumHidden(_ albumName: String) {
@@ -1502,6 +1619,7 @@ public final class BebranoidAppState: ObservableObject {
             libraryState.tracks = scannedTracks + localAndYouTube
             statusBannerMessage = nil
             saveLibraryState()
+            artworkService.prefetchArtistCovers(artists: computedArtists)
 
             if var currentReport = lastTelegramAccessReport {
                 let normMain = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramChatId)

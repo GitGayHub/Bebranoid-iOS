@@ -29,6 +29,7 @@ public enum ArtworkSizeTier: String, Sendable {
     case listThumbnail = "thumb_120"
     case albumGrid = "grid_384"
     case fullPlayer = "player_1024"
+    case originalSource = "original_native"
     case meshAnalysis = "mesh_64"
 
     public static let grid384: ArtworkSizeTier = .albumGrid
@@ -39,6 +40,7 @@ public enum ArtworkSizeTier: String, Sendable {
         case .listThumbnail: return 120
         case .albumGrid: return 384
         case .fullPlayer: return 1024
+        case .originalSource: return 0
         case .meshAnalysis: return 64
         }
     }
@@ -82,6 +84,8 @@ public final class ArtworkService: @unchecked Sendable {
 
     private var inFlightTasks: [String: Task<ResolvedArtworkResult?, Never>] = [:]
     private var syncCoverPathCache: [String: (url: URL, priority: ArtworkSourcePriority)?] = [:]
+    private var checkedTracksWithoutEmbeddedArt = Set<String>()
+    private var artistPrefetchTask: Task<Void, Never>? = nil
     private var dataCache = NSCache<NSString, NSData>()
     #if canImport(CoreGraphics)
     private var cgImageCache = NSCache<NSString, CGImage>()
@@ -98,14 +102,27 @@ public final class ArtworkService: @unchecked Sendable {
         return dir
     }
 
+    public var thumbsCoversDirectory: URL {
+        let dir = storage.coversDirectory.appendingPathComponent("thumbs", isDirectory: true)
+        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     private static let sharedAlbumBleedCleanupKey = "bebranoid.covers.bleed_cleanup_v2"
 
     public init(storage: StorageManager = .shared, session: URLSession = .shared) {
         self.storage = storage
         self.session = session
-        self.dataCache.countLimit = 300
-        self.dataCache.totalCostLimit = 64 * 1024 * 1024
+        self.dataCache.countLimit = 180
+        self.dataCache.totalCostLimit = 36 * 1024 * 1024
+        #if canImport(CoreGraphics)
+        self.cgImageCache.countLimit = 80
+        self.cgImageCache.totalCostLimit = 56 * 1024 * 1024
+        self.trackTierImageCache.countLimit = 140
+        self.trackTierImageCache.totalCostLimit = 40 * 1024 * 1024
+        #endif
         let albumsDir = self.albumsCoversDirectory
+        _ = self.thumbsCoversDirectory
         if !UserDefaults.standard.bool(forKey: Self.sharedAlbumBleedCleanupKey) {
             if let items = try? fileManager.contentsOfDirectory(at: albumsDir, includingPropertiesForKeys: nil) {
                 for item in items {
@@ -113,6 +130,26 @@ public final class ArtworkService: @unchecked Sendable {
                 }
             }
             UserDefaults.standard.set(true, forKey: Self.sharedAlbumBleedCleanupKey)
+        }
+        #if canImport(UIKit)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.purgeMemoryCaches()
+        }
+        #endif
+    }
+
+    public func purgeMemoryCaches() {
+        dataCache.removeAllObjects()
+        #if canImport(CoreGraphics)
+        cgImageCache.removeAllObjects()
+        trackTierImageCache.removeAllObjects()
+        #endif
+        withLock {
+            syncCoverPathCache.removeAll(keepingCapacity: false)
         }
     }
 
@@ -149,18 +186,46 @@ public final class ArtworkService: @unchecked Sendable {
         }
 
         let resolved: (url: URL, priority: ArtworkSourcePriority)? = {
-            // Priority 2a: Direct coverPath on Track
-            if let direct = track.coverPath,
-               !direct.isEmpty,
-               isValidImageFile(atPath: direct) {
-                let isCustom = direct.contains("CustomCovers") || direct.contains("custom_")
-                return (URL(fileURLWithPath: direct), isCustom ? .customCover : .localDiskCover)
+            let directPath = track.coverPath ?? ""
+            let isLowResTelegramThumb = directPath.contains("/thumbs/")
+                || directPath.contains("\\thumbs\\")
+                || directPath.hasSuffix("_thumb.jpg")
+                || directPath.contains("/thumbnails/")
+
+            // Priority 2a: Direct non-thumbnail coverPath on Track
+            if !directPath.isEmpty,
+               !isLowResTelegramThumb,
+               isValidImageFile(atPath: directPath) {
+                let isCustom = directPath.contains("CustomCovers") || directPath.contains("custom_")
+                return (URL(fileURLWithPath: directPath), isCustom ? .customCover : .localDiskCover)
             }
 
-            // Priority 2b: Covers/<safeCacheKey>.jpg or Covers/<safeFilename>.jpg (strictly this track's own cover)
             let safeKey = storage.safeCacheFilename(for: track.cacheKey)
             let safeStem = (safeKey as NSString).deletingPathExtension
             let safeRawFile = storage.safeCacheFilename(for: track.filename)
+
+            // Priority 2b: Исходная HQ-обложка, извлечённая напрямую из аудиофайла (максимальное качество без пережатия!)
+            let hqCoverURL = storage.coversDirectory.appendingPathComponent("\(safeKey)_hq.jpg")
+            if isValidImageFile(atPath: hqCoverURL.path) {
+                return (hqCoverURL, .embeddedAudioArtwork)
+            }
+
+            // Priority 2c: Встроенная обложка внутри закешированного аудиофайла (всегда приоритетнее низкокачественных превью Telegram!)
+            let audioURL = storage.cachedAudioFileURL(for: track)
+            if fileManager.fileExists(atPath: audioURL.path),
+               !withLock({ checkedTracksWithoutEmbeddedArt.contains(track.cacheKey) }) {
+                if let embeddedData = AudioMetadataReader.extractEmbeddedArtworkSync(from: audioURL),
+                   embeddedData.count > 64 {
+                    if let savedHQ = saveEmbeddedHighResCoverToDisk(imageData: embeddedData, trackFilename: track.cacheKey) {
+                        recordArtworkLoaded()
+                        return (savedHQ, .embeddedAudioArtwork)
+                    }
+                } else {
+                    _ = withLock { checkedTracksWithoutEmbeddedArt.insert(track.cacheKey) }
+                }
+            }
+
+            // Priority 2d: Covers/<safeCacheKey>.jpg or Covers/<safeFilename>.jpg (strictly this track's own cover)
             let candidateTrackPaths = [
                 storage.coversDirectory.appendingPathComponent("\(safeKey).jpg"),
                 storage.coversDirectory.appendingPathComponent("\(safeStem).jpg"),
@@ -171,20 +236,17 @@ public final class ArtworkService: @unchecked Sendable {
                 return (candidate, .localDiskCover)
             }
 
-            // Priority 3: Embedded cover inside local/cached audio file (saved ONLY for this track, NEVER shared to other uncached tracks!)
-            let audioURL = storage.cachedAudioFileURL(for: track)
-            if fileManager.fileExists(atPath: audioURL.path),
-               let embeddedData = AudioMetadataReader.extractEmbeddedArtworkSync(from: audioURL),
-               embeddedData.count > 64 {
-                let savedURL = saveTrackAndAlbumCoverToDisk(
-                    imageData: embeddedData,
-                    trackFilename: track.cacheKey,
-                    albumName: nil
-                )
-                if let savedURL {
-                    recordArtworkLoaded()
-                    return (savedURL, .embeddedAudioArtwork)
-                }
+            // Priority 4 (sync disk hit): Индивидуальная миниатюра Telegram (для облачных треков до скачивания оригинала)
+            if !directPath.isEmpty, isLowResTelegramThumb, isValidImageFile(atPath: directPath) {
+                return (URL(fileURLWithPath: directPath), .telegramMessageThumbnail)
+            }
+            let candidateThumbPaths = [
+                thumbsCoversDirectory.appendingPathComponent("\(safeKey)_thumb.jpg"),
+                thumbsCoversDirectory.appendingPathComponent("\(safeStem)_thumb.jpg"),
+                thumbsCoversDirectory.appendingPathComponent("\(safeRawFile)_thumb.jpg")
+            ]
+            for thumb in candidateThumbPaths where isValidImageFile(atPath: thumb.path) {
+                return (thumb, .telegramMessageThumbnail)
             }
 
             return nil
@@ -337,7 +399,7 @@ public final class ArtworkService: @unchecked Sendable {
         guard let croppedCG = cgImage.cropping(to: cropRect) else {
             return imageData
         }
-        return encodeCGImageAsJPEG(croppedCG, quality: 0.92) ?? imageData
+        return encodeCGImageAsJPEG(croppedCG, quality: 0.96) ?? imageData
         #else
         return imageData
         #endif
@@ -351,10 +413,11 @@ public final class ArtworkService: @unchecked Sendable {
 
     public func storeMemoryCachedImage(_ image: CGImage, forKey key: String, tier: ArtworkSizeTier) {
         let cacheKey = "\(key)|\(tier.rawValue)" as NSString
-        trackTierImageCache.setObject(image, forKey: cacheKey)
+        let cost = max(1024, image.width * image.height * 4)
+        trackTierImageCache.setObject(image, forKey: cacheKey, cost: cost)
     }
 
-    /// Декодирует и масштабирует изображение под нужный уровень размера (`listThumbnail`, `albumGrid`, `fullPlayer`, `meshAnalysis`)
+    /// Декодирует изображение: для `.originalSource` сохраняет 100% исходное разрешение пиксель-в-пиксель без даунскейла!
     public func loadCGImage(from fileURL: URL, tier: ArtworkSizeTier = .albumGrid) -> CGImage? {
         let cacheKey = "\(fileURL.path)|\(tier.rawValue)" as NSString
         if let cached = cgImageCache.object(forKey: cacheKey) {
@@ -367,19 +430,30 @@ public final class ArtworkService: @unchecked Sendable {
             return nil
         }
 
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: tier.maxPixelDimension
-        ]
+        let decoded: CGImage?
+        if tier.maxPixelDimension <= 0 {
+            let fullOpts: [CFString: Any] = [
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceShouldAllowFloat: false
+            ]
+            decoded = CGImageSourceCreateImageAtIndex(source, 0, fullOpts as CFDictionary)
+        } else {
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: tier.maxPixelDimension
+            ]
+            decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+                ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
+        }
 
-        guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-                ?? CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        guard let thumb = decoded else {
             return nil
         }
 
-        cgImageCache.setObject(thumb, forKey: cacheKey)
+        let cost = max(1024, thumb.width * thumb.height * 4)
+        cgImageCache.setObject(thumb, forKey: cacheKey, cost: cost)
         recordArtworkLoaded()
         return thumb
     }
@@ -472,10 +546,105 @@ public final class ArtworkService: @unchecked Sendable {
         withLock { _failedArtworkCount += 1 }
     }
 
-    public func invalidateCachedSyncPath(forTrackId trackId: String) {
-        _ = withLock { syncCoverPathCache.removeValue(forKey: trackId) }
+    @discardableResult
+    public func saveEmbeddedHighResCoverToDisk(
+        imageData: Data,
+        trackFilename: String
+    ) -> URL? {
+        guard imageData.count > 64 else { return nil }
+        let safeKey = storage.safeCacheFilename(for: trackFilename)
+        let hqURL = storage.coversDirectory.appendingPathComponent("\(safeKey)_hq.jpg")
+        let stdURL = storage.coversDirectory.appendingPathComponent("\(safeKey).jpg")
+        do {
+            try imageData.write(to: hqURL, options: .atomic)
+            try? imageData.write(to: stdURL, options: .atomic)
+            dataCache.setObject(imageData as NSData, forKey: hqURL.path as NSString, cost: imageData.count)
+            withLock {
+                syncCoverPathCache.removeAll(keepingCapacity: true)
+                checkedTracksWithoutEmbeddedArt.remove(trackFilename)
+            }
+            return hqURL
+        } catch {
+            recordArtworkFailure()
+            return nil
+        }
+    }
+
+    @discardableResult
+    public func saveTelegramThumbnailToDisk(
+        imageData: Data,
+        trackFilename: String
+    ) -> URL? {
+        guard imageData.count > 64 else { return nil }
+        let safeKey = storage.safeCacheFilename(for: trackFilename)
+        let thumbURL = thumbsCoversDirectory.appendingPathComponent("\(safeKey)_thumb.jpg")
+        do {
+            try imageData.write(to: thumbURL, options: .atomic)
+            dataCache.setObject(imageData as NSData, forKey: thumbURL.path as NSString, cost: imageData.count)
+            withLock { syncCoverPathCache.removeAll(keepingCapacity: true) }
+            return thumbURL
+        } catch {
+            recordArtworkFailure()
+            return nil
+        }
+    }
+
+    /// Скачивает произвольный `remoteURL` (например, обложку YouTube-плейлиста без конкретного `Track`) и сохраняет в `Covers/`
+    public func downloadStandaloneRemoteCover(urlString: String, cacheKey: String) async -> URL? {
+        let safeKey = storage.safeCacheFilename(for: "remote_\(cacheKey)")
+        let targetURL = storage.coversDirectory.appendingPathComponent("\(safeKey).jpg")
+        if isValidImageFile(atPath: targetURL.path) {
+            return targetURL
+        }
+        guard let url = URL(string: urlString) else { return nil }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 10.0
+        guard let (rawData, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              rawData.count > 256 else {
+            return nil
+        }
+        let isYT = (url.host?.contains("ytimg.com") == true)
+        let finalData = (isYT ? Self.cropYouTubeThumbnailToSquare(rawData) : nil) ?? rawData
+        try? finalData.write(to: targetURL, options: .atomic)
+        return isValidImageFile(atPath: targetURL.path) ? targetURL : nil
+    }
+
+    /// Мягкая фоновая предзагрузка обложек представителей всех артистов (ограниченная 2 потоками без нагрева CPU),
+    /// чтобы в разделе «Артисты» фотографии отображались сразу, а не только после входа в карточку артиста.
+    public func prefetchArtistCovers(artists: [ArtistSummary]) {
+        artistPrefetchTask?.cancel()
+        let candidates = artists.compactMap { $0.representativeTrack }
+        guard !candidates.isEmpty else { return }
+
+        artistPrefetchTask = Task.detached(priority: .background) { [weak self] in
+            guard let self else { return }
+            var resolvedCount = 0
+            for track in candidates {
+                if Task.isCancelled { break }
+                if self.resolveLocalCoverURLSync(for: track) != nil {
+                    continue
+                }
+                _ = await self.resolveArtwork(for: track)
+                resolvedCount += 1
+                // Короткая пауза между фоновыми загрузками обложек артистов — 0% нагрева на iPhone
+                if resolvedCount % 3 == 0 {
+                    try? await Task.sleep(nanoseconds: 55_000_000)
+                }
+            }
+        }
+    }
+
+    public func invalidateCachedSyncPath(forTrackId trackId: String, cacheKey: String? = nil) {
+        _ = withLock {
+            syncCoverPathCache.removeValue(forKey: trackId)
+            if let cacheKey {
+                checkedTracksWithoutEmbeddedArt.remove(cacheKey)
+            }
+        }
         #if canImport(CoreGraphics)
-        for tier in [ArtworkSizeTier.listThumbnail, .albumGrid, .fullPlayer, .meshAnalysis] {
+        for tier in [ArtworkSizeTier.listThumbnail, .albumGrid, .fullPlayer, .originalSource, .meshAnalysis] {
             trackTierImageCache.removeObject(forKey: "\(trackId)|\(tier.rawValue)" as NSString)
         }
         #endif

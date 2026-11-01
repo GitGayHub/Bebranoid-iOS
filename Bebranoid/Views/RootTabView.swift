@@ -23,6 +23,7 @@ public struct RootTabView: View {
                 nextPalette: appState.nextTrackPalette,
                 crossfadeProgress: appState.crossfadeProgress,
                 isReducedMotion: appState.isReducedMotionEnabled,
+                isOccluded: appState.isFullScreenPlayerPresented || appState.isLyricsScreenPresented,
                 fixedAnimationTime: fixedTime
             )
 

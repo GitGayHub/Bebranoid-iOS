@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Снимок состояния сессии воспроизведения (`bebranoid_playback_session_v1` из `src/App.jsx`)
 public struct PlaybackSessionSnapshot: Codable, Sendable {
@@ -62,6 +65,8 @@ public struct UserLibraryPersistentState: Codable, Sendable {
     public var playlists: [Playlist] = []
     public var favoriteTrackFilenames: Set<String> = []
     public var favoriteArtistKeys: Set<String> = []
+    public var favoriteAlbumNames: Set<String> = []
+    public var favoritePlaylistIds: Set<String> = []
     public var hiddenAlbums: Set<String> = []
     public var excludedShuffleAlbums: Set<String> = []
     public var customAlbumCovers: [String: String] = [:]
@@ -82,6 +87,8 @@ public struct UserLibraryPersistentState: Codable, Sendable {
         case playlists
         case favoriteTrackFilenames
         case favoriteArtistKeys
+        case favoriteAlbumNames
+        case favoritePlaylistIds
         case hiddenAlbums
         case excludedShuffleAlbums
         case customAlbumCovers
@@ -102,6 +109,8 @@ public struct UserLibraryPersistentState: Codable, Sendable {
         self.playlists = try c.decodeIfPresent([Playlist].self, forKey: .playlists) ?? []
         self.favoriteTrackFilenames = try c.decodeIfPresent(Set<String>.self, forKey: .favoriteTrackFilenames) ?? []
         self.favoriteArtistKeys = try c.decodeIfPresent(Set<String>.self, forKey: .favoriteArtistKeys) ?? []
+        self.favoriteAlbumNames = try c.decodeIfPresent(Set<String>.self, forKey: .favoriteAlbumNames) ?? []
+        self.favoritePlaylistIds = try c.decodeIfPresent(Set<String>.self, forKey: .favoritePlaylistIds) ?? []
         self.hiddenAlbums = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenAlbums) ?? []
         self.excludedShuffleAlbums = try c.decodeIfPresent(Set<String>.self, forKey: .excludedShuffleAlbums) ?? []
         self.customAlbumCovers = try c.decodeIfPresent([String: String].self, forKey: .customAlbumCovers) ?? [:]
@@ -117,7 +126,9 @@ public struct UserLibraryPersistentState: Codable, Sendable {
     }
 }
 
-/// Персистентное хранилище состояния библиотеки и сессии воспроизведения
+/// Персистентное хранилище состояния библиотеки и сессии воспроизведения.
+/// Запись и сериализация больших JSON-структур (3000+ треков) вынесены в фоновую очередь с коалесценцией,
+/// а актуальные снимки хранятся в памяти для мгновенного чтения без фризов MainActor и лишнего нагрева CPU.
 public final class PlaybackSessionStore: @unchecked Sendable {
     public static let shared = PlaybackSessionStore()
 
@@ -127,6 +138,12 @@ public final class PlaybackSessionStore: @unchecked Sendable {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let lock = NSLock()
+    private let ioQueue = DispatchQueue(label: "com.bebranoid.persistence.io", qos: .utility)
+
+    private var latestSessionInMemory: PlaybackSessionSnapshot?
+    private var latestLibraryStateInMemory: UserLibraryPersistentState?
+    private var sessionWriteScheduled: Bool = false
+    private var libraryWriteScheduled: Bool = false
 
     public init(storage: StorageManager = .shared) {
         self.storage = storage
@@ -134,22 +151,59 @@ public final class PlaybackSessionStore: @unchecked Sendable {
         self.libraryStateFileURL = storage.databaseDirectory.appendingPathComponent("user_library_state_v1.json")
 
         let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         enc.dateEncodingStrategy = .iso8601
         self.encoder = enc
 
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         self.decoder = dec
+
+        #if canImport(UIKit) && os(iOS)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.flushPendingWritesSync()
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.flushPendingWritesSync()
+        }
+        #endif
     }
 
     public func savePlaybackSession(_ snapshot: PlaybackSessionSnapshot) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let data = try? encoder.encode(snapshot) else { return }
+        let shouldSchedule: Bool = {
+            lock.lock()
+            defer { lock.unlock() }
+            latestSessionInMemory = snapshot
+            if sessionWriteScheduled {
+                return false
+            }
+            sessionWriteScheduled = true
+            return true
+        }()
+
+        guard shouldSchedule else { return }
+        ioQueue.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.performPendingSessionWrite()
+        }
+    }
+
+    private func performPendingSessionWrite() {
+        let snapshot: PlaybackSessionSnapshot? = {
+            lock.lock()
+            defer { lock.unlock() }
+            sessionWriteScheduled = false
+            return latestSessionInMemory
+        }()
+        guard let snapshot, let data = try? encoder.encode(snapshot) else { return }
         try? data.write(to: sessionFileURL, options: .atomic)
 
-        // Синхронизируем краткую карточку в AppGroup UserDefaults для виджетов iOS
         if let sharedDefaults = UserDefaults(suiteName: AppConfig.appGroupIdentifier),
            let track = snapshot.currentTrack {
             sharedDefaults.set(track.title, forKey: "widget_track_title")
@@ -161,20 +215,70 @@ public final class PlaybackSessionStore: @unchecked Sendable {
 
     public func loadPlaybackSession() -> PlaybackSessionSnapshot? {
         lock.lock()
-        defer { lock.unlock() }
-        guard let data = try? Data(contentsOf: sessionFileURL) else { return nil }
-        return try? decoder.decode(PlaybackSessionSnapshot.self, from: data)
+        if let inMem = latestSessionInMemory {
+            lock.unlock()
+            return inMem
+        }
+        lock.unlock()
+
+        guard let data = try? Data(contentsOf: sessionFileURL),
+              let decoded = try? decoder.decode(PlaybackSessionSnapshot.self, from: data) else {
+            return nil
+        }
+        lock.lock()
+        if latestSessionInMemory == nil {
+            latestSessionInMemory = decoded
+        }
+        lock.unlock()
+        return decoded
     }
 
     public func saveLibraryState(_ state: UserLibraryPersistentState) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let data = try? encoder.encode(state) else { return }
+        let shouldSchedule: Bool = {
+            lock.lock()
+            defer { lock.unlock() }
+            latestLibraryStateInMemory = state
+            if libraryWriteScheduled {
+                return false
+            }
+            libraryWriteScheduled = true
+            return true
+        }()
+
+        guard shouldSchedule else { return }
+        ioQueue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.performPendingLibraryWrite()
+        }
+    }
+
+    private func performPendingLibraryWrite() {
+        let state: UserLibraryPersistentState? = {
+            lock.lock()
+            defer { lock.unlock() }
+            libraryWriteScheduled = false
+            return latestLibraryStateInMemory
+        }()
+        guard let state, let data = try? encoder.encode(state) else { return }
         try? data.write(to: libraryStateFileURL, options: .atomic)
+    }
+
+    public func flushPendingWritesSync() {
+        ioQueue.sync {
+            if sessionWriteScheduled {
+                performPendingSessionWrite()
+            }
+            if libraryWriteScheduled {
+                performPendingLibraryWrite()
+            }
+        }
     }
 
     public func loadLibraryState() -> UserLibraryPersistentState {
         lock.lock()
+        if let inMem = latestLibraryStateInMemory {
+            lock.unlock()
+            return inMem
+        }
         guard let data = try? Data(contentsOf: libraryStateFileURL),
               var decoded = try? decoder.decode(UserLibraryPersistentState.self, from: data) else {
             lock.unlock()
@@ -200,10 +304,12 @@ public final class PlaybackSessionStore: @unchecked Sendable {
             didMigratePersonalChats = true
         }
 
-        if didMigratePersonalChats, let migratedData = try? encoder.encode(decoded) {
-            try? migratedData.write(to: libraryStateFileURL, options: .atomic)
-        }
+        latestLibraryStateInMemory = decoded
         lock.unlock()
+
+        if didMigratePersonalChats {
+            saveLibraryState(decoded)
+        }
         return decoded
     }
 }

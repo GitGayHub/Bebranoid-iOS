@@ -55,7 +55,7 @@ public struct YouTubeImportSheet: View {
                             }
                         }
                         .padding(16)
-                        .liquidGlassCard(cornerRadius: 22, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                        .liquidGlassCard(cornerRadius: 22, tint: appState.accentSwiftUIColor, tintOpacity: 0.06, isSheer: true)
 
                         VStack(alignment: .leading, spacing: 8) {
                             Label("Поддерживаются плейлисты YouTube, YouTube Music, одиночные видео и Shorts (до 5000 треков).", systemImage: "checkmark.circle.fill")
@@ -66,7 +66,7 @@ public struct YouTubeImportSheet: View {
                                 .foregroundStyle(.white.opacity(0.74))
                         }
                         .padding(15)
-                        .liquidGlassCard(cornerRadius: 20, tint: .white, tintOpacity: 0.04)
+                        .liquidGlassCard(cornerRadius: 20, tint: .white, tintOpacity: 0.04, isSheer: true)
 
                         if let errorMessage {
                             Text(errorMessage)
@@ -74,7 +74,7 @@ public struct YouTubeImportSheet: View {
                                 .foregroundStyle(Color(red: 1.0, green: 0.50, blue: 0.50))
                                 .padding(13)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .liquidGlassCard(cornerRadius: 16, tint: .red, tintOpacity: 0.16)
+                                .liquidGlassCard(cornerRadius: 16, tint: .red, tintOpacity: 0.14, isSheer: true)
                         }
 
                         Button {

@@ -25,7 +25,7 @@ public struct QueueSheetView: View {
                             .foregroundStyle(.white.opacity(0.68))
                     }
                     .padding(28)
-                    .liquidGlassCard(cornerRadius: 24, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                    .liquidGlassCard(cornerRadius: 24, tint: appState.accentSwiftUIColor, tintOpacity: 0.08, isSheer: true)
                     .padding(.horizontal, 24)
                 } else {
                     List {
@@ -215,7 +215,7 @@ public struct TrackInfoSheetView: View {
                 content()
             }
             .padding(15)
-            .liquidGlassCard(cornerRadius: 20, tint: accentColor, tintOpacity: 0.08)
+            .liquidGlassCard(cornerRadius: 20, tint: accentColor, tintOpacity: 0.06, isSheer: true)
         }
     }
 
@@ -292,7 +292,7 @@ public struct AudioFXSheetView: View {
                                 }
                             }
                             .padding(12)
-                            .liquidGlassCard(cornerRadius: 22, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                            .liquidGlassCard(cornerRadius: 22, tint: appState.accentSwiftUIColor, tintOpacity: 0.06, isSheer: true)
                         }
 
                         // 2. Bass Boost (+8 dB @ 180 Hz)
@@ -308,7 +308,7 @@ public struct AudioFXSheetView: View {
                         }
                         .tint(appState.accentSwiftUIColor)
                         .padding(16)
-                        .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                        .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.06, isSheer: true)
 
                         // 3. Скорость воспроизведения (0.5x – 2.0x)
                         VStack(alignment: .leading, spacing: 10) {
@@ -343,7 +343,7 @@ public struct AudioFXSheetView: View {
                             }
                         }
                         .padding(16)
-                        .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                        .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.06, isSheer: true)
 
                         // 4. Настоящий двухпоточный кроссфейд (0.5–30 с)
                         VStack(alignment: .leading, spacing: 10) {
@@ -371,7 +371,7 @@ public struct AudioFXSheetView: View {
                             }
                         }
                         .padding(16)
-                        .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                        .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.06, isSheer: true)
                     }
                     .padding(18)
                 }

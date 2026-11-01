@@ -47,10 +47,11 @@ public struct TracksListView: View {
                             .padding(.horizontal, 16)
                     }
 
-                    if tracks.isEmpty {
-                        emptyTracksState
-                    } else {
-                        ScrollView {
+                    ScrollView {
+                        if tracks.isEmpty {
+                            emptyTracksState
+                                .frame(minHeight: 420)
+                        } else {
                             LazyVStack(spacing: 8) {
                                 ForEach(tracks) { track in
                                     TrackRowView(
@@ -68,6 +69,10 @@ public struct TracksListView: View {
                             }
                             .padding(.horizontal, 16)
                         }
+                    }
+                    .refreshable {
+                        appState.haptics.softSelection()
+                        await appState.refreshFullLibraryAndYouTubePlaylists()
                     }
                 }
             }
@@ -626,6 +631,17 @@ public struct TrackRowView: View {
                     systemImage: appState.isLyricsDisabled(for: track) ? "eye" : "eye.slash"
                 )
             }
+        } preview: {
+            LiquidGlassContextPreviewCard(
+                track: track,
+                localPath: appState.libraryState.customAlbumCovers[track.album] ?? track.coverPath,
+                remoteURL: track.remoteArtworkURL,
+                fallbackSeed: "\(track.album)|\(track.artist)",
+                title: track.title,
+                subtitle: "\(track.artist) • \(track.album)",
+                badgeText: isCached ? "СКАЧАН ОФЛАЙН" : "ОБЛАКО",
+                accentColor: appState.accentSwiftUIColor
+            )
         }
     }
 }
