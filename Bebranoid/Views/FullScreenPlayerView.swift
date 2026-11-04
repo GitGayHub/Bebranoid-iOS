@@ -239,26 +239,22 @@ public struct FullScreenPlayerView: View {
     private func syncLookupOriginalCover(for targetTrack: Track?) -> CGImage? {
         guard let targetTrack else { return nil }
         if let customPath = appState.libraryState.customAlbumCovers[targetTrack.album],
-           !customPath.isEmpty,
-           ArtworkService.shared.isValidImageFile(atPath: customPath) {
+           !customPath.isEmpty {
             if let mem = ArtworkService.shared.memoryCachedImage(forKey: customPath, tier: .originalSource) {
                 return mem
             }
-            if let cg = ArtworkService.shared.loadCGImage(from: URL(fileURLWithPath: customPath), tier: .originalSource) {
-                ArtworkService.shared.storeMemoryCachedImage(cg, forKey: customPath, tier: .originalSource)
-                return cg
+            if let memFull = ArtworkService.shared.memoryCachedImage(forKey: customPath, tier: .fullPlayer) {
+                return memFull
             }
         }
         if let mem = ArtworkService.shared.memoryCachedImage(forKey: targetTrack.id, tier: .originalSource) {
             return mem
         }
-        if let syncHit = ArtworkService.shared.resolveLocalCoverURLSync(
-            for: targetTrack,
-            customAlbumCovers: appState.libraryState.customAlbumCovers,
-            siblingTracks: appState.libraryState.tracks
-        ), let cg = ArtworkService.shared.loadCGImage(from: syncHit.url, tier: .originalSource) {
-            ArtworkService.shared.storeMemoryCachedImage(cg, forKey: targetTrack.id, tier: .originalSource)
-            return cg
+        if let memFull = ArtworkService.shared.memoryCachedImage(forKey: targetTrack.id, tier: .fullPlayer) {
+            return memFull
+        }
+        if let memGrid = ArtworkService.shared.memoryCachedImage(forKey: targetTrack.id, tier: .albumGrid) {
+            return memGrid
         }
         return nil
     }
@@ -1360,7 +1356,8 @@ public struct InteractiveSeekBarView: View {
 /// Монолитная 3D-плита обложки (`Sculpted3DCoverSlabView`), объединяющая:
 /// - Исходное разрешение обложки (`.originalSource`, 1 общий `CGImage` буфер без дублирования декодера)
 /// - Плавный бесшовный кроссфейд при переключении кнопками и мгновенную подстановку при свайпе пальцем
-/// - Синхронную бегущую световую обводку (`AngularGradient`), проходящую как по передней грани, так и по всему продлённому 3D-торцу!
+/// - Эстетичное продолжение крайних пикселей обложки в 3D-объёме при наклоне гироскопа (как в прошлой версии, без кричащих неоновых колец на торцах)
+/// - Изолированный `TimelineView` строго для тонкого `2.2 pt` ободка лицевой грани (0 перерисовок `CGImage` слоёв в секунду!)
 private struct Sculpted3DCoverSlabView: View {
     let primaryImage: CGImage?
     let outgoingImage: CGImage?
@@ -1381,106 +1378,108 @@ private struct Sculpted3DCoverSlabView: View {
             : Color(red: norm.r, green: norm.g, blue: norm.b)
         let stops = CoverLivingRimGradientBuilder.buildStops(accentRGB: accentRGB, isMonochrome: isMonochrome)
         let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 20.0)
-        let innerRadius = max(4.0, cornerRadius - 2.4)
+        let rimThickness: CGFloat = 2.2
+        let innerRadius = max(4.0, cornerRadius - rimThickness)
 
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isRimPaused)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let angleDeg = (t.truncatingRemainder(dividingBy: 8.0) / 8.0) * 360.0
-            let rimGradient = AngularGradient(
-                gradient: Gradient(stops: stops),
-                center: .center,
-                startAngle: .degrees(angleDeg),
-                endAngle: .degrees(angleDeg + 360.0)
-            )
-
-            ZStack {
-                // Продлённый 3D-объём при наклоне гироскопа: каждый слой несёт и пиксели края обложки, И синхронно бегущую световую обводку!
-                if tiltMagnitude > 0.012 {
-                    ForEach((1...5).reversed(), id: \.self) { sliceIdx in
-                        let frac = Double(sliceIdx) / 5.0
-                        ZStack {
+        ZStack {
+            // Идеальное продолжение крайних пикселей самой обложки по бокам при наклоне гироскопа (статические GPU-текстуры вне TimelineView!)
+            if tiltMagnitude > 0.015 {
+                ForEach((1...6).reversed(), id: \.self) { sliceIdx in
+                    let frac = Double(sliceIdx) / 6.0
+                    coverFullSliceLayer(radius: cornerRadius)
+                        .overlay(
                             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .fill(rimGradient)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                        .fill(Color.black.opacity(0.10 + 0.34 * frac))
-                                )
-
-                            coverFaceLayer(innerRadius: innerRadius)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: innerRadius, style: .continuous)
-                                        .fill(Color.black.opacity(0.14 + 0.32 * frac))
-                                )
-                                .padding(2.4)
-                        }
+                                .fill(Color.black.opacity(0.14 + 0.34 * frac))
+                        )
                         .offset(
-                            x: CGFloat(-tiltY * 0.46 * frac),
-                            y: CGFloat(tiltX * 0.46 * frac)
+                            x: CGFloat(-tiltY * 0.44 * frac),
+                            y: CGFloat(tiltX * 0.44 * frac)
                         )
                         .allowsHitTesting(false)
-                    }
                 }
+            }
 
-                // Лицевая грань с живой обводкой и мягким зеркальным бликом гироскопа
-                ZStack {
+            // Лицевая грань: вращается ТОЛЬКО тонкая 2.2pt подложка ободка внутри `SpinningRimOnlyView`,
+            // а сама текстура обложки `coverFaceLayer` никогда не пересоздаётся на тиках таймлайна!
+            ZStack {
+                SpinningRimOnlyView(
+                    stops: stops,
+                    cornerRadius: cornerRadius,
+                    isPaused: isRimPaused
+                )
+
+                coverFaceLayer(innerRadius: innerRadius)
+                    .padding(rimThickness)
+            }
+            .overlay {
+                if tiltMagnitude > 0.012 {
+                    let lightCenter = UnitPoint(
+                        x: max(0.05, min(0.95, 0.5 - specularOffset.width * 0.42)),
+                        y: max(0.05, min(0.95, 0.38 - specularOffset.height * 0.42))
+                    )
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(rimGradient)
-
-                    coverFaceLayer(innerRadius: innerRadius)
-                        .padding(2.4)
-                }
-                .overlay {
-                    if tiltMagnitude > 0.012 {
-                        let lightCenter = UnitPoint(
-                            x: max(0.05, min(0.95, 0.5 - specularOffset.width * 0.42)),
-                            y: max(0.05, min(0.95, 0.38 - specularOffset.height * 0.42))
-                        )
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(
-                                RadialGradient(
-                                    colors: [
-                                        Color.white.opacity(0.15 * tiltMagnitude),
-                                        Color.white.opacity(0.025 * tiltMagnitude),
-                                        Color.clear
-                                    ],
-                                    center: lightCenter,
-                                    startRadius: 8,
-                                    endRadius: coverSide * 0.78
-                                )
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color.white.opacity(0.14 * tiltMagnitude),
+                                    Color.white.opacity(0.02 * tiltMagnitude),
+                                    Color.clear
+                                ],
+                                center: lightCenter,
+                                startRadius: 8,
+                                endRadius: coverSide * 0.78
                             )
-                            .allowsHitTesting(false)
-                    }
+                        )
+                        .allowsHitTesting(false)
                 }
             }
         }
-        .shadow(color: pureAccent.opacity(isMonochrome ? 0.20 : 0.34), radius: 13, x: 0, y: 0)
-        .shadow(color: pureAccent.opacity(isMonochrome ? 0.24 : 0.38), radius: 3.5, x: 0, y: 0)
+        .shadow(color: pureAccent.opacity(isMonochrome ? 0.14 : 0.24), radius: 11, x: 0, y: 0)
         .animation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.55), value: accentRGB)
     }
 
     @ViewBuilder
+    private func coverFullSliceLayer(radius: CGFloat) -> some View {
+        ZStack {
+            if let cur = primaryImage ?? outgoingImage {
+                Image(decorative: cur, scale: 1.0, orientation: .up)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: coverSide, height: coverSide)
+            } else {
+                uniformBlackPlaceholder
+                    .frame(width: coverSide, height: coverSide)
+            }
+        }
+        .frame(width: coverSide, height: coverSide)
+        .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+    }
+
+    @ViewBuilder
     private func coverFaceLayer(innerRadius: CGFloat) -> some View {
+        let faceSide = max(16.0, coverSide - 4.4)
         ZStack {
             if let out = outgoingImage {
                 Image(decorative: out, scale: 1.0, orientation: .up)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+                    .frame(width: faceSide, height: faceSide)
             }
 
             if let cur = primaryImage {
                 Image(decorative: cur, scale: 1.0, orientation: .up)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+                    .frame(width: faceSide, height: faceSide)
                     .opacity(outgoingImage != nil ? incomingAlpha : 1.0)
             } else {
                 uniformBlackPlaceholder
-                    .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+                    .frame(width: faceSide, height: faceSide)
                     .opacity(outgoingImage != nil ? incomingAlpha : 1.0)
             }
         }
-        .frame(width: coverSide - 4.8, height: coverSide - 4.8)
+        .frame(width: faceSide, height: faceSide)
         .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
         .clipShape(RoundedRectangle(cornerRadius: innerRadius, style: .continuous))
     }
@@ -1491,6 +1490,28 @@ private struct Sculpted3DCoverSlabView: View {
             Image(systemName: "music.note")
                 .font(.system(size: max(28, coverSide * 0.22), weight: .regular))
                 .foregroundStyle(Color(red: 218.0 / 255.0, green: 218.0 / 255.0, blue: 228.0 / 255.0).opacity(0.60))
+        }
+    }
+}
+
+private struct SpinningRimOnlyView: View {
+    let stops: [Gradient.Stop]
+    let cornerRadius: CGFloat
+    let isPaused: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: isPaused)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let angleDeg = (t.truncatingRemainder(dividingBy: 9.0) / 9.0) * 360.0
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    AngularGradient(
+                        gradient: Gradient(stops: stops),
+                        center: .center,
+                        startAngle: .degrees(angleDeg),
+                        endAngle: .degrees(angleDeg + 360.0)
+                    )
+                )
         }
     }
 }

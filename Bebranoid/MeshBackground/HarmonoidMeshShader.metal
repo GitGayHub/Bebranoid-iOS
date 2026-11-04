@@ -37,8 +37,8 @@ fragment float4 harmonoidMeshFragment(
     );
 
     // 2. 4 control points (same Harmonoid sinusoidal trajectories, adapted for mobile screen)
-    const float speed = 0.61;
-    const float amp = 1.42;
+    const float speed = 0.50;
+    const float amp = 1.15;
     float2 p0 = float2((0.22 + sin(t * speed * 0.70 + 0.0) * (0.24 * amp)) * w, (0.25 + cos(t * speed * 0.90 + 0.0 * 0.8) * (0.22 * amp)) * h);
     float2 p1 = float2((0.78 + sin(t * speed * 0.85 + 1.7) * (0.22 * amp)) * w, (0.28 + cos(t * speed * 0.65 + 1.7 * 0.8) * (0.24 * amp)) * h);
     float2 p2 = float2((0.28 + sin(t * speed * 0.60 + 3.1) * (0.25 * amp)) * w, (0.78 + cos(t * speed * 0.80 + 3.1 * 0.8) * (0.20 * amp)) * h);
@@ -48,7 +48,7 @@ fragment float4 harmonoidMeshFragment(
     float3 palette[4] = { c0, c1, c2, c3 };
 
     for (int i = 0; i < 4; ++i) {
-        float radius = maxDim * (0.52 + 0.12 * sin(t * 0.48 + float(i)));
+        float radius = maxDim * (0.55 + 0.085 * sin(t * 0.36 + float(i)));
         float dist = distance(position.xy, centers[i]) / max(radius, 1.0);
         if (dist < 1.0) {
             float alpha = (dist < 0.45)

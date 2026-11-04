@@ -40,7 +40,7 @@ public enum ArtworkSizeTier: String, Sendable {
         case .listThumbnail: return 120
         case .albumGrid: return 384
         case .fullPlayer: return 1024
-        case .originalSource: return 0
+        case .originalSource: return 1440
         case .meshAnalysis: return 64
         }
     }
@@ -82,8 +82,13 @@ public final class ArtworkService: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let lock = NSLock()
 
+    private enum CachedSyncCoverLookup: Sendable {
+        case found(url: URL, priority: ArtworkSourcePriority)
+        case missing
+    }
+
     private var inFlightTasks: [String: Task<ResolvedArtworkResult?, Never>] = [:]
-    private var syncCoverPathCache: [String: (url: URL, priority: ArtworkSourcePriority)?] = [:]
+    private var syncCoverPathCache: [String: CachedSyncCoverLookup] = [:]
     private var checkedTracksWithoutEmbeddedArt = Set<String>()
     private var artistPrefetchTask: Task<Void, Never>? = nil
     private var dataCache = NSCache<NSString, NSData>()
@@ -167,11 +172,13 @@ public final class ArtworkService: @unchecked Sendable {
 
     // MARK: - Synchronous Disk Lookup (Strict Per-Track Isolation, 1:1 with `electron/main.js` `media-cover`)
 
-    /// Синхронно разрешает локальный путь обложки строго для конкретного трека без «заражения» чужих треков общей обложкой топика/альбома
+    /// Синхронно разрешает локальный путь обложки строго для конкретного трека без «заражения» чужих треков общей обложкой топика/альбома.
+    /// По умолчанию (`allowEmbeddedExtraction == false`) не выполняет тяжёлого чтения FLAC/MP3 на главном потоке.
     public func resolveLocalCoverURLSync(
         for track: Track,
         customAlbumCovers: [String: String] = [:],
-        siblingTracks: [Track] = []
+        siblingTracks: [Track] = [],
+        allowEmbeddedExtraction: Bool = false
     ) -> (url: URL, priority: ArtworkSourcePriority)? {
         // Priority 1: Explicit user-configured custom album cover
         if let customPath = customAlbumCovers[track.album],
@@ -180,9 +187,15 @@ public final class ArtworkService: @unchecked Sendable {
             return (URL(fileURLWithPath: customPath), .customCover)
         }
 
-        if customAlbumCovers.isEmpty,
-           let cachedEntry = withLock({ syncCoverPathCache[track.id] }) {
-            return cachedEntry
+        if let cachedLookup = withLock({ syncCoverPathCache[track.id] }) {
+            switch cachedLookup {
+            case .found(let url, let priority):
+                return (url, priority)
+            case .missing:
+                if !allowEmbeddedExtraction {
+                    return nil
+                }
+            }
         }
 
         let resolved: (url: URL, priority: ArtworkSourcePriority)? = {
@@ -204,24 +217,26 @@ public final class ArtworkService: @unchecked Sendable {
             let safeStem = (safeKey as NSString).deletingPathExtension
             let safeRawFile = storage.safeCacheFilename(for: track.filename)
 
-            // Priority 2b: Исходная HQ-обложка, извлечённая напрямую из аудиофайла (максимальное качество без пережатия!)
+            // Priority 2b: Исходная HQ-обложка, извлечённая напрямую из аудиофайла
             let hqCoverURL = storage.coversDirectory.appendingPathComponent("\(safeKey)_hq.jpg")
             if isValidImageFile(atPath: hqCoverURL.path) {
                 return (hqCoverURL, .embeddedAudioArtwork)
             }
 
-            // Priority 2c: Встроенная обложка внутри закешированного аудиофайла (всегда приоритетнее низкокачественных превью Telegram!)
-            let audioURL = storage.cachedAudioFileURL(for: track)
-            if fileManager.fileExists(atPath: audioURL.path),
-               !withLock({ checkedTracksWithoutEmbeddedArt.contains(track.cacheKey) }) {
-                if let embeddedData = AudioMetadataReader.extractEmbeddedArtworkSync(from: audioURL),
-                   embeddedData.count > 64 {
-                    if let savedHQ = saveEmbeddedHighResCoverToDisk(imageData: embeddedData, trackFilename: track.cacheKey) {
-                        recordArtworkLoaded()
-                        return (savedHQ, .embeddedAudioArtwork)
+            // Priority 2c: Встроенная обложка внутри закешированного аудиофайла (извлекается только в фоновом потоке!)
+            if allowEmbeddedExtraction || !Thread.isMainThread {
+                let audioURL = storage.cachedAudioFileURL(for: track)
+                if fileManager.fileExists(atPath: audioURL.path),
+                   !withLock({ checkedTracksWithoutEmbeddedArt.contains(track.cacheKey) }) {
+                    if let embeddedData = AudioMetadataReader.extractEmbeddedArtworkSync(from: audioURL),
+                       embeddedData.count > 64 {
+                        if let savedHQ = saveEmbeddedHighResCoverToDisk(imageData: embeddedData, trackFilename: track.cacheKey) {
+                            recordArtworkLoaded()
+                            return (savedHQ, .embeddedAudioArtwork)
+                        }
+                    } else {
+                        _ = withLock { checkedTracksWithoutEmbeddedArt.insert(track.cacheKey) }
                     }
-                } else {
-                    _ = withLock { checkedTracksWithoutEmbeddedArt.insert(track.cacheKey) }
                 }
             }
 
@@ -252,12 +267,14 @@ public final class ArtworkService: @unchecked Sendable {
             return nil
         }()
 
-        if customAlbumCovers.isEmpty {
-            withLock {
-                if syncCoverPathCache.count > 4000 {
-                    syncCoverPathCache.removeAll(keepingCapacity: true)
-                }
-                syncCoverPathCache[track.id] = resolved
+        withLock {
+            if syncCoverPathCache.count > 5000 {
+                syncCoverPathCache.removeAll(keepingCapacity: true)
+            }
+            if let resolved {
+                syncCoverPathCache[track.id] = .found(url: resolved.url, priority: resolved.priority)
+            } else {
+                syncCoverPathCache[track.id] = .missing
             }
         }
 
@@ -275,7 +292,8 @@ public final class ArtworkService: @unchecked Sendable {
         if let syncHit = resolveLocalCoverURLSync(
             for: track,
             customAlbumCovers: customAlbumCovers,
-            siblingTracks: siblingTracks
+            siblingTracks: siblingTracks,
+            allowEmbeddedExtraction: false
         ) {
             let data = loadCachedData(from: syncHit.url)
             return ResolvedArtworkResult(fileURL: syncHit.url, imageData: data, source: syncHit.priority)
@@ -286,10 +304,22 @@ public final class ArtworkService: @unchecked Sendable {
             return await existingTask.value
         }
 
-        let task = Task<ResolvedArtworkResult?, Never> { [weak self] in
+        let task = Task.detached(priority: .utility) { [weak self] () -> ResolvedArtworkResult? in
             guard let self else { return nil }
             defer {
                 _ = self.withLock { self.inFlightTasks.removeValue(forKey: dedupKey) }
+            }
+
+            // Priority 2c (off-main): Встроенная обложка внутри закешированного аудиофайла
+            if let embeddedHit = self.resolveLocalCoverURLSync(
+                for: track,
+                customAlbumCovers: customAlbumCovers,
+                siblingTracks: siblingTracks,
+                allowEmbeddedExtraction: true
+            ) {
+                let data = self.loadCachedData(from: embeddedHit.url)
+                self.notifyArtworkResolved(trackId: track.id, albumName: "", fileURL: embeddedHit.url)
+                return ResolvedArtworkResult(fileURL: embeddedHit.url, imageData: data, source: embeddedHit.priority)
             }
 
             // Priority 4: Индивидуальная миниатюра трека из Telegram (`coverFileId` / `album_cover_thumbnail` через TDLib)

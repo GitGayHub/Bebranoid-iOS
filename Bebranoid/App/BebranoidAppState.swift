@@ -62,6 +62,8 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var nextTrackPalette: [MeshRGB]? = nil
     @Published public var nextTrackAccent: MeshRGB? = nil
     private var preparedNextTrackId: String? = nil
+    private var analyzedPaletteCache: [String: (palette: [MeshRGB], meshColors: [MeshRGB], uiAccent: MeshRGB)] = [:]
+    private var nowPlayingArtworkDataCache: [String: Data] = [:]
     @Published public var accentRGB: MeshRGB = HarmonoidMeshEngine.defaultAccent
     @Published public var crossfadeProgress: Double = 0.0
     @Published public var isReducedMotionEnabled: Bool = false
@@ -771,8 +773,8 @@ public final class BebranoidAppState: ObservableObject {
 
     // MARK: - Harmonoid Mesh Palette Resolution
 
-    private func analyzeLocalArtworkURL(_ localURL: URL) -> (palette: [MeshRGB], meshColors: [MeshRGB], uiAccent: MeshRGB)? {
-        if let cgImage = artworkService.loadCGImage(from: localURL, tier: .meshAnalysis) {
+    nonisolated private static func analyzeLocalArtworkURLOffMain(_ localURL: URL) -> (palette: [MeshRGB], meshColors: [MeshRGB], uiAccent: MeshRGB)? {
+        if let cgImage = ArtworkService.shared.loadCGImage(from: localURL, tier: .meshAnalysis) {
             return HarmonoidMeshEngine.analyzeCoverImage(cgImage)
         }
         #if canImport(UIKit)
@@ -795,9 +797,26 @@ public final class BebranoidAppState: ObservableObject {
             for: track,
             customAlbumCovers: libraryState.customAlbumCovers,
             siblingTracks: libraryState.tracks
-        ), let analyzed = analyzeLocalArtworkURL(resolvedHit.url) {
-            currentPalette = analyzed.meshColors
-            accentRGB = analyzed.uiAccent
+        ) {
+            let hitPath = resolvedHit.url.path
+            if let cached = analyzedPaletteCache[hitPath] {
+                currentPalette = cached.meshColors
+                accentRGB = cached.uiAccent
+                return
+            }
+            let hitURL = resolvedHit.url
+            let targetTrackId = track.id
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let analyzed = Self.analyzeLocalArtworkURLOffMain(hitURL) else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.analyzedPaletteCache[hitPath] = analyzed
+                    if self.currentTrack?.id == targetTrackId {
+                        self.currentPalette = analyzed.meshColors
+                        self.accentRGB = analyzed.uiAccent
+                    }
+                }
+            }
             return
         }
 
@@ -805,20 +824,26 @@ public final class BebranoidAppState: ObservableObject {
         currentPalette = HarmonoidMeshEngine.monochromePalette
         accentRGB = HarmonoidMeshEngine.monochromeAccent
 
-        // Запускаем асинхронное разрешение реальной обложки (embedded / Telegram / YouTube)
+        // Запускаем асинхронное разрешение реальной обложки (embedded / Telegram / YouTube) вне главного потока
         let customCovers = libraryState.customAlbumCovers
         let siblings = libraryState.tracks
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            if let resolved = await self.artworkService.resolveArtwork(
+        let targetTrackId = track.id
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let resolved = await ArtworkService.shared.resolveArtwork(
                 for: track,
                 customAlbumCovers: customCovers,
                 siblingTracks: siblings
-            ), let fileURL = resolved.fileURL,
-               self.currentTrack?.id == track.id,
-               let analyzed = self.analyzeLocalArtworkURL(fileURL) {
-                self.currentPalette = analyzed.meshColors
-                self.accentRGB = analyzed.uiAccent
+            ), let fileURL = resolved.fileURL else { return }
+            let filePath = fileURL.path
+            let analyzed = Self.analyzeLocalArtworkURLOffMain(fileURL)
+            guard let analyzed else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.analyzedPaletteCache[filePath] = analyzed
+                if self.currentTrack?.id == targetTrackId {
+                    self.currentPalette = analyzed.meshColors
+                    self.accentRGB = analyzed.uiAccent
+                }
             }
         }
     }
@@ -828,29 +853,54 @@ public final class BebranoidAppState: ObservableObject {
             for: nextTrack,
             customAlbumCovers: libraryState.customAlbumCovers,
             siblingTracks: libraryState.tracks
-        ), let analyzed = analyzeLocalArtworkURL(resolvedHit.url) {
-            preparedNextTrackId = nextTrack.id
-            nextTrackPalette = analyzed.meshColors
-            nextTrackAccent = analyzed.uiAccent
+        ) {
+            let hitPath = resolvedHit.url.path
+            if let cached = analyzedPaletteCache[hitPath] {
+                preparedNextTrackId = nextTrack.id
+                nextTrackPalette = cached.meshColors
+                nextTrackAccent = cached.uiAccent
+                return
+            }
+            let hitURL = resolvedHit.url
+            let nextTrackId = nextTrack.id
+            Task.detached(priority: .utility) { [weak self] in
+                guard let analyzed = Self.analyzeLocalArtworkURLOffMain(hitURL) else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.analyzedPaletteCache[hitPath] = analyzed
+                    if let currentNextIdx = self.peekNextTrackIndex(),
+                       currentNextIdx < self.queue.count,
+                       self.queue[currentNextIdx].id == nextTrackId {
+                        self.preparedNextTrackId = nextTrackId
+                        self.nextTrackPalette = analyzed.meshColors
+                        self.nextTrackAccent = analyzed.uiAccent
+                    }
+                }
+            }
             return
         }
 
         let customCovers = libraryState.customAlbumCovers
         let siblings = libraryState.tracks
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            if let resolved = await self.artworkService.resolveArtwork(
+        let nextTrackId = nextTrack.id
+        Task.detached(priority: .utility) { [weak self] in
+            guard let resolved = await ArtworkService.shared.resolveArtwork(
                 for: nextTrack,
                 customAlbumCovers: customCovers,
                 siblingTracks: siblings
-            ), let fileURL = resolved.fileURL,
-               let currentNextIdx = self.peekNextTrackIndex(),
-               currentNextIdx < self.queue.count,
-               self.queue[currentNextIdx].id == nextTrack.id,
-               let analyzed = self.analyzeLocalArtworkURL(fileURL) {
-                self.preparedNextTrackId = nextTrack.id
-                self.nextTrackPalette = analyzed.meshColors
-                self.nextTrackAccent = analyzed.uiAccent
+            ), let fileURL = resolved.fileURL else { return }
+            let filePath = fileURL.path
+            guard let analyzed = Self.analyzeLocalArtworkURLOffMain(fileURL) else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.analyzedPaletteCache[filePath] = analyzed
+                if let currentNextIdx = self.peekNextTrackIndex(),
+                   currentNextIdx < self.queue.count,
+                   self.queue[currentNextIdx].id == nextTrackId {
+                    self.preparedNextTrackId = nextTrackId
+                    self.nextTrackPalette = analyzed.meshColors
+                    self.nextTrackAccent = analyzed.uiAccent
+                }
             }
         }
     }
@@ -1719,7 +1769,33 @@ public final class BebranoidAppState: ObservableObject {
                customAlbumCovers: libraryState.customAlbumCovers,
                siblingTracks: libraryState.tracks
            ) {
-            coverData = try? Data(contentsOf: resolvedHit.url)
+            let hitPath = resolvedHit.url.path
+            if let cachedData = nowPlayingArtworkDataCache[hitPath] {
+                coverData = cachedData
+            } else {
+                let hitURL = resolvedHit.url
+                let targetTrackId = track.id
+                Task.detached(priority: .utility) { [weak self] in
+                    guard let loaded = try? Data(contentsOf: hitURL) else { return }
+                    await MainActor.run {
+                        guard let self else { return }
+                        if self.nowPlayingArtworkDataCache.count > 24 {
+                            self.nowPlayingArtworkDataCache.removeAll(keepingCapacity: true)
+                        }
+                        self.nowPlayingArtworkDataCache[hitPath] = loaded
+                        if self.currentTrack?.id == targetTrackId {
+                            self.nowPlaying.updateNowPlaying(
+                                track: self.currentTrack,
+                                isPlaying: self.isPlaying,
+                                currentTime: self.currentTime,
+                                duration: self.duration,
+                                playbackRate: self.audioEngine.effectivePlaybackRate,
+                                artworkData: loaded
+                            )
+                        }
+                    }
+                }
+            }
         }
         nowPlaying.updateNowPlaying(
             track: currentTrack,

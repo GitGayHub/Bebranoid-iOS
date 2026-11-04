@@ -597,7 +597,7 @@ public enum HarmonoidMeshEngine {
     }
 
     /// Адаптация той же самой 4-точечной синусоидальной логики Harmonoid под компактный экран iPhone:
-    /// чуть более выраженная амплитуда дрейфа и дыхания пятен, чтобы живое движение фона было деликатно заметно на узком дисплее телефона.
+    /// мягкое, органичное дыхание пятен без резких пульсаций.
     public static func mobileBlobCenters(
         at timeSec: Double,
         width: Double,
@@ -606,14 +606,14 @@ public enum HarmonoidMeshEngine {
     ) -> [MeshBlobPoint] {
         let cols = meshColors.count >= 4 ? meshColors : defaultPalette
         let maxDim = max(width, height)
-        let mobileSpeed = motionSpeed * 1.36
-        let ampBoost = 1.42
+        let mobileSpeed = motionSpeed * 1.12
+        let ampBoost = 1.15
 
         return (0..<4).map { i in
             let p = controlPoints[i]
             let x = (p.bx + sin(timeSec * mobileSpeed * p.sx + p.p) * (p.ax * ampBoost)) * width
             let y = (p.by + cos(timeSec * mobileSpeed * p.sy + p.p * 0.8) * (p.ay * ampBoost)) * height
-            let radius = maxDim * (0.52 + 0.12 * sin(timeSec * 0.48 + Double(i)))
+            let radius = maxDim * (0.55 + 0.085 * sin(timeSec * 0.36 + Double(i)))
             return MeshBlobPoint(
                 index: i,
                 x: x,

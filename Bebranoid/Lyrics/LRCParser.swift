@@ -100,15 +100,49 @@ public enum LRCParser {
         }
     }
 
+    private static let decEntityRegex = try? NSRegularExpression(pattern: #"&#(\d{1,6});"#, options: [])
+    private static let hexEntityRegex = try? NSRegularExpression(pattern: #"&#[xX]([0-9A-Fa-f]{1,6});"#, options: [])
+
     public static func decodeXMLEntities(_ input: String) -> String {
-        input
+        guard input.contains("&") else { return input }
+        var s = input
             .replacingOccurrences(of: "&apos;", with: "'")
             .replacingOccurrences(of: "&#39;", with: "'")
             .replacingOccurrences(of: "&#x27;", with: "'")
+            .replacingOccurrences(of: "&#X27;", with: "'")
+            .replacingOccurrences(of: "&#x2019;", with: "’")
+            .replacingOccurrences(of: "&#8217;", with: "’")
             .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#34;", with: "\"")
+            .replacingOccurrences(of: "&#x22;", with: "\"")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&#160;", with: " ")
+            .replacingOccurrences(of: "&#xa0;", with: " ")
             .replacingOccurrences(of: "&lt;", with: "<")
             .replacingOccurrences(of: "&gt;", with: ">")
             .replacingOccurrences(of: "&amp;", with: "&")
+
+        if s.contains("&#"), let hexRegex = hexEntityRegex {
+            let ns = s as NSString
+            let matches = hexRegex.matches(in: s, options: [], range: NSRange(location: 0, length: ns.length))
+            for m in matches.reversed() {
+                let hexStr = ns.substring(with: m.range(at: 1))
+                if let code = UInt32(hexStr, radix: 16), let scalar = UnicodeScalar(code), let range = Range(m.range, in: s) {
+                    s.replaceSubrange(range, with: String(Character(scalar)))
+                }
+            }
+        }
+        if s.contains("&#"), let decRegex = decEntityRegex {
+            let ns = s as NSString
+            let matches = decRegex.matches(in: s, options: [], range: NSRange(location: 0, length: ns.length))
+            for m in matches.reversed() {
+                let decStr = ns.substring(with: m.range(at: 1))
+                if let code = UInt32(decStr, radix: 10), let scalar = UnicodeScalar(code), let range = Range(m.range, in: s) {
+                    s.replaceSubrange(range, with: String(Character(scalar)))
+                }
+            }
+        }
+        return s
     }
 
     /// Парсит TTML-документ (`lyrics-api.boidu.dev` BetterLyrics for YouTube Music / Apple Music) с миллисекундной точностью слов и слогов
@@ -285,10 +319,16 @@ public enum LRCParser {
             }
         }
 
+        // Декодируем HTML/XML-сущности (`&#x27;`, `&apos;`, `&quot;`) и убираем теги форматирования цвета/шрифта в LRC / RichSync
+        let decodedRaw = decodeXMLEntities(raw)
+            .replacingOccurrences(of: #"</?font[^>]*>"#, with: "", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"\{\\[^}]*\}"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\[/?color[^\]]*\]"#, with: "", options: [.regularExpression, .caseInsensitive])
+
         let lineRegex = try? NSRegularExpression(pattern: lineTagPattern, options: [])
         let wordRegex = try? NSRegularExpression(pattern: wordTagPattern, options: [])
 
-        let rawLines = raw.components(separatedBy: "\n")
+        let rawLines = decodedRaw.components(separatedBy: "\n")
         var syncedEntries: [(time: Double, text: String, rawWords: [(time: Double, explicitEnd: Double?, text: String)]?)] = []
         var hasWordSync = false
 
@@ -337,12 +377,17 @@ public enum LRCParser {
                     let fracRange = wm.range(at: 3)
                     let fracStr = fracRange.location != NSNotFound ? nsBody.substring(with: fracRange) : nil
                     let wTime = parseTimeComponents(minStr: minStr, secStr: secStr, fracStr: fracStr)
-                    let rawWord = nsBody.substring(with: wm.range(at: 4))
+                    let rawWord = decodeXMLEntities(nsBody.substring(with: wm.range(at: 4)))
                     let wText = rawWord
                         .replacingOccurrences(of: "♪", with: "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if !wText.isEmpty {
-                        parsedWords.append((time: wTime, explicitEnd: nil, text: wText))
+                        if let last = parsedWords.last,
+                           (last.text.hasSuffix("-") || last.text.hasSuffix("'") || last.text.hasSuffix("’")) {
+                            parsedWords[parsedWords.count - 1].text += wText
+                        } else {
+                            parsedWords.append((time: wTime, explicitEnd: nil, text: wText))
+                        }
                     } else if !parsedWords.isEmpty && parsedWords[parsedWords.count - 1].explicitEnd == nil && wTime >= parsedWords[parsedWords.count - 1].time {
                         // Закрывающий тег `<mm:ss.xx>` из YouTube Music / SimpMusic RichSync задаёт точный конец слова
                         parsedWords[parsedWords.count - 1].explicitEnd = wTime

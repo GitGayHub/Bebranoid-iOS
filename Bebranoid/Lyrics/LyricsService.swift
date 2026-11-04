@@ -1,7 +1,7 @@
 import Foundation
 
 public struct CachedLyricsRecord: Codable, Sendable {
-    public static let currentSchemaVersion: Int = 2
+    public static let currentSchemaVersion: Int = 3
 
     public var schemaVersion: Int
     public var trackId: String
@@ -415,6 +415,20 @@ public final class LyricsService: @unchecked Sendable {
         targetDuration: Double
     ) async -> ResolvedOnlineLyricsCandidate? {
         guard !title.isEmpty, !artist.isEmpty else { return nil }
+        let hasValidAlbum = (album != nil && !album!.isEmpty && album != "Без альбома" && album!.lowercased() != "youtube")
+        if hasValidAlbum,
+           let withAlbum = await requestBetterLyricsTTML(title: title, artist: artist, album: album, targetDuration: targetDuration) {
+            return withAlbum
+        }
+        return await requestBetterLyricsTTML(title: title, artist: artist, album: nil, targetDuration: targetDuration)
+    }
+
+    private func requestBetterLyricsTTML(
+        title: String,
+        artist: String,
+        album: String?,
+        targetDuration: Double
+    ) async -> ResolvedOnlineLyricsCandidate? {
         var comps = URLComponents(string: "https://lyrics-api.boidu.dev/getLyrics")
         var items = [
             URLQueryItem(name: "s", value: title),
@@ -465,7 +479,7 @@ public final class LyricsService: @unchecked Sendable {
             document: doc,
             remoteDuration: bodyDuration ?? targetDuration,
             source: "youtube-music-ttml",
-            providerBonus: 34.0
+            providerBonus: 58.0
         )
     }
 

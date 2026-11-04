@@ -140,7 +140,7 @@ public struct RootTabView: View {
         .fullScreenCover(isPresented: $appState.isTelegramAuthPresented) {
             TelegramAuthView(appState: appState)
                 .interactiveDismissDisabled(true)
-                .presentationBackground(.clear)
+                .presentationBackground(.ultraThinMaterial)
         }
     }
 

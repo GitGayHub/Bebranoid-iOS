@@ -86,31 +86,19 @@ public struct HarmonoidMeshView: View {
                     )
                 }
             } else {
-                GeometryReader { geo in
-                    let renderScale: CGFloat = 0.28
-                    let compactWidth = max(64.0, ceil(geo.size.width * renderScale))
-                    let compactHeight = max(64.0, ceil(geo.size.height * renderScale))
-
-                    TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: shouldPauseTimeline)) { timeline in
-                        Canvas(opaque: true, rendersAsynchronously: true) { context, size in
-                            let liveTime = SharedMeshMotionClock.shared.sampleSeconds(
-                                at: timeline.date,
-                                paused: isReducedMotion || isOccluded || isSceneInactive
-                            )
-                            let activeColors = resolveActivePalettePure(at: timeline.date)
-                            drawMesh(
-                                in: &context,
-                                size: size,
-                                palette: activeColors,
-                                timeSec: liveTime,
-                                useMobileMotionScale: true
-                            )
-                        }
-                        .frame(width: compactWidth, height: compactHeight)
-                        .scaleEffect(
-                            x: max(1.0, geo.size.width / compactWidth),
-                            y: max(1.0, geo.size.height / compactHeight),
-                            anchor: .topLeading
+                TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: shouldPauseTimeline)) { timeline in
+                    Canvas(opaque: true, rendersAsynchronously: true) { context, size in
+                        let liveTime = SharedMeshMotionClock.shared.sampleSeconds(
+                            at: timeline.date,
+                            paused: isReducedMotion || isOccluded || isSceneInactive
+                        )
+                        let activeColors = resolveActivePalettePure(at: timeline.date)
+                        drawMesh(
+                            in: &context,
+                            size: size,
+                            palette: activeColors,
+                            timeSec: liveTime,
+                            useMobileMotionScale: true
                         )
                     }
                 }

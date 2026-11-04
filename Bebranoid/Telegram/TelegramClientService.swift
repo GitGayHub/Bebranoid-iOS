@@ -665,7 +665,13 @@ public final class TelegramClientService: @unchecked Sendable {
             setAuthStep(.authorized, rawState: stateType)
             Task { await refreshAuthorizedUserProfile() }
 
-        case "authorizationStateClosing", "authorizationStateLoggingOut":
+        case "authorizationStateClosing":
+            withLock {
+                tdlibParametersConfigured = false
+                hasLoadedInitialChatLists = false
+            }
+
+        case "authorizationStateLoggingOut":
             withLock {
                 tdlibParametersConfigured = false
                 resolvedChatIds.removeAll()
@@ -678,16 +684,12 @@ public final class TelegramClientService: @unchecked Sendable {
         case "authorizationStateClosed":
             withLock {
                 tdlibParametersConfigured = false
-                resolvedChatIds.removeAll()
-                discoveredChatsById.removeAll()
-                discoveredChatFolderIds.removeAll()
                 hasLoadedInitialChatLists = false
             }
-            setAuthStep(.unauthorized, rawState: stateType)
             bridge.resetClient(sendCloseFirst: false)
-            advanceTDLibSessionEpoch()
+            // НЕ вызываем advanceTDLibSessionEpoch() при закрытии клиента, чтобы сохранённая сессия Telegram не удалялась!
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                try? await Task.sleep(nanoseconds: 450_000_000)
                 await self?.initializeAndRestoreSession()
             }
 
@@ -796,7 +798,16 @@ public final class TelegramClientService: @unchecked Sendable {
                 withLock { tdlibParametersConfigured = true }
                 return
             }
-            if msgLower.contains("locked") || msgLower.contains("failed to open") || msgLower.contains("closed") || msgLower.contains("corrupt") {
+            if msgLower.contains("locked") || msgLower.contains("failed to open") || msgLower.contains("closed") {
+                // Если БД временно заблокирована старым дескриптором TDLib — закрываем старый клиент и ждём освобождения SQLite lock БЕЗ удаления папки сессии!
+                bridge.resetClient(sendCloseFirst: true)
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                _ = bridge.ensureClientCreated()
+                _ = try await bridge.sendAsync(request, timeoutSeconds: 15.0)
+                withLock { tdlibParametersConfigured = true }
+                return
+            }
+            if msgLower.contains("corrupt") || msgLower.contains("encryption key") {
                 bridge.resetClient(sendCloseFirst: true)
                 advanceTDLibSessionEpoch()
                 _ = bridge.ensureClientCreated()
@@ -1062,10 +1073,14 @@ public final class TelegramClientService: @unchecked Sendable {
     }
 
     public func logout() {
+        let rememberedPhone = keychain.readString(for: .telegramAuthorizedPhone)
         bridge.sendFireAndForget(["@type": "logOut"])
         keychain.clearAllTelegramCredentials()
+        if let rememberedPhone, !rememberedPhone.isEmpty {
+            keychain.saveString(rememberedPhone, for: .telegramAuthorizedPhone)
+        }
         withLock {
-            pendingPhoneNumber = nil
+            pendingPhoneNumber = rememberedPhone
             password2FAHint = nil
             currentUserDisplayName = nil
             lastErrorText = nil

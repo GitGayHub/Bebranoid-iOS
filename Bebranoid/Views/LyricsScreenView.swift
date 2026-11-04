@@ -33,7 +33,7 @@ public struct LyricsScreenView: View {
                 currentPalette: appState.currentPalette,
                 nextPalette: appState.nextTrackPalette,
                 crossfadeProgress: appState.crossfadeProgress,
-                isReducedMotion: appState.isReducedMotionEnabled || dragDismissOffset > 1,
+                isReducedMotion: true,
                 fixedAnimationTime: fixedTime
             )
 

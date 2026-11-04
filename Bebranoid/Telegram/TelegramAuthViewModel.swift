@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// ViewModel авторизации Telegram (`src/views/Auth.jsx` + `electron/main.js`).
 /// Управляет вводом `API ID`, `API Hash`, номера телефона, кода подтверждения, QR-входа (`requestQrCodeAuthentication`) и облачного пароля 2FA.
@@ -24,6 +27,7 @@ public final class TelegramAuthViewModel: ObservableObject {
     private let client: TelegramClientService
     private let keychain: KeychainHelper
     private var cancellables = Set<AnyCancellable>()
+    private var lastAutoSubmittedClipboardCode: String? = nil
     public var onAuthSuccess: (() -> Void)?
 
     public init(
@@ -96,22 +100,85 @@ public final class TelegramAuthViewModel: ObservableObject {
         client.saveApiCredentials(apiId: "\(numericId)", apiHash: cleanHash)
     }
 
-    public func requestCode() async {
+    public func requestCode(openTelegramAfterRequest: Bool = false) async {
         errorMessage = nil
         if !client.hasConfiguredApiCredentials || (!apiId.isEmpty && !apiHash.isEmpty) {
             saveCredentialsOnly()
             guard errorMessage == nil else { return }
         }
 
+        let trimmedPhone = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPhone.isEmpty {
+            keychain.saveString(trimmedPhone, for: .telegramAuthorizedPhone)
+        }
+
         isLoading = true
         defer { isLoading = false }
 
         do {
+            lastAutoSubmittedClipboardCode = nil
             let nextStep = try await client.startPhoneAuthentication(phoneNumber: phoneNumber)
             applyStep(nextStep)
+            if openTelegramAfterRequest, case .awaitingCode = nextStep {
+                openTelegramAppOnDevice()
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Извлекает 5-значный код Telegram из произвольного текста (даже если скопировано всё сообщение целиком)
+    public static func extractFiveDigitTelegramCode(from rawText: String) -> String? {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let digitsOnly = trimmed.filter(\.isWholeNumber)
+        if digitsOnly.count == 5 && trimmed.count <= 8 {
+            return digitsOnly
+        }
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\d)(\\d{5})(?!\\d)") else {
+            return nil
+        }
+        let nsRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+        guard let match = regex.firstMatch(in: trimmed, options: [], range: nsRange),
+              match.numberOfRanges > 1,
+              let codeRange = Range(match.range(at: 1), in: trimmed) else {
+            return nil
+        }
+        return String(trimmed[codeRange])
+    }
+
+    /// Проверяет буфер обмена iOS на наличие 5-значного кода Telegram и автоматически подставляет/отправляет его
+    @discardableResult
+    public func tryAutoFillCodeFromClipboard(autoSubmit: Bool = true, forceResubmitSameCode: Bool = false) -> Bool {
+        #if canImport(UIKit)
+        guard case .awaitingCode = step, !isLoading else { return false }
+        guard let rawPaste = UIPasteboard.general.string,
+              let code = Self.extractFiveDigitTelegramCode(from: rawPaste) else {
+            return false
+        }
+        if !forceResubmitSameCode && lastAutoSubmittedClipboardCode == code {
+            return false
+        }
+        lastAutoSubmittedClipboardCode = code
+        verificationCode = code
+        if autoSubmit {
+            Task { await submitCode() }
+        }
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    public func openTelegramAppOnDevice() {
+        #if canImport(UIKit)
+        guard let tgURL = URL(string: "tg://") else { return }
+        UIApplication.shared.open(tgURL, options: [:]) { success in
+            if !success, let webFallback = URL(string: "https://t.me/") {
+                UIApplication.shared.open(webFallback, options: [:], completionHandler: nil)
+            }
+        }
+        #endif
     }
 
     public func requestQRLogin() async {

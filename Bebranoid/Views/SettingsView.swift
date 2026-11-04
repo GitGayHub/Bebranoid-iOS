@@ -594,8 +594,10 @@ public struct TelegramAuthView: View {
         .onChange(of: authVM.step) { _, newStep in
             switch newStep {
             case .awaitingCode:
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    focusedField = .code
+                if !authVM.tryAutoFillCodeFromClipboard(autoSubmit: true) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        focusedField = .code
+                    }
                 }
             case .awaiting2FAPassword:
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -605,6 +607,16 @@ public struct TelegramAuthView: View {
                 break
             }
         }
+        #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            if case .awaitingCode = authVM.step {
+                if authVM.tryAutoFillCodeFromClipboard(autoSubmit: true) {
+                    focusedField = nil
+                    appState.haptics.lightTap()
+                }
+            }
+        }
+        #endif
         .task {
             // Инициализируем TDLib в состоянии ожидания номера (БЕЗ вызова QR, который раньше блокировал отправку кода!)
             if !appState.telegramClient.isAuthorized {
@@ -617,7 +629,7 @@ public struct TelegramAuthView: View {
 
     private var phoneStepView: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Введите ваш номер телефона — 5-значный код мгновенно придёт в чат «Telegram» на вашем телефоне.")
+            Text("Введите ваш номер телефона — 5-значный код мгновенно придёт в чат «Telegram» на этом же iPhone. Скопируйте сообщение в Telegram и вернитесь сюда — вход выполнится автоматически.")
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.80))
 
@@ -635,6 +647,28 @@ public struct TelegramAuthView: View {
                         .stroke(focusedField == .phone ? appState.accentSwiftUIColor : Color.white.opacity(0.12), lineWidth: 1.2)
                 )
                 .foregroundStyle(.white)
+
+            Button {
+                focusedField = nil
+                appState.haptics.lightTap()
+                Task { await authVM.requestCode(openTelegramAfterRequest: true) }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 14, weight: .bold))
+                    Text("Получить код и сразу открыть Telegram ↗")
+                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(red: 0.16, green: 0.58, blue: 0.96).opacity(0.88))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(authVM.isLoading || authVM.phoneNumber.filter(\.isWholeNumber).count < 8)
 
             HStack {
                 Button {
@@ -675,9 +709,53 @@ public struct TelegramAuthView: View {
                     .foregroundStyle(.white)
             }
 
-            Text("Откройте приложение Telegram (чат «Telegram»), скопируйте 5-значный код и введите его ниже. Это окно не закроется при переключении приложений.")
+            Text("Нажмите «Открыть Telegram», скопируйте сообщение с кодом и просто вернитесь в Bebranoid — код вставится и отправится сам!")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.72))
+                .foregroundStyle(.white.opacity(0.76))
+
+            HStack(spacing: 10) {
+                Button {
+                    appState.haptics.lightTap()
+                    authVM.openTelegramAppOnDevice()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("Открыть Telegram ↗")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color(red: 0.16, green: 0.58, blue: 0.96).opacity(0.88))
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    appState.haptics.lightTap()
+                    focusedField = nil
+                    _ = authVM.tryAutoFillCodeFromClipboard(autoSubmit: true, forceResubmitSameCode: true)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.on.clipboard.fill")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("Вставить код")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(appState.accentSwiftUIColor)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(authVM.isLoading)
+            }
 
             TextField("5-значный код (например: 12345)", text: $authVM.verificationCode)
                 .focused($focusedField, equals: .code)

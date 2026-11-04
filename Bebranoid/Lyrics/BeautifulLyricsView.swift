@@ -173,7 +173,22 @@ public struct BeautifulLyricsView: View {
                         }
                     }
                     .onPreferenceChange(LyricNodeFramePreferenceKey.self) { updatedFrames in
-                        nodeFrames = updatedFrames
+                        var didMeaningfullyChange = (nodeFrames.count != updatedFrames.count)
+                        if !didMeaningfullyChange {
+                            for (key, rect) in updatedFrames {
+                                guard let old = nodeFrames[key] else {
+                                    didMeaningfullyChange = true
+                                    break
+                                }
+                                if abs(old.midY - rect.midY) > 1.5 || abs(old.height - rect.height) > 1.5 {
+                                    didMeaningfullyChange = true
+                                    break
+                                }
+                            }
+                        }
+                        if didMeaningfullyChange {
+                            nodeFrames = updatedFrames
+                        }
                     }
                     .onAppear {
                         let now = liveTimeProvider()
@@ -271,7 +286,7 @@ private struct ActiveLineIndexDriverView: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 45.0, paused: !isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !isPlaying)) { context in
             let _ = context.date
             let now = liveTimeProvider()
             let computedLine = LRCParser.findActiveLineIndex(lines: lines, currentTime: now)
@@ -409,9 +424,9 @@ private struct BeautifulVocalLineRow: View {
                 VStack(alignment: .leading, spacing: 5) {
                     if !group.syllables.isEmpty && syncKind != .plain {
                         // Неактивные строки рендерятся одним лёгким `Text` с предкэшированным `fitScale` (в 20 раз меньше вью в дереве SwiftUI!),
-                        // а пословный `TimelineView` работает строго на 1 активной строке (60 FPS без перегрева iPhone!)
+                        // а пословный `TimelineView` работает строго на 1 активной строке без перегрева iPhone
                         if isLineActive {
-                            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { context in
+                            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isPlaying)) { context in
                                 let _ = context.date
                                 SyllableSingleLineView(
                                     syllables: group.syllables,
@@ -562,16 +577,6 @@ private struct SyllableWordSpanView: View {
             let lead = max(0.002, min(0.96, p - softHalf))
             let trail = max(lead + 0.03, min(0.998, p + softHalf))
 
-            let pulse = sin(rawProgress * .pi)
-            let glowOpacity: Double = {
-                if isActive {
-                    return (syllable.isEmphasized ? 0.44 : 0.30) * pulse
-                } else if isPast {
-                    return 0.11 * (1.0 - fadeOut)
-                }
-                return 0.0
-            }()
-
             let style: AnyShapeStyle = {
                 if isPast {
                     return AnyShapeStyle(Color.white.opacity(restAlpha))
@@ -593,25 +598,11 @@ private struct SyllableWordSpanView: View {
                 }
             }()
 
-            if isActive {
-                Text(syllable.text)
-                    .font(font)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: true)
-                    .foregroundStyle(style)
-                    .shadow(
-                        color: Color.white.opacity(glowOpacity),
-                        radius: syllable.isEmphasized ? 6 : 4,
-                        x: 0,
-                        y: 0
-                    )
-            } else {
-                Text(syllable.text)
-                    .font(font)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: true)
-                    .foregroundStyle(style)
-            }
+            Text(syllable.text)
+                .font(font)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: true)
+                .foregroundStyle(style)
         }
     }
 }

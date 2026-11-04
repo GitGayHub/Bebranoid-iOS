@@ -6,7 +6,7 @@ import SwiftUI
 /// - Нативный `glassEffect` на iOS 26+ в сочетании с многослойным оптическим бликом линзы и хроматической кромкой
 /// - Глубокие мягкие тени и тактильную отзывчивость для флагманских дисплеев ProMotion 120 Гц
 public enum LiquidGlassDesign {
-    public static let sheetCornerRadius: CGFloat = 36
+    public static let sheetCornerRadius: CGFloat = 32
     public static let cardCornerRadius: CGFloat = 22
 }
 
@@ -19,21 +19,18 @@ public struct LiquidGlassCardModifier: ViewModifier {
 
     public func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        #if os(iOS) && compiler(>=6.2)
-        if #available(iOS 26.0, *) {
+        if isSheer {
+            // Внутренние плашки внутри матовых штор в стиле Apple Music:
+            // мягкая полупрозрачная подложка без двойного наложения блюра и без резких белых рамок
             content
                 .background {
-                    if !isSheer {
-                        shape
-                            .fill(.ultraThinMaterial)
-                            .opacity(0.36)
-                    }
+                    shape
+                        .fill(Color.white.opacity(0.075))
                     shape
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(isSheer ? 0.08 : 0.11),
-                                    tintColor.opacity(tintOpacity),
+                                    tintColor.opacity(tintOpacity * 0.85),
                                     Color.white.opacity(0.02)
                                 ],
                                 startPoint: .topLeading,
@@ -41,71 +38,58 @@ public struct LiquidGlassCardModifier: ViewModifier {
                             )
                         )
                 }
-                .glassEffect(isInteractive ? .clear.interactive() : .clear, in: shape)
                 .overlay {
                     shape
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.50),
-                                    tintColor.opacity(0.30),
-                                    Color.white.opacity(0.08),
-                                    Color.white.opacity(0.24)
+                                    Color.white.opacity(0.14),
+                                    tintColor.opacity(0.12),
+                                    Color.white.opacity(0.05)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             ),
-                            lineWidth: 0.9
+                            lineWidth: 0.6
                         )
                 }
-                .shadow(color: Color.black.opacity(isSheer ? 0.12 : 0.22), radius: isSheer ? 10 : 16, x: 0, y: isSheer ? 5 : 8)
         } else {
-            fallbackGlassBody(content: content, shape: shape)
-        }
-        #else
-        fallbackGlassBody(content: content, shape: shape)
-        #endif
-    }
-
-    @ViewBuilder
-    private func fallbackGlassBody(content: Content, shape: RoundedRectangle) -> some View {
-        content
-            .background {
-                if !isSheer {
+            // Плавающие карточки (Мини-плеер, баннер загрузки, превью контекстного меню) в стиле Apple Music:
+            // полноценный матовый гауссов блюр `.ultraThinMaterial` (без размытия прозрачности `.opacity(0.36)`) + мягкий акцентный отсвет
+            content
+                .background {
                     shape
                         .fill(.ultraThinMaterial)
-                        .opacity(0.76)
-                }
-                shape
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(isSheer ? 0.09 : 0.13),
-                                tintColor.opacity(tintOpacity),
-                                Color.white.opacity(0.02)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                    shape
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.08),
+                                    tintColor.opacity(tintOpacity),
+                                    Color.black.opacity(0.14)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-            }
-            .overlay {
-                shape
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.48),
-                                tintColor.opacity(0.28),
-                                Color.white.opacity(0.08),
-                                Color.white.opacity(0.22)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.95
-                    )
-            }
-            .shadow(color: Color.black.opacity(isSheer ? 0.14 : 0.24), radius: isSheer ? 10 : 18, x: 0, y: isSheer ? 5 : 9)
+                }
+                .overlay {
+                    shape
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.24),
+                                    tintColor.opacity(0.18),
+                                    Color.white.opacity(0.07)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.65
+                        )
+                }
+                .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+        }
     }
 }
 
@@ -115,74 +99,52 @@ public struct LiquidGlassCapsuleModifier: ViewModifier {
     public var isInteractive: Bool
 
     public func body(content: Content) -> some View {
-        #if os(iOS) && compiler(>=6.2)
-        if #available(iOS 26.0, *) {
+        if isProminent {
             content
                 .background {
-                    if isProminent {
-                        Capsule()
-                            .fill(tintColor.opacity(0.88))
-                    } else {
-                        Capsule()
-                            .fill(.ultraThinMaterial)
-                            .opacity(0.28)
-                        Capsule()
-                            .fill(tintColor.opacity(0.08))
-                    }
+                    Capsule()
+                        .fill(tintColor)
                 }
-                .glassEffect(isInteractive ? .clear.interactive() : .clear, in: Capsule())
                 .overlay {
                     Capsule()
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(isProminent ? 0.58 : 0.46),
-                                    Color.white.opacity(0.08),
-                                    tintColor.opacity(0.26)
+                                    Color.white.opacity(0.28),
+                                    Color.white.opacity(0.08)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             ),
-                            lineWidth: 0.85
+                            lineWidth: 0.6
                         )
                 }
+                .shadow(color: tintColor.opacity(0.28), radius: 10, x: 0, y: 4)
         } else {
-            fallbackCapsule(content: content)
-        }
-        #else
-        fallbackCapsule(content: content)
-        #endif
-    }
-
-    @ViewBuilder
-    private func fallbackCapsule(content: Content) -> some View {
-        if isProminent {
             content
-                .background(tintColor, in: Capsule())
-                .overlay(
+                .background {
                     Capsule()
-                        .strokeBorder(Color.white.opacity(0.38), lineWidth: 0.85)
-                )
-                .shadow(color: tintColor.opacity(0.34), radius: 10, x: 0, y: 4)
-        } else {
-            content
-                .background(.ultraThinMaterial.opacity(0.72), in: Capsule())
-                .background(tintColor.opacity(0.08), in: Capsule())
-                .overlay(
+                        .fill(.ultraThinMaterial)
+                    Capsule()
+                        .fill(Color.white.opacity(0.07))
+                    Capsule()
+                        .fill(tintColor.opacity(0.09))
+                }
+                .overlay {
                     Capsule()
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.44),
-                                    Color.white.opacity(0.10),
-                                    Color.white.opacity(0.22)
+                                    Color.white.opacity(0.20),
+                                    Color.white.opacity(0.07),
+                                    tintColor.opacity(0.14)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             ),
-                            lineWidth: 0.85
+                            lineWidth: 0.6
                         )
-                )
+                }
         }
     }
 }
@@ -192,69 +154,38 @@ public struct LiquidGlassCircleModifier: ViewModifier {
     public var isHighlighted: Bool
 
     public func body(content: Content) -> some View {
-        #if os(iOS) && compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            content
-                .background {
-                    if isHighlighted {
-                        Circle()
-                            .fill(tintColor.opacity(0.88))
-                    } else {
-                        Circle()
-                            .fill(.ultraThinMaterial)
-                            .opacity(0.28)
-                        Circle()
-                            .fill(Color.white.opacity(0.06))
-                    }
-                }
-                .glassEffect(.clear.interactive(), in: Circle())
-                .overlay {
-                    Circle()
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(0.50),
-                                    Color.white.opacity(0.10),
-                                    tintColor.opacity(0.24)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.85
-                        )
-                }
-        } else {
-            fallbackCircle(content: content)
-        }
-        #else
-        fallbackCircle(content: content)
-        #endif
-    }
-
-    @ViewBuilder
-    private func fallbackCircle(content: Content) -> some View {
         content
-            .background(.ultraThinMaterial.opacity(0.72), in: Circle())
-            .background(isHighlighted ? tintColor.opacity(0.85) : Color.white.opacity(0.06), in: Circle())
-            .overlay(
+            .background {
+                if isHighlighted {
+                    Circle()
+                        .fill(tintColor.opacity(0.90))
+                } else {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                    Circle()
+                        .fill(Color.white.opacity(0.08))
+                }
+            }
+            .overlay {
                 Circle()
                     .strokeBorder(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.45),
-                                Color.white.opacity(0.12)
+                                Color.white.opacity(0.22),
+                                Color.white.opacity(0.07)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 0.85
+                        lineWidth: 0.6
                     )
-            )
+            }
     }
 }
 
-/// Кристально прозрачный рефракционный фон Apple Liquid Glass для всех всплывающих штор (`Sheet`) и модальных меню,
-/// сквозь который отчётливо просвечивается обложка, текст или живой `HarmonoidMeshView` под окном.
+/// Благородный матовый фон всплывающих окон в стиле Apple Music на iOS:
+/// работает поверх нативного `.presentationBackground(.ultraThinMaterial)`, мягко окрашивая матовое стекло
+/// рассеянным светом текущей обложки без просвечивания резкого текста снизу и без грубых белых обводок.
 public struct LiquidGlassSheetBackdrop: View {
     public var accentColor: Color
     public var cornerRadius: CGFloat
@@ -265,112 +196,43 @@ public struct LiquidGlassSheetBackdrop: View {
     }
 
     public var body: some View {
-        let sheetShape = UnevenRoundedRectangle(
-            topLeadingRadius: cornerRadius,
-            bottomLeadingRadius: 0,
-            bottomTrailingRadius: 0,
-            topTrailingRadius: cornerRadius,
-            style: .continuous
-        )
-
-        #if os(iOS) && compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            ZStack {
-                sheetShape
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.42)
-
-                RadialGradient(
-                    colors: [
-                        accentColor.opacity(0.13),
-                        accentColor.opacity(0.03),
-                        Color.clear
-                    ],
-                    center: .topLeading,
-                    startRadius: 8,
-                    endRadius: 360
-                )
-                .clipShape(sheetShape)
-
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.12),
-                        Color.white.opacity(0.02),
-                        Color.clear
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .clipShape(sheetShape)
-            }
-            .glassEffect(.clear, in: sheetShape)
-            .overlay {
-                sheetShape
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.56),
-                                accentColor.opacity(0.30),
-                                Color.white.opacity(0.10)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1.0
-                    )
-            }
-            .ignoresSafeArea()
-        } else {
-            fallbackSheetBackdrop(sheetShape: sheetShape)
-        }
-        #else
-        fallbackSheetBackdrop(sheetShape: sheetShape)
-        #endif
-    }
-
-    @ViewBuilder
-    private func fallbackSheetBackdrop(sheetShape: UnevenRoundedRectangle) -> some View {
         ZStack {
-            sheetShape
+            Rectangle()
                 .fill(.ultraThinMaterial)
-                .opacity(0.68)
+
+            Color(red: 0.06, green: 0.06, blue: 0.09)
+                .opacity(0.26)
 
             RadialGradient(
                 colors: [
-                    accentColor.opacity(0.13),
-                    accentColor.opacity(0.03),
+                    accentColor.opacity(0.18),
+                    accentColor.opacity(0.05),
                     Color.clear
                 ],
                 center: .topLeading,
-                startRadius: 8,
+                startRadius: 12,
+                endRadius: 420
+            )
+
+            RadialGradient(
+                colors: [
+                    accentColor.opacity(0.09),
+                    Color.clear
+                ],
+                center: .bottomTrailing,
+                startRadius: 20,
                 endRadius: 360
             )
-            .clipShape(sheetShape)
 
             LinearGradient(
                 colors: [
-                    Color.white.opacity(0.12),
-                    Color.clear
+                    Color.white.opacity(0.06),
+                    Color.clear,
+                    Color.black.opacity(0.18)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .clipShape(sheetShape)
-        }
-        .overlay {
-            sheetShape
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.50),
-                            accentColor.opacity(0.26),
-                            Color.white.opacity(0.08)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1.0
-                )
         }
         .ignoresSafeArea()
     }
@@ -504,7 +366,7 @@ public extension View {
 
     func liquidGlassSheetPresentation() -> some View {
         self
-            .presentationBackground(.clear)
+            .presentationBackground(.ultraThinMaterial)
             #if os(iOS)
             .presentationCornerRadius(LiquidGlassDesign.sheetCornerRadius)
             #endif
