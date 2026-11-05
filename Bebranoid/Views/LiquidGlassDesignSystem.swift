@@ -545,11 +545,9 @@ public enum TrackMetadataActions {
                 }
             }
         }
-        if let added = track.dateAdded {
-            let y = Calendar.current.component(.year, from: added)
-            if (1970...2099).contains(y) {
-                return y
-            }
+        let y = Calendar.current.component(.year, from: track.dateAdded)
+        if (1970...2099).contains(y) {
+            return y
         }
         return nil
     }
