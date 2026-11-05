@@ -78,6 +78,7 @@ public struct ClassicKaraokeLyricsView: View {
                             nodeFrames: nodeFrames,
                             documentSignature: documentSignature,
                             syncTriggerToken: syncTriggerToken,
+                            layoutCompensationToken: (showTranslation ? 1000 : 0) &+ fontSizePreset.hashValue,
                             isPlainLyrics: document.kind == .plain,
                             isUserBrowsing: $isUserBrowsing
                         )

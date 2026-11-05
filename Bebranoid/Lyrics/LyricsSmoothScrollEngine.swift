@@ -167,7 +167,7 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
     let nodeFrames: [String: CGRect]
     let documentSignature: String
     let syncTriggerToken: Int
-    let layoutCompensationToken: Int
+    var layoutCompensationToken: Int = 0
     let isPlainLyrics: Bool
     @Binding var isUserBrowsing: Bool
 
