@@ -117,7 +117,10 @@ public final class BebranoidAppState: ObservableObject {
     }
     @Published public var trackDownloadProgress: [String: Int] = [:]
     @Published public var pendingDownloadTrack: Track? = nil
+    @Published public var pendingDownloadAccentRGB: MeshRGB? = nil
+    @Published public var trackDownloadAccents: [String: MeshRGB] = [:]
     private var pendingPlaybackTask: Task<Void, Never>? = nil
+    private var activeTrackStartTask: Task<Void, Never>? = nil
     @Published public var isBatchDownloadingSelected: Bool = false
     @Published public var batchDownloadDoneCount: Int = 0
     @Published public var batchDownloadTotalCount: Int = 0
@@ -225,8 +228,13 @@ public final class BebranoidAppState: ObservableObject {
             .sink { [weak self] note in
                 guard let self else { return }
                 let resolvedTrackId = note.userInfo?["trackId"] as? String
+                if let pending = self.pendingDownloadTrack, resolvedTrackId == pending.id {
+                    self.resolveDownloadAccent(for: pending)
+                }
                 if let current = self.currentTrack, resolvedTrackId == current.id {
-                    self.updatePalette(for: current)
+                    if self.pendingDownloadTrack?.id != current.id {
+                        self.updatePalette(for: current)
+                    }
                     self.syncNowPlayingInfo()
                 }
                 if let nextIdx = self.peekNextTrackIndex(),
@@ -266,6 +274,11 @@ public final class BebranoidAppState: ObservableObject {
                     if self.trackDownloadProgress[cacheKey] != pct {
                         self.trackDownloadProgress[cacheKey] = pct
                     }
+                    if self.trackDownloadAccents[cacheKey] == nil,
+                       let matched = self.queue.first(where: { $0.cacheKey == cacheKey || $0.id == cacheKey })
+                            ?? self.libraryState.tracks.first(where: { $0.cacheKey == cacheKey || $0.id == cacheKey }) {
+                        self.resolveDownloadAccent(for: matched)
+                    }
                 } else {
                     self.trackDownloadProgress.removeValue(forKey: cacheKey)
                     self.invalidateLibraryCaches()
@@ -295,6 +308,27 @@ public final class BebranoidAppState: ObservableObject {
     public var accentSwiftUIColor: Color {
         let norm = effectiveAccentRGB().normalizedDouble
         return Color(red: norm.r, green: norm.g, blue: norm.b)
+    }
+
+    /// Акцентный цвет скачивающегося трека (по его собственной обложке, например розовый),
+    /// в то время как весь остальной интерфейс остаётся в цвете текущего играющего трека (например зелёного) до окончания загрузки.
+    public func downloadAccentColor(for track: Track? = nil) -> Color {
+        if let track {
+            if let rgb = trackDownloadAccents[track.id] ?? trackDownloadAccents[track.cacheKey] {
+                let norm = rgb.normalizedDouble
+                return Color(red: norm.r, green: norm.g, blue: norm.b)
+            }
+        }
+        if let pending = pendingDownloadTrack,
+           let rgb = trackDownloadAccents[pending.id] ?? trackDownloadAccents[pending.cacheKey] {
+            let norm = rgb.normalizedDouble
+            return Color(red: norm.r, green: norm.g, blue: norm.b)
+        }
+        if let pendingRGB = pendingDownloadAccentRGB {
+            let norm = pendingRGB.normalizedDouble
+            return Color(red: norm.r, green: norm.g, blue: norm.b)
+        }
+        return accentSwiftUIColor
     }
 
     public var isCurrentLyricsCyrillic: Bool {
@@ -423,6 +457,7 @@ public final class BebranoidAppState: ObservableObject {
             trackDownloadProgress.removeValue(forKey: pending.cacheKey)
         }
         pendingDownloadTrack = nil
+        pendingDownloadAccentRGB = nil
     }
 
     public func playTrack(_ track: Track, in contextQueue: [Track]? = nil) {
@@ -450,19 +485,12 @@ public final class BebranoidAppState: ObservableObject {
 
         // Если другой трек сейчас уже открыт/играет, а выбранный трек ещё не скачан —
         // НЕ перехватываем плеер! Оставляем текущий трек играть и доступным в плеере,
-        // показываем отдельную стеклянную плашку загрузки и переключаем на новый трек сразу после скачивания.
+        // вычисляем собственный акцентный цвет скачивающегося трека для обводки загрузки
+        // и переключаем всё приложение на новый трек и его палитру сразу после скачивания.
         if !cacheIndex.isCached(track), let activeCurrent = currentTrack, activeCurrent.id != track.id {
             pendingPlaybackTask?.cancel()
             pendingDownloadTrack = track
-            let customCovers = libraryState.customAlbumCovers
-            let siblings = libraryState.tracks
-            Task { [artworkService] in
-                _ = await artworkService.resolveArtwork(
-                    for: track,
-                    customAlbumCovers: customCovers,
-                    siblingTracks: siblings
-                )
-            }
+            resolveDownloadAccent(for: track)
 
             pendingPlaybackTask = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -473,8 +501,9 @@ public final class BebranoidAppState: ObservableObject {
                     )
                     guard !Task.isCancelled, self.pendingDownloadTrack?.id == track.id else { return }
                     self.pendingDownloadTrack = nil
+                    self.pendingDownloadAccentRGB = nil
                     self.pendingPlaybackTask = nil
-                    self.audioEngine.cancelActiveCrossfade()
+                    self.audioEngine.stopImmediatelyForTrackSwitch()
                     self.originalQueueSource = targetOriginalSource
                     self.queue = targetQueue
                     self.currentIndex = targetIndex
@@ -485,13 +514,14 @@ public final class BebranoidAppState: ObservableObject {
                     self.updatePalette(for: track)
                     self.loadLyricsForCurrentTrack()
                     self.persistPlaybackSession()
-                    await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: 0, autoPlay: true)
+                    _ = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: 0, autoPlay: true)
                     self.updatePalette(for: track)
                     self.syncNowPlayingInfo()
                     self.prefetchUpcomingTrack()
                 } catch {
                     if !Task.isCancelled, self.pendingDownloadTrack?.id == track.id {
                         self.pendingDownloadTrack = nil
+                        self.pendingDownloadAccentRGB = nil
                         self.pendingPlaybackTask = nil
                         self.statusBannerMessage = error.localizedDescription
                     }
@@ -677,12 +707,27 @@ public final class BebranoidAppState: ObservableObject {
         guard currentIndex >= 0, currentIndex < queue.count else { return }
         let track = queue[currentIndex]
 
+        activeTrackStartTask?.cancel()
+        if autoPlay {
+            audioEngine.stopImmediatelyForTrackSwitch()
+        }
+
+        let needsDownload = !cacheIndex.isCached(track)
+        let hadPreviousTrack = (currentTrack != nil)
+
         currentTrack = track
         currentTime = max(0.0, initialSeek)
         duration = track.duration
-        if preparedNextTrackId == track.id,
-           let preloadedPal = nextTrackPalette,
-           let preloadedAcc = nextTrackAccent {
+
+        if needsDownload && autoPlay {
+            pendingDownloadTrack = track
+            resolveDownloadAccent(for: track)
+            if !hadPreviousTrack {
+                updatePalette(for: track)
+            }
+        } else if preparedNextTrackId == track.id,
+                  let preloadedPal = nextTrackPalette,
+                  let preloadedAcc = nextTrackAccent {
             currentPalette = preloadedPal
             accentRGB = preloadedAcc
             nextTrackPalette = nil
@@ -694,34 +739,47 @@ public final class BebranoidAppState: ObservableObject {
         loadLyricsForCurrentTrack()
         persistPlaybackSession()
 
-        let needsDownload = !cacheIndex.isCached(track)
-        if needsDownload && autoPlay {
-            pendingDownloadTrack = track
-        }
-
-        Task {
+        activeTrackStartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
-                let fileURL: URL
-                if cacheIndex.isCached(track) {
-                    fileURL = storage.cachedAudioFileURL(for: track)
+                var fileURL: URL
+                let wasAlreadyCached = self.cacheIndex.isCached(track)
+                if wasAlreadyCached {
+                    fileURL = self.storage.cachedAudioFileURL(for: track)
                 } else {
-                    fileURL = try await telegramClient.ensureTrackDownloaded(track: track, priority: .activePlayback)
+                    fileURL = try await self.telegramClient.ensureTrackDownloaded(track: track, priority: .activePlayback)
                 }
-                if pendingDownloadTrack?.id == track.id {
-                    pendingDownloadTrack = nil
+                guard !Task.isCancelled, self.currentTrack?.id == track.id else { return }
+                if self.pendingDownloadTrack?.id == track.id {
+                    self.pendingDownloadTrack = nil
+                    self.pendingDownloadAccentRGB = nil
                 }
-                guard currentTrack?.id == track.id else { return }
-                artworkService.invalidateCachedSyncPath(forTrackId: track.id, cacheKey: track.cacheKey)
-                await audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
-                updatePalette(for: track)
-                syncNowPlayingInfo()
-                prefetchUpcomingTrack()
+                self.artworkService.invalidateCachedSyncPath(forTrackId: track.id, cacheKey: track.cacheKey)
+                self.updatePalette(for: track)
+                var played = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
+                if !played && wasAlreadyCached && !Task.isCancelled && self.currentTrack?.id == track.id {
+                    try? FileManager.default.removeItem(at: fileURL)
+                    self.cacheIndex.rebuildIndex()
+                    self.pendingDownloadTrack = track
+                    self.resolveDownloadAccent(for: track)
+                    fileURL = try await self.telegramClient.ensureTrackDownloaded(track: track, priority: .activePlayback)
+                    guard !Task.isCancelled, self.currentTrack?.id == track.id else { return }
+                    if self.pendingDownloadTrack?.id == track.id {
+                        self.pendingDownloadTrack = nil
+                        self.pendingDownloadAccentRGB = nil
+                    }
+                    played = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
+                }
+                self.updatePalette(for: track)
+                self.syncNowPlayingInfo()
+                self.prefetchUpcomingTrack()
             } catch {
-                if pendingDownloadTrack?.id == track.id {
-                    pendingDownloadTrack = nil
+                if self.pendingDownloadTrack?.id == track.id {
+                    self.pendingDownloadTrack = nil
+                    self.pendingDownloadAccentRGB = nil
                 }
-                if currentTrack?.id == track.id {
-                    statusBannerMessage = error.localizedDescription
+                if self.currentTrack?.id == track.id {
+                    self.statusBannerMessage = error.localizedDescription
                 }
             }
         }
@@ -784,6 +842,72 @@ public final class BebranoidAppState: ObservableObject {
         }
         #endif
         return nil
+    }
+
+    /// Асинхронно вычисляет акцентный цвет обложки скачивающегося трека (например розовый),
+    /// не меняя `currentPalette` и `accentRGB` текущего играющего трека (например зелёного) до завершения скачивания.
+    public func resolveDownloadAccent(for track: Track) {
+        if let existing = trackDownloadAccents[track.id] ?? trackDownloadAccents[track.cacheKey] {
+            if pendingDownloadTrack?.id == track.id {
+                pendingDownloadAccentRGB = existing
+            }
+            return
+        }
+
+        if let resolvedHit = artworkService.resolveLocalCoverURLSync(
+            for: track,
+            customAlbumCovers: libraryState.customAlbumCovers,
+            siblingTracks: libraryState.tracks
+        ) {
+            let hitPath = resolvedHit.url.path
+            if let cached = analyzedPaletteCache[hitPath] {
+                trackDownloadAccents[track.id] = cached.uiAccent
+                trackDownloadAccents[track.cacheKey] = cached.uiAccent
+                if pendingDownloadTrack?.id == track.id {
+                    pendingDownloadAccentRGB = cached.uiAccent
+                }
+                return
+            }
+            let hitURL = resolvedHit.url
+            let targetId = track.id
+            let targetKey = track.cacheKey
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let analyzed = Self.analyzeLocalArtworkURLOffMain(hitURL) else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.analyzedPaletteCache[hitPath] = analyzed
+                    self.trackDownloadAccents[targetId] = analyzed.uiAccent
+                    self.trackDownloadAccents[targetKey] = analyzed.uiAccent
+                    if self.pendingDownloadTrack?.id == targetId {
+                        self.pendingDownloadAccentRGB = analyzed.uiAccent
+                    }
+                }
+            }
+            return
+        }
+
+        let customCovers = libraryState.customAlbumCovers
+        let siblings = libraryState.tracks
+        let targetId = track.id
+        let targetKey = track.cacheKey
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let resolved = await ArtworkService.shared.resolveArtwork(
+                for: track,
+                customAlbumCovers: customCovers,
+                siblingTracks: siblings
+            ), let fileURL = resolved.fileURL else { return }
+            let filePath = fileURL.path
+            guard let analyzed = Self.analyzeLocalArtworkURLOffMain(fileURL) else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.analyzedPaletteCache[filePath] = analyzed
+                self.trackDownloadAccents[targetId] = analyzed.uiAccent
+                self.trackDownloadAccents[targetKey] = analyzed.uiAccent
+                if self.pendingDownloadTrack?.id == targetId {
+                    self.pendingDownloadAccentRGB = analyzed.uiAccent
+                }
+            }
+        }
     }
 
     public func updatePalette(for track: Track?) {
@@ -1066,6 +1190,7 @@ public final class BebranoidAppState: ObservableObject {
             for track in missing {
                 if Task.isCancelled { break }
                 if !self.cacheIndex.isCached(track) {
+                    self.resolveDownloadAccent(for: track)
                     _ = try? await self.telegramClient.ensureTrackDownloaded(
                         track: track,
                         priority: .nextTrackPrefetch

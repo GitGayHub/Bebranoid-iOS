@@ -170,12 +170,29 @@ public final class DualStreamAudioEngine: ObservableObject {
 
     // MARK: - Playback Controls
 
-    /// Загружает и запускает трек на основном деке. Если шёл кроссфейд — выполняет мгновенный hard-cut.
-    public func loadAndPlay(track: Track, fileURL: URL, startAt timeSec: Double = 0, autoPlay: Bool = true) async {
+    /// Мгновенно останавливает воспроизведение предыдущего трека перед переключением,
+    /// чтобы старая песня ни при каких условиях не продолжала звучать поверх новой обложки.
+    public func stopImmediatelyForTrackSwitch() {
         cancelActiveCrossfade()
         scheduleGeneration &+= 1
-        let currentGen = scheduleGeneration
         didFireNaturalEndForCurrentGen = false
+        primaryDeck.deckMixerNode.outputVolume = 0.0
+        secondaryDeck.deckMixerNode.outputVolume = 0.0
+        primaryDeck.playerNode.stop()
+        secondaryDeck.playerNode.stop()
+        primaryDeck.resetDSPState()
+        secondaryDeck.resetDSPState()
+        primaryAudioFile = nil
+        secondaryAudioFile = nil
+        isPlaying = false
+        smoothClock.stop()
+    }
+
+    /// Загружает и запускает трек на основном деке. Если шёл кроссфейд — выполняет мгновенный hard-cut.
+    @discardableResult
+    public func loadAndPlay(track: Track, fileURL: URL, startAt timeSec: Double = 0, autoPlay: Bool = true) async -> Bool {
+        stopImmediatelyForTrackSwitch()
+        let currentGen = scheduleGeneration
 
         let initialPos = max(0.0, timeSec)
         primaryStartTimeOffset = initialPos
@@ -189,7 +206,7 @@ public final class DualStreamAudioEngine: ObservableObject {
         seekGraceUntilUptime = preNow + 0.32
 
         let inspected = await AudioMetadataReader.inspectAudioFile(at: fileURL)
-        guard currentGen == scheduleGeneration else { return }
+        guard currentGen == scheduleGeneration else { return false }
 
         activeTrack = track
         currentFormatInfo = inspected.formatInfo
@@ -202,8 +219,10 @@ public final class DualStreamAudioEngine: ObservableObject {
             let sr = audioFile.processingFormat.sampleRate
             let totalFrames = audioFile.length
             guard sr > 0, totalFrames > 0 else {
+                primaryDeck.playerNode.stop()
                 isPlaying = false
-                return
+                smoothClock.stop()
+                return false
             }
 
             primaryAudioFile = audioFile
@@ -263,9 +282,14 @@ public final class DualStreamAudioEngine: ObservableObject {
                 isPlaying = false
                 smoothClock.stop()
             }
+            return true
         } catch {
+            primaryDeck.deckMixerNode.outputVolume = 0.0
+            primaryDeck.playerNode.stop()
+            primaryAudioFile = nil
             isPlaying = false
             smoothClock.stop()
+            return false
         }
     }
 

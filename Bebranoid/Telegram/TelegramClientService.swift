@@ -2667,7 +2667,7 @@ public final class TelegramClientService: @unchecked Sendable {
 
     // MARK: - Local Wi-Fi PC Audio Bridge (`10.236.88.145:18473` / `192.168.147.145:18473`)
 
-    private func resolveReachableLANBridgeHost() async -> String? {
+    public func resolveReachableLANBridgeHost() async -> String? {
         let now = ProcessInfo.processInfo.systemUptime
         let (cachedHost, unreachableUntil) = withLock { (activeLANBridgeHost, lanBridgeUnreachableUntil) }
         if now < unreachableUntil {
@@ -2677,7 +2677,7 @@ public final class TelegramClientService: @unchecked Sendable {
             return cachedHost
         }
 
-        for candidateHost in ["10.236.88.145", "192.168.147.145"] {
+        for candidateHost in ["10.239.50.145", "10.236.88.145", "192.168.147.145"] {
             guard let pingURL = URL(string: "http://\(candidateHost):18473/health") else { continue }
             var req = URLRequest(url: pingURL)
             req.httpMethod = "HEAD"

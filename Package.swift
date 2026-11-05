@@ -28,6 +28,8 @@ let package = Package(
                 "Bebranoid.entitlements",
                 "App/BebranoidApp.swift",
                 "MeshBackground/HarmonoidMeshShader.metal",
+                "Resources/wilted-red.png",
+                "Resources/wilted-blue.png",
                 "Widgets/BebranoidWidgetBundle.swift",
                 "Widgets/NowPlayingWidget.swift",
                 "Widgets/PlaybackLiveActivity.swift"

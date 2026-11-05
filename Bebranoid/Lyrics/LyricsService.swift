@@ -123,7 +123,9 @@ public final class LyricsService: @unchecked Sendable {
             return nil
         }
 
-        guard record.schemaVersion >= CachedLyricsRecord.currentSchemaVersion else {
+        // Принимаем все закешированные тексты (`schemaVersion >= 1`), так как `LRCParser.parseLRC` и `parseTTML`
+        // динамически декодируют HTML-сущности (`&#x27;` -> `'`) и очищают теги на лету без потери офлайн-кеша!
+        guard record.schemaVersion >= 1 else {
             return nil
         }
 
@@ -312,6 +314,16 @@ public final class LyricsService: @unchecked Sendable {
         if let c1 = await betterLyricsTask { pool.append(c1) }
         if let c2 = await youtubeSimpTask { pool.append(c2) }
         if let c3 = await lrclibTask { pool.append(c3) }
+
+        if pool.isEmpty,
+           let bridgeCandidate = await fetchFromLANBridge(
+               title: cleanTitle,
+               artist: primaryArtist,
+               album: track.album,
+               targetDuration: effectiveDuration
+           ) {
+            pool.append(bridgeCandidate)
+        }
 
         if let winner = Self.pickBestResolvedCandidate(pool, targetDuration: effectiveDuration) {
             var finalDoc = winner.document
@@ -759,6 +771,52 @@ public final class LyricsService: @unchecked Sendable {
             return []
         }
         return list
+    }
+
+    private func fetchFromLANBridge(
+        title: String,
+        artist: String,
+        album: String?,
+        targetDuration: Double
+    ) async -> ResolvedOnlineLyricsCandidate? {
+        for host in ["10.239.50.145", "10.236.88.145", "192.168.147.145"] {
+            var comps = URLComponents(string: "http://\(host):18473/lyrics")
+            var items = [
+                URLQueryItem(name: "title", value: title),
+                URLQueryItem(name: "artist", value: artist)
+            ]
+            if let album, !album.isEmpty, album != "Без альбома", album.lowercased() != "youtube" {
+                items.append(URLQueryItem(name: "album", value: album))
+            }
+            if targetDuration > 1 {
+                items.append(URLQueryItem(name: "duration", value: String(Int(round(targetDuration)))))
+            }
+            comps?.queryItems = items
+            guard let url = comps?.url else { continue }
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 3.5
+            guard let (data, resp) = try? await session.data(for: req),
+                  let http = resp as? HTTPURLResponse,
+                  http.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            let synced = json["syncedLyrics"] as? String
+            let plain = json["plainLyrics"] as? String
+            let raw = synced ?? plain
+            let doc = LRCParser.parseLRC(raw)
+            if !doc.lines.isEmpty {
+                return ResolvedOnlineLyricsCandidate(
+                    rawSynced: synced,
+                    rawPlain: plain,
+                    document: doc,
+                    remoteDuration: (json["duration"] as? Double) ?? targetDuration,
+                    source: "lan-bridge-lyrics",
+                    providerBonus: 95.0
+                )
+            }
+        }
+        return nil
     }
 
     public static func stripTrackNoise(_ title: String) -> String {

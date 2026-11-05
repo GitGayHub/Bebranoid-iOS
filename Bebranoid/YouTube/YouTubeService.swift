@@ -592,7 +592,7 @@ public final class YouTubeService: @unchecked Sendable {
     }
 
     /// Скачивает нативный `m4a (AAC, itag 140)` аудиопоток YouTube кусками по `Range` с настоящей докачкой `.part`
-    /// и кооперативным вытеснением между кусками (googlevideo отвечает `403` на запрос без `Range`).
+    /// и автоматическим резервным каналом через локальный Wi-Fi мост ПК при блокировке TLS провайдером.
     public func downloadAudioStream(
         for track: Track,
         destinationURL: URL,
@@ -606,60 +606,88 @@ public final class YouTubeService: @unchecked Sendable {
 
         onProgress?(1)
         try preemptionToken.throwIfPreempted(key: track.cacheKey)
-        let candidates = try await resolveAudioStreamCandidates(videoId: videoId)
-        try preemptionToken.throwIfPreempted(key: track.cacheKey)
-        onProgress?(3)
 
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: partialURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         var lastDownloadError: Error?
-        for (candidateIndex, candidate) in candidates.enumerated() {
-            do {
-                let activePartURL = candidate.isWebMOpus
-                    ? partialURL.deletingPathExtension().appendingPathExtension("webm.part")
-                    : partialURL
-                if candidateIndex > 0 {
-                    try? fileManager.removeItem(at: activePartURL)
-                }
-                try await downloadRawStreamToFile(
-                    streamURL: candidate.url,
-                    partialURL: activePartURL,
-                    cacheKey: track.cacheKey,
-                    preemptionToken: preemptionToken,
-                    onProgress: onProgress
-                )
+        do {
+            let candidates = try await resolveAudioStreamCandidates(videoId: videoId)
+            try preemptionToken.throwIfPreempted(key: track.cacheKey)
+            onProgress?(3)
 
-                if candidate.isWebMOpus {
-                    let cafTargetURL = destinationURL.deletingPathExtension().appendingPathExtension("caf")
-                    do {
-                        try WebMOpusRemuxer.remuxWebMFileToVerifiedCAF(
-                            webmURL: activePartURL,
-                            cafDestinationURL: cafTargetURL
-                        )
+            for (candidateIndex, candidate) in candidates.enumerated() {
+                do {
+                    let activePartURL = candidate.isWebMOpus
+                        ? partialURL.deletingPathExtension().appendingPathExtension("webm.part")
+                        : partialURL
+                    if candidateIndex > 0 {
                         try? fileManager.removeItem(at: activePartURL)
-                        try? fileManager.removeItem(at: destinationURL)
-                        onProgress?(100)
-                        return cafTargetURL
-                    } catch {
-                        // Если ремукс WebM Opus не прошёл валидацию AVAudioFile, прозрачно переходим к нативному AAC (itag 141/140)
-                        try? fileManager.removeItem(at: activePartURL)
-                        try? fileManager.removeItem(at: cafTargetURL)
-                        lastDownloadError = error
-                        continue
                     }
-                } else {
-                    try? fileManager.removeItem(at: destinationURL)
-                    try fileManager.moveItem(at: activePartURL, to: destinationURL)
-                    onProgress?(100)
-                    return destinationURL
+                    try await downloadRawStreamToFile(
+                        streamURL: candidate.url,
+                        partialURL: activePartURL,
+                        cacheKey: track.cacheKey,
+                        preemptionToken: preemptionToken,
+                        onProgress: onProgress
+                    )
+
+                    if candidate.isWebMOpus {
+                        let cafTargetURL = destinationURL.deletingPathExtension().appendingPathExtension("caf")
+                        do {
+                            try WebMOpusRemuxer.remuxWebMFileToVerifiedCAF(
+                                webmURL: activePartURL,
+                                cafDestinationURL: cafTargetURL
+                            )
+                            try? fileManager.removeItem(at: activePartURL)
+                            try? fileManager.removeItem(at: destinationURL)
+                            onProgress?(100)
+                            return cafTargetURL
+                        } catch {
+                            try? fileManager.removeItem(at: activePartURL)
+                            try? fileManager.removeItem(at: cafTargetURL)
+                            lastDownloadError = error
+                            continue
+                        }
+                    } else {
+                        try? fileManager.removeItem(at: destinationURL)
+                        try fileManager.moveItem(at: activePartURL, to: destinationURL)
+                        onProgress?(100)
+                        return destinationURL
+                    }
+                } catch let preempt as DownloadPreemptedError {
+                    throw preempt
+                } catch {
+                    lastDownloadError = error
+                    continue
                 }
-            } catch let preempt as DownloadPreemptedError {
-                throw preempt
-            } catch {
-                lastDownloadError = error
-                continue
             }
+        } catch let preempt as DownloadPreemptedError {
+            throw preempt
+        } catch {
+            lastDownloadError = error
+        }
+
+        // Резервный канал через локальный Wi-Fi мост ПК (`10.239.50.145:18473/youtube-audio`) при ошибке TLS / DPI
+        if let bridgeURL = try? await downloadYouTubeFromLANBridge(
+            videoId: videoId,
+            destinationURL: destinationURL,
+            partialURL: partialURL,
+            cacheKey: track.cacheKey,
+            preemptionToken: preemptionToken,
+            onProgress: onProgress
+        ) {
+            return bridgeURL
+        }
+
+        if let nsErr = lastDownloadError as NSError?,
+           nsErr.domain == NSURLErrorDomain,
+           nsErr.code == NSURLErrorSecureConnectionFailed || nsErr.code == NSURLErrorServerCertificateUntrusted || nsErr.code == NSURLErrorCannotConnectToHost {
+            throw NSError(
+                domain: "YouTubeService",
+                code: nsErr.code,
+                userInfo: [NSLocalizedDescriptionKey: "Соединение с YouTube сброшено провайдером (ошибка TLS). Включите VPN или подключите iPhone к одной Wi-Fi сети с ПК."]
+            )
         }
 
         throw lastDownloadError ?? NSError(
@@ -667,6 +695,64 @@ public final class YouTubeService: @unchecked Sendable {
             code: 502,
             userInfo: [NSLocalizedDescriptionKey: "Не удалось скачать аудиопоток YouTube максимального качества"]
         )
+    }
+
+    private func downloadYouTubeFromLANBridge(
+        videoId: String,
+        destinationURL: URL,
+        partialURL: URL,
+        cacheKey: String,
+        preemptionToken: DownloadPreemptionToken,
+        onProgress: (@Sendable (Int) -> Void)?
+    ) async throws -> URL? {
+        for host in ["10.239.50.145", "10.236.88.145", "192.168.147.145"] {
+            guard let url = URL(string: "http://\(host):18473/youtube-audio?videoId=\(videoId)") else { continue }
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 25.0
+            guard let (asyncBytes, response) = try? await URLSession.shared.bytes(for: req),
+                  let http = response as? HTTPURLResponse,
+                  http.statusCode == 200 else {
+                continue
+            }
+            let expectedBytes = max(http.expectedContentLength, 1_500_000)
+            let fm = FileManager.default
+            try? fm.removeItem(at: partialURL)
+            fm.createFile(atPath: partialURL.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: partialURL)
+            defer { try? handle.close() }
+
+            var buffer = Data()
+            buffer.reserveCapacity(65_536)
+            var written: Int64 = 0
+            var lastPct = 3
+            onProgress?(3)
+
+            for try await byte in asyncBytes {
+                try preemptionToken.throwIfPreempted(key: cacheKey, bytesSaved: written)
+                buffer.append(byte)
+                if buffer.count >= 65_536 {
+                    try handle.write(contentsOf: buffer)
+                    written += Int64(buffer.count)
+                    buffer.removeAll(keepingCapacity: true)
+                    let pct = min(98, max(4, Int((Double(written) / Double(expectedBytes)) * 100.0)))
+                    if pct > lastPct {
+                        lastPct = pct
+                        onProgress?(pct)
+                    }
+                }
+            }
+            if !buffer.isEmpty {
+                try handle.write(contentsOf: buffer)
+                written += Int64(buffer.count)
+            }
+            try? handle.close()
+            guard written > 8192 else { continue }
+            try? fm.removeItem(at: destinationURL)
+            try fm.moveItem(at: partialURL, to: destinationURL)
+            onProgress?(100)
+            return destinationURL
+        }
+        return nil
     }
 
     private func downloadRawStreamToFile(

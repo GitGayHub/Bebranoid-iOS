@@ -94,25 +94,33 @@ public struct FullScreenPlayerView: View {
 
                     Spacer(minLength: 10)
 
-                    // Карусель 3D-обложек с полноценным пролистыванием диска до конца и 3D Touch увеличением
+                    // Верхняя центральная зона: либо компактная очередь на 4 трека (не закрывающая название трека и плейлист), либо 3D-обложка
                     let coverSide = min(geo.size.width - 48, geo.size.height * 0.425)
-                    coverCarouselSection(
-                        coverSide: coverSide,
-                        discStride: discStride,
-                        liveAccentRGB: liveAccentRGB,
-                        liveAccentColor: liveAccentColor
-                    )
-                    .frame(width: geo.size.width, height: coverSide)
+                    if appState.isQueueSheetPresented {
+                        CompactPlayerQueueOverlayView(appState: appState)
+                            .padding(.horizontal, 20)
+                            .frame(width: geo.size.width, height: coverSide, alignment: .bottom)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
+                    } else {
+                        coverCarouselSection(
+                            coverSide: coverSide,
+                            discStride: discStride,
+                            liveAccentRGB: liveAccentRGB,
+                            liveAccentColor: liveAccentColor
+                        )
+                        .frame(width: geo.size.width, height: coverSide)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    }
 
                     Spacer(minLength: 18)
 
-                    // Блок названия трека, исполнителя и 2 круглых стеклянных кнопок справа (Heart, Queue)
+                    // Блок названия трека, исполнителя/плейлиста и 2 круглых стеклянных кнопок справа (Heart, Queue)
                     trackMetadataAndQuickActionsRow(accentColor: liveAccentColor)
                         .padding(.horizontal, 24)
 
                     Spacer(minLength: 14)
 
-                    // Центральная капсула переключения в Текст / FX
+                    // Центральная капсула переключения в Текст / FX (с красной розочкой Slowed и синей розочкой Speed Up)
                     centerModePillRow(accentColor: liveAccentColor)
                         .padding(.horizontal, 24)
 
@@ -131,9 +139,8 @@ public struct FullScreenPlayerView: View {
                 }
                 .scaleEffect(max(0.92, 1.0 - (dragDismissOffset / 1800.0)))
                 .offset(y: dragDismissOffset)
-                .blur(radius: isCover3DPreviewPresented ? 12 : 0)
 
-                // 3D Touch оверлей увеличенной обложки и сведений о треке в стиле Liquid Glass
+                // Полупрозрачное всплывающее окно «Свойства трека» и обложки поверх видимого живого фона
                 if isCover3DPreviewPresented, let current = track {
                     Cover3DTouchPreviewOverlay(
                         track: current,
@@ -149,16 +156,10 @@ public struct FullScreenPlayerView: View {
                             }
                         }
                     )
-                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
                     .zIndex(20)
                 }
             }
-        }
-        .sheet(isPresented: $appState.isQueueSheetPresented) {
-            QueueSheetView(appState: appState)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .liquidGlassSheetPresentation()
         }
         .sheet(isPresented: $appState.isAudioFXSheetPresented) {
             AudioFXSheetView(appState: appState)
@@ -172,9 +173,8 @@ public struct FullScreenPlayerView: View {
                 formatInfo: appState.audioEngine.currentFormatInfo ?? targetTrack.formatInfo,
                 accentColor: appState.accentSwiftUIColor
             )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-            .liquidGlassSheetPresentation()
+            .presentationDetents([.large])
+            .presentationDragIndicator(.hidden)
         }
         .fullScreenCover(isPresented: $appState.isLyricsScreenPresented) {
             LyricsScreenView(appState: appState)
@@ -370,21 +370,17 @@ public struct FullScreenPlayerView: View {
                    curImg === decoded || (curImg.width >= decoded.width && curImg.height >= decoded.height && self.activeCoverTrackId == targetTrack.id) {
                     return
                 }
-                if upgradeSmoothly, let existing = self.activeCoverImage {
+                // Если обложка этого же трека уже показана на экране — бесшовно подменяем CGImage на исходное качество без сброса альфы в 0, чтобы обложка никогда не мигала!
+                if self.activeCoverTrackId == targetTrack.id && self.activeCoverImage != nil {
                     self.crossfadeCleanupTask?.cancel()
-                    self.crossfadeOutgoingImage = existing
+                    self.crossfadeOutgoingImage = nil
+                    self.crossfadeIncomingAlpha = 1.0
                     self.activeCoverImage = decoded
-                    self.crossfadeIncomingAlpha = 0.0
-                    withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.34)) {
-                        self.crossfadeIncomingAlpha = 1.0
-                    }
-                    self.crossfadeCleanupTask = Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 360_000_000)
-                        guard !Task.isCancelled else { return }
-                        self.crossfadeOutgoingImage = nil
-                    }
                 } else {
+                    self.activeCoverTrackId = targetTrack.id
                     self.activeCoverImage = decoded
+                    self.crossfadeOutgoingImage = nil
+                    self.crossfadeIncomingAlpha = 1.0
                 }
             }
         }
@@ -485,10 +481,10 @@ public struct FullScreenPlayerView: View {
         let swipeRatio = min(1.0, abs(coverHorizontalOffset) / max(1.0, discStride))
         let outgoingScale = 1.0 - 0.10 * swipeRatio
         let outgoingOpacity = 1.0 - 0.30 * swipeRatio
-        let isRimPaused = appState.isReducedMotionEnabled
-            || appState.isLyricsScreenPresented
-            || isCover3DPreviewPresented
-            || dragDismissOffset > 1
+        let activeDownloadingTarget = appState.pendingDownloadTrack ?? (activeDownloadPercent != nil ? track : nil)
+        let activeDownloadBorderColor: Color? = activeDownloadingTarget != nil
+            ? appState.downloadAccentColor(for: activeDownloadingTarget)
+            : nil
 
         ZStack {
             // Соседний предыдущий диск слева (плавно въезжает при свайпе вправо без мигания)
@@ -499,12 +495,12 @@ public struct FullScreenPlayerView: View {
                     outgoingImage: nil,
                     incomingAlpha: 1.0,
                     accentRGB: liveAccentRGB,
+                    downloadBorderColor: nil,
                     cornerRadius: 28,
                     coverSide: coverSide,
                     tiltX: 0,
                     tiltY: 0,
-                    specularOffset: .zero,
-                    isRimPaused: true
+                    specularOffset: .zero
                 )
                 .frame(width: coverSide, height: coverSide)
                 .shadow(color: Color.black.opacity(0.45), radius: 22, x: 0, y: 14)
@@ -523,12 +519,12 @@ public struct FullScreenPlayerView: View {
                     outgoingImage: nil,
                     incomingAlpha: 1.0,
                     accentRGB: nextAccent,
+                    downloadBorderColor: nil,
                     cornerRadius: 28,
                     coverSide: coverSide,
                     tiltX: 0,
                     tiltY: 0,
-                    specularOffset: .zero,
-                    isRimPaused: true
+                    specularOffset: .zero
                 )
                 .frame(width: coverSide, height: coverSide)
                 .shadow(color: Color.black.opacity(0.45), radius: 22, x: 0, y: 14)
@@ -538,7 +534,7 @@ public struct FullScreenPlayerView: View {
                 .allowsHitTesting(false)
             }
 
-            // Центральный 3D-диск с исходным качеством и единой живой обводкой по всему 3D-объёму
+            // Центральный 3D-диск с исходным качеством в минималистичной эстетике Apple
             let pressScale: CGFloat = isPressingCover ? 0.972 : 1.0
 
             ZStack(alignment: .bottom) {
@@ -547,32 +543,37 @@ public struct FullScreenPlayerView: View {
                     outgoingImage: crossfadeOutgoingImage,
                     incomingAlpha: crossfadeIncomingAlpha,
                     accentRGB: liveAccentRGB,
+                    downloadBorderColor: activeDownloadBorderColor,
                     cornerRadius: 28,
                     coverSide: coverSide,
                     tiltX: tiltX,
                     tiltY: tiltY,
-                    specularOffset: gyro.specularUnitOffset,
-                    isRimPaused: isRimPaused || abs(coverHorizontalOffset) > 2
+                    specularOffset: gyro.specularUnitOffset
                 )
                 .frame(width: coverSide, height: coverSide)
 
                 if let pct = activeDownloadPercent {
+                    let dlColor = activeDownloadBorderColor ?? liveAccentColor
                     VStack(spacing: 6) {
                         HStack(spacing: 8) {
                             ProgressView()
                                 .scaleEffect(0.8)
-                                .tint(.white)
+                                .tint(dlColor)
                             Text("Загрузка трека: \(pct)%")
                                 .font(.system(size: 13, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
                         }
                         ProgressView(value: Double(max(1, min(100, pct))), total: 100.0)
-                            .tint(liveAccentColor)
+                            .tint(dlColor)
                             .frame(width: coverSide * 0.68)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .liquidGlassCard(cornerRadius: 16, tint: liveAccentColor, tintOpacity: 0.10)
+                    .liquidGlassCard(cornerRadius: 16, tint: dlColor, tintOpacity: 0.14)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(dlColor.opacity(0.82), lineWidth: 1.2)
+                    )
                     .padding(.bottom, 14)
                 }
             }
@@ -873,7 +874,7 @@ public struct FullScreenPlayerView: View {
 
             Spacer(minLength: 6)
 
-            // 2 круглые стеклянные кнопки: Избранное и Очередь (кнопка Инфо убрана — сведения открываются по 3D Touch на обложке!)
+            // 2 круглые стеклянные кнопки: Избранное и Очередь (открывает компактное 4-трековое окно очереди над названием трека)
             HStack(spacing: 10) {
                 let isLiked = track.map { appState.isFavorite($0) } ?? false
                 Button {
@@ -890,13 +891,16 @@ public struct FullScreenPlayerView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    appState.isQueueSheetPresented = true
+                    appState.haptics.softSelection()
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                        appState.isQueueSheetPresented.toggle()
+                    }
                 } label: {
                     Image(systemName: "list.bullet")
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.88))
+                        .foregroundStyle(appState.isQueueSheetPresented ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.88))
                         .frame(width: 42, height: 42)
-                        .liquidGlassCircle(tint: accentColor)
+                        .liquidGlassCircle(tint: accentColor, isHighlighted: appState.isQueueSheetPresented)
                 }
                 .buttonStyle(.plain)
             }
@@ -904,7 +908,11 @@ public struct FullScreenPlayerView: View {
     }
 
     private func centerModePillRow(accentColor: Color) -> some View {
-        let hasAvailableLyrics = !appState.currentLyricsDocument.lines.isEmpty && !(track.map { appState.isLyricsDisabled(for: $0) } ?? false)
+        let lyricsDisabled = track.map { appState.isLyricsDisabled(for: $0) } ?? false
+        let hasAvailableLyrics = !lyricsDisabled && (!appState.currentLyricsDocument.lines.isEmpty || appState.isLoadingLyrics)
+        let fxMode = appState.audioFXMode
+        let fxTint = FXRoseStyle.tintColor(for: fxMode, fallbackAccent: accentColor)
+
         return HStack(spacing: 10) {
             if hasAvailableLyrics {
                 Button {
@@ -912,8 +920,14 @@ public struct FullScreenPlayerView: View {
                     appState.isLyricsScreenPresented = true
                 } label: {
                     HStack(spacing: 7) {
-                        Image(systemName: "music.note")
-                            .font(.system(size: 14, weight: .bold))
+                        if appState.isLoadingLyrics && appState.currentLyricsDocument.lines.isEmpty {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(0.72)
+                        } else {
+                            Image(systemName: "music.note")
+                                .font(.system(size: 14, weight: .bold))
+                        }
                         Text("Текст")
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                     }
@@ -930,15 +944,19 @@ public struct FullScreenPlayerView: View {
                 appState.isAudioFXSheetPresented = true
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "waveform.badge.magnifyingglass")
-                        .font(.system(size: 13, weight: .semibold))
+                    if fxMode != .normal {
+                        FXRoseBadgeIcon(mode: fxMode, size: 15)
+                    } else {
+                        Image(systemName: "waveform.badge.magnifyingglass")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
                     Text(fxPillTitle)
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                 }
-                .foregroundStyle(isAnyFXActive ? accentColor : .white.opacity(0.86))
+                .foregroundStyle(isAnyFXActive ? fxTint : .white.opacity(0.86))
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .liquidGlassCapsule(tint: accentColor, isProminent: false)
+                .liquidGlassCapsule(tint: isAnyFXActive ? fxTint : accentColor, isProminent: false)
             }
             .buttonStyle(.plain)
         }
@@ -1027,7 +1045,7 @@ public struct FullScreenPlayerView: View {
 
                     Spacer()
 
-                    // Центральная техническая плашка: нажатие также открывает 3D-превью сведений о файле
+                    // Центральная техническая плашка: нажатие также открывает полупрозрачное окно «Свойства трека»
                     Button {
                         appState.haptics.lightTap()
                         withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
@@ -1068,6 +1086,11 @@ public struct FullScreenPlayerView: View {
 
     private var subtitleText: String {
         guard let track else { return "Bebranoid iOS" }
+        if let matchedPlaylist = appState.libraryState.playlists.first(where: { pl in
+            !pl.isRecentAutoPlaylist && (pl.trackFilenames.contains(track.cacheKey) || pl.trackFilenames.contains(track.filename) || pl.tracksSnapshot.contains(where: { $0.id == track.id }))
+        }) {
+            return "\(track.artist) • \(matchedPlaylist.name)"
+        }
         if !track.album.isEmpty && track.album != "Без альбома" {
             return "\(track.artist) — \(track.album)"
         }
@@ -1101,7 +1124,8 @@ public struct FullScreenPlayerView: View {
     }
 }
 
-/// 3D Touch / Haptic Touch полноэкранный Liquid Glass просмотр увеличенной обложки и сведений о треке
+/// Полупрозрачное всплывающее окно «Свойства трека» и предпросмотра обложки в стиле Apple Liquid Glass:
+/// не перекрывает и не прячет задний фон, показывает дату выгрузки и кнопку «Показать в Telegram» (`TrackInfoModal.jsx` 1:1).
 private struct Cover3DTouchPreviewOverlay: View {
     let track: Track
     let localCoverPath: String?
@@ -1116,102 +1140,140 @@ private struct Cover3DTouchPreviewOverlay: View {
     var body: some View {
         let resolvedFormat = formatInfo ?? AudioFormatInfo.fallbackFromFilename(track.filename, fileSize: track.fileSize, duration: track.duration)
         let badge = resolvedFormat.computeQualityBadge()
-        let enlargedSide = min(viewportSize.width - 36, viewportSize.height * 0.48)
+        let isLossless = (badge.tier == .hiRes || badge.tier == .lossless)
+        let canOpenTG = TrackMetadataActions.canJumpToTelegram(track)
+        let cardWidth = min(viewportSize.width - 36, 368.0)
 
         ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay(Color.black.opacity(0.10))
+            // Лёгкая полупрозрачная дымка, оставляющая живой фон и интерфейс плеера полностью видимыми
+            Color.black.opacity(0.28)
                 .ignoresSafeArea()
                 .onTapGesture {
                     onDismiss()
                 }
 
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 18) {
-                    Spacer(minLength: 20)
-
-                    CoverLivingRimShellView(
-                        accentRGB: accentRGB,
-                        cornerRadius: 32,
-                        isPaused: false
-                    ) {
-                        ArtworkThumbnailView(
-                            track: track,
-                            localPath: localCoverPath,
-                            remoteURL: track.remoteArtworkURL,
-                            fallbackSeed: "\(track.album)|\(track.artist)",
-                            cornerRadius: 29.5,
-                            sizeTier: .originalSource,
-                            enableSmoothTransition: true,
-                            showBorder: false
-                        )
-                    }
-                    .frame(width: enlargedSide, height: enlargedSide)
-                    .shadow(color: Color.black.opacity(0.55), radius: 32, x: 0, y: 18)
-
-                    VStack(alignment: .leading, spacing: 11) {
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(track.title)
-                                    .font(.system(size: 19, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                                Text("\(track.artist) • \(track.album)")
-                                    .font(.system(size: 14, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.74))
-                            }
-                            Spacer()
-                            Text(badge.label)
-                                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .liquidGlassCapsule(tint: accentColor, isProminent: true, isInteractive: false)
-                        }
-
-                        Divider().overlay(Color.white.opacity(0.14))
-
-                        detailRow("Кодек", resolvedFormat.codec)
-                        if let sr = resolvedFormat.sampleRateHz {
-                            detailRow("Частота", "\(sr) Hz")
-                        }
-                        if let bps = resolvedFormat.bitsPerSample {
-                            detailRow("Разрядность", "\(bps)-bit")
-                        }
-                        if let br = resolvedFormat.bitrateKbps {
-                            detailRow("Битрейт", "\(br) kbps")
-                        }
-                        if let size = track.fileSize, size > 0 {
-                            detailRow("Размер файла", String(format: "%.2f МБ", Double(size) / (1024.0 * 1024.0)))
-                        }
-                        if let year = track.year {
-                            detailRow("Год", "\(year)")
-                        }
-                        detailRow("Длительность", FullScreenPlayerView.formatSeconds(track.duration))
-                        detailRow("Источник", track.sourceKind.rawValue.uppercased())
-                        detailRow("Файл", track.filename)
-                    }
-                    .padding(18)
-                    .frame(width: enlargedSide)
-                    .liquidGlassCard(cornerRadius: 24, tint: accentColor, tintOpacity: 0.10)
-
+            VStack(spacing: 14) {
+                HStack {
+                    Text("Свойства трека")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Spacer()
                     Button {
                         onDismiss()
                     } label: {
-                        Text("Закрыть")
-                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 28)
-                            .padding(.vertical, 12)
-                            .liquidGlassCapsule(tint: accentColor, isProminent: false)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.82))
+                            .frame(width: 28, height: 28)
+                            .background(Color.white.opacity(0.12), in: Circle())
                     }
                     .buttonStyle(.plain)
-
-                    Spacer(minLength: 28)
                 }
-                .frame(maxWidth: .infinity)
-                .offset(y: dragDownOffset)
+
+                HStack(spacing: 13) {
+                    ArtworkThumbnailView(
+                        track: track,
+                        localPath: localCoverPath,
+                        remoteURL: track.remoteArtworkURL,
+                        fallbackSeed: "\(track.album)|\(track.artist)",
+                        cornerRadius: 14,
+                        sizeTier: .originalSource,
+                        enableSmoothTransition: true,
+                        showBorder: true
+                    )
+                    .frame(width: 72, height: 72)
+                    .shadow(color: Color.black.opacity(0.36), radius: 12, x: 0, y: 6)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            Image(systemName: isLossless ? "waveform.badge.checkmark" : "waveform")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(isLossless ? "Lossless Audio (Без потерь)" : "Сжатый звук (Lossy)")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(accentColor.opacity(0.22), in: Capsule())
+                        .foregroundStyle(accentColor)
+
+                        Text(track.title)
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+
+                        Text("\(track.artist) • \(track.album)")
+                            .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                Divider()
+                    .overlay(Color.white.opacity(0.14))
+
+                VStack(spacing: 8) {
+                    detailRow("Формат", resolvedFormat.codec)
+                    detailRow(
+                        "Разрядность",
+                        resolvedFormat.bitsPerSample != nil ? "\(resolvedFormat.bitsPerSample!) bit" : "— (Поток с потерями)"
+                    )
+                    detailRow(
+                        "Частота дискретизации",
+                        resolvedFormat.sampleRateHz != nil
+                            ? String(format: "%.1f kHz", Double(resolvedFormat.sampleRateHz!) / 1000.0)
+                            : "44.1 kHz"
+                    )
+                    detailRow(
+                        "Каналы",
+                        resolvedFormat.channels != nil
+                            ? "\(resolvedFormat.channels!) (\(resolvedFormat.channels == 1 ? "Моно" : "Стерео"))"
+                            : "2 (Стерео)"
+                    )
+                    detailRow(
+                        "Битрейт",
+                        resolvedFormat.bitrateKbps != nil ? "\(resolvedFormat.bitrateKbps!) kbps" : "Авто"
+                    )
+                    if let size = track.fileSize, size > 0 {
+                        detailRow("Размер файла", String(format: "%.2f МБ", Double(size) / (1024.0 * 1024.0)))
+                    }
+                    detailRow("Длительность", FullScreenPlayerView.formatSeconds(track.duration))
+                    detailRow("Дата выгрузки", TrackMetadataActions.formatUploadDate(track.dateAdded))
+                }
+
+                if canOpenTG {
+                    Button {
+                        HapticsManager.shared.mediumImpact()
+                        TrackMetadataActions.openInTelegram(track)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 13, weight: .bold))
+                            Text("Показать в Telegram")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(
+                            Capsule()
+                                .fill(Color(red: 0.20, green: 0.58, blue: 0.98).opacity(0.32))
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(Color(red: 0.35, green: 0.72, blue: 1.0).opacity(0.65), lineWidth: 0.8)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                }
             }
+            .padding(20)
+            .frame(width: cardWidth)
+            .liquidGlassCard(cornerRadius: 28, tint: accentColor, tintOpacity: 0.12, isInteractive: false)
+            .offset(y: dragDownOffset)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 12)
                     .onChanged { value in
@@ -1233,13 +1295,13 @@ private struct Cover3DTouchPreviewOverlay: View {
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             Text(label)
-                .font(.system(size: 12.5, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.64))
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.66))
             Spacer(minLength: 6)
             Text(value)
-                .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                .font(.system(size: 13, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
@@ -1327,7 +1389,6 @@ public struct InteractiveSeekBarView: View {
                     .onEnded { value in
                         let ratio = min(1.0, max(0.0, Double(value.location.x / width)))
                         let target = ratio * safeDur
-                        // Фиксируем целевую позицию ДО снятия `isDragging`, чтобы исключить обратный скачок кадра!
                         committedSeekTarget = target
                         draggedTime = target
                         onCommitSeek(target)
@@ -1353,43 +1414,35 @@ public struct InteractiveSeekBarView: View {
     }
 }
 
-/// Монолитная 3D-плита обложки (`Sculpted3DCoverSlabView`), объединяющая:
-/// - Исходное разрешение обложки (`.originalSource`, 1 общий `CGImage` буфер без дублирования декодера)
-/// - Плавный бесшовный кроссфейд при переключении кнопками и мгновенную подстановку при свайпе пальцем
-/// - Эстетичное продолжение крайних пикселей обложки в 3D-объёме при наклоне гироскопа (как в прошлой версии, без кричащих неоновых колец на торцах)
-/// - Изолированный `TimelineView` строго для тонкого `2.2 pt` ободка лицевой грани (0 перерисовок `CGImage` слоёв в секунду!)
+/// Монолитная 3D-плита обложки (`Sculpted3DCoverSlabView`) в минималистичной эстетике Apple Music:
+/// - Исходное разрешение обложки (`.originalSource`) без искусственного неонового свечения по краям и без мигания
+/// - Эстетичное продолжение крайних пикселей обложки в 3D-объёме при наклоне гироскопа
+/// - Когда скачивается новый трек, рисует аккуратную обводку в цвете обложки скачивающегося трека (`downloadBorderColor`)
 private struct Sculpted3DCoverSlabView: View {
     let primaryImage: CGImage?
     let outgoingImage: CGImage?
     let incomingAlpha: Double
     let accentRGB: MeshRGB
+    let downloadBorderColor: Color?
     let cornerRadius: CGFloat
     let coverSide: CGFloat
     let tiltX: Double
     let tiltY: Double
     let specularOffset: CGSize
-    let isRimPaused: Bool
 
     var body: some View {
-        let isMonochrome = HarmonoidMeshEngine.chroma(accentRGB.r, accentRGB.g, accentRGB.b) < 0.09
-        let norm = accentRGB.normalizedDouble
-        let pureAccent = isMonochrome
-            ? Color(red: 0.90, green: 0.91, blue: 0.94)
-            : Color(red: norm.r, green: norm.g, blue: norm.b)
-        let stops = CoverLivingRimGradientBuilder.buildStops(accentRGB: accentRGB, isMonochrome: isMonochrome)
         let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 20.0)
-        let rimThickness: CGFloat = 2.2
-        let innerRadius = max(4.0, cornerRadius - rimThickness)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
         ZStack {
-            // Идеальное продолжение крайних пикселей самой обложки по бокам при наклоне гироскопа (статические GPU-текстуры вне TimelineView!)
+            // Идеальное продолжение крайних пикселей самой обложки по бокам при наклоне гироскопа
             if tiltMagnitude > 0.015 {
                 ForEach((1...6).reversed(), id: \.self) { sliceIdx in
                     let frac = Double(sliceIdx) / 6.0
                     coverFullSliceLayer(radius: cornerRadius)
                         .overlay(
-                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .fill(Color.black.opacity(0.14 + 0.34 * frac))
+                            shape
+                                .fill(Color.black.opacity(0.16 + 0.34 * frac))
                         )
                         .offset(
                             x: CGFloat(-tiltY * 0.44 * frac),
@@ -1399,43 +1452,64 @@ private struct Sculpted3DCoverSlabView: View {
                 }
             }
 
-            // Лицевая грань: вращается ТОЛЬКО тонкая 2.2pt подложка ободка внутри `SpinningRimOnlyView`,
-            // а сама текстура обложки `coverFaceLayer` никогда не пересоздаётся на тиках таймлайна!
-            ZStack {
-                SpinningRimOnlyView(
-                    stops: stops,
-                    cornerRadius: cornerRadius,
-                    isPaused: isRimPaused
-                )
-
-                coverFaceLayer(innerRadius: innerRadius)
-                    .padding(rimThickness)
-            }
-            .overlay {
-                if tiltMagnitude > 0.012 {
-                    let lightCenter = UnitPoint(
-                        x: max(0.05, min(0.95, 0.5 - specularOffset.width * 0.42)),
-                        y: max(0.05, min(0.95, 0.38 - specularOffset.height * 0.42))
-                    )
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    Color.white.opacity(0.14 * tiltMagnitude),
-                                    Color.white.opacity(0.02 * tiltMagnitude),
-                                    Color.clear
-                                ],
-                                center: lightCenter,
-                                startRadius: 8,
-                                endRadius: coverSide * 0.78
-                            )
+            // Чистая лицевая грань обложки на всю ширину без неонового вращающегося кольца
+            coverFaceLayer(radius: cornerRadius)
+                .overlay {
+                    if tiltMagnitude > 0.012 {
+                        let lightCenter = UnitPoint(
+                            x: max(0.05, min(0.95, 0.5 - specularOffset.width * 0.42)),
+                            y: max(0.05, min(0.95, 0.38 - specularOffset.height * 0.42))
                         )
-                        .allowsHitTesting(false)
+                        shape
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        Color.white.opacity(0.11 * tiltMagnitude),
+                                        Color.white.opacity(0.02 * tiltMagnitude),
+                                        Color.clear
+                                    ],
+                                    center: lightCenter,
+                                    startRadius: 8,
+                                    endRadius: coverSide * 0.78
+                                )
+                            )
+                            .allowsHitTesting(false)
+                    }
                 }
-            }
+                .overlay {
+                    if let dlBorder = downloadBorderColor {
+                        // Когда скачивается новый трек — обводка окрашивается строго в цвет обложки скачивающегося трека!
+                        shape
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        dlBorder.opacity(0.95),
+                                        dlBorder.opacity(0.55),
+                                        dlBorder.opacity(0.90)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 2.0
+                            )
+                    } else {
+                        // Минималистичная тонкая стеклянная фаска в стиле Apple Music (без неонового пересвета)
+                        shape
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(0.20),
+                                        Color.white.opacity(0.06),
+                                        Color.white.opacity(0.10)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.75
+                            )
+                    }
+                }
         }
-        .shadow(color: pureAccent.opacity(isMonochrome ? 0.14 : 0.24), radius: 11, x: 0, y: 0)
-        .animation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.55), value: accentRGB)
     }
 
     @ViewBuilder
@@ -1457,31 +1531,30 @@ private struct Sculpted3DCoverSlabView: View {
     }
 
     @ViewBuilder
-    private func coverFaceLayer(innerRadius: CGFloat) -> some View {
-        let faceSide = max(16.0, coverSide - 4.4)
+    private func coverFaceLayer(radius: CGFloat) -> some View {
         ZStack {
             if let out = outgoingImage {
                 Image(decorative: out, scale: 1.0, orientation: .up)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: faceSide, height: faceSide)
+                    .frame(width: coverSide, height: coverSide)
             }
 
             if let cur = primaryImage {
                 Image(decorative: cur, scale: 1.0, orientation: .up)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: faceSide, height: faceSide)
+                    .frame(width: coverSide, height: coverSide)
                     .opacity(outgoingImage != nil ? incomingAlpha : 1.0)
             } else {
                 uniformBlackPlaceholder
-                    .frame(width: faceSide, height: faceSide)
+                    .frame(width: coverSide, height: coverSide)
                     .opacity(outgoingImage != nil ? incomingAlpha : 1.0)
             }
         }
-        .frame(width: faceSide, height: faceSide)
+        .frame(width: coverSide, height: coverSide)
         .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
-        .clipShape(RoundedRectangle(cornerRadius: innerRadius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
 
     private var uniformBlackPlaceholder: some View {
@@ -1491,114 +1564,5 @@ private struct Sculpted3DCoverSlabView: View {
                 .font(.system(size: max(28, coverSide * 0.22), weight: .regular))
                 .foregroundStyle(Color(red: 218.0 / 255.0, green: 218.0 / 255.0, blue: 228.0 / 255.0).opacity(0.60))
         }
-    }
-}
-
-private struct SpinningRimOnlyView: View {
-    let stops: [Gradient.Stop]
-    let cornerRadius: CGFloat
-    let isPaused: Bool
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: isPaused)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let angleDeg = (t.truncatingRemainder(dividingBy: 9.0) / 9.0) * 360.0
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(
-                    AngularGradient(
-                        gradient: Gradient(stops: stops),
-                        center: .center,
-                        startAngle: .degrees(angleDeg),
-                        endAngle: .degrees(angleDeg + 360.0)
-                    )
-                )
-        }
-    }
-}
-
-private enum CoverLivingRimGradientBuilder {
-    static func mixColor(accentRGB: MeshRGB, accentWeight: Double, baseR: Double, baseG: Double, baseB: Double) -> Color {
-        let norm = accentRGB.normalizedDouble
-        let w = min(1.0, max(0.0, accentWeight))
-        let r = norm.r * w + baseR * (1.0 - w)
-        let g = norm.g * w + baseG * (1.0 - w)
-        let b = norm.b * w + baseB * (1.0 - w)
-        return Color(red: r, green: g, blue: b)
-    }
-
-    static func buildStops(accentRGB: MeshRGB, isMonochrome: Bool) -> [Gradient.Stop] {
-        if isMonochrome {
-            let graphite = Color(red: 0.14, green: 0.15, blue: 0.17)
-            let silver = Color(red: 0.72, green: 0.74, blue: 0.78)
-            let platinum = Color(red: 0.96, green: 0.97, blue: 0.99)
-            return [
-                .init(color: graphite, location: 0.0 / 360.0),
-                .init(color: silver, location: 55.0 / 360.0),
-                .init(color: platinum, location: 100.0 / 360.0),
-                .init(color: silver, location: 160.0 / 360.0),
-                .init(color: graphite, location: 220.0 / 360.0),
-                .init(color: platinum, location: 280.0 / 360.0),
-                .init(color: graphite, location: 1.0)
-            ]
-        } else {
-            let norm = accentRGB.normalizedDouble
-            let pureAccent = Color(red: norm.r, green: norm.g, blue: norm.b)
-            let dark50 = mixColor(accentRGB: accentRGB, accentWeight: 0.50, baseR: 0.067, baseG: 0.067, baseB: 0.067)
-            let dark48 = mixColor(accentRGB: accentRGB, accentWeight: 0.48, baseR: 0.067, baseG: 0.067, baseB: 0.067)
-            let bright82 = mixColor(accentRGB: accentRGB, accentWeight: 0.82, baseR: 1.0, baseG: 1.0, baseB: 1.0)
-            let bright78 = mixColor(accentRGB: accentRGB, accentWeight: 0.78, baseR: 1.0, baseG: 1.0, baseB: 1.0)
-            return [
-                .init(color: dark50, location: 0.0 / 360.0),
-                .init(color: pureAccent, location: 55.0 / 360.0),
-                .init(color: bright82, location: 100.0 / 360.0),
-                .init(color: pureAccent, location: 160.0 / 360.0),
-                .init(color: dark48, location: 220.0 / 360.0),
-                .init(color: bright78, location: 280.0 / 360.0),
-                .init(color: dark50, location: 1.0)
-            ]
-        }
-    }
-}
-
-/// Живой бегущий световой ободок вокруг обложки (используется в 3D Touch увеличении)
-private struct CoverLivingRimShellView<FaceContent: View>: View {
-    let accentRGB: MeshRGB
-    let cornerRadius: CGFloat
-    let isPaused: Bool
-    @ViewBuilder let faceContent: () -> FaceContent
-
-    var body: some View {
-        let isMonochrome = HarmonoidMeshEngine.chroma(accentRGB.r, accentRGB.g, accentRGB.b) < 0.09
-        let norm = accentRGB.normalizedDouble
-        let pureAccent = isMonochrome
-            ? Color(red: 0.90, green: 0.91, blue: 0.94)
-            : Color(red: norm.r, green: norm.g, blue: norm.b)
-        let stops = CoverLivingRimGradientBuilder.buildStops(accentRGB: accentRGB, isMonochrome: isMonochrome)
-
-        ZStack {
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isPaused)) { context in
-                let t = context.date.timeIntervalSinceReferenceDate
-                let angleDeg = (t.truncatingRemainder(dividingBy: 8.0) / 8.0) * 360.0
-
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        AngularGradient(
-                            gradient: Gradient(stops: stops),
-                            center: .center,
-                            startAngle: .degrees(angleDeg),
-                            endAngle: .degrees(angleDeg + 360.0)
-                        )
-                    )
-            }
-
-            faceContent()
-                .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
-                .clipShape(RoundedRectangle(cornerRadius: max(4, cornerRadius - 2.4), style: .continuous))
-                .padding(2.4)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .shadow(color: pureAccent.opacity(isMonochrome ? 0.22 : 0.36), radius: 14, x: 0, y: 0)
-        .shadow(color: pureAccent.opacity(isMonochrome ? 0.28 : 0.42), radius: 4, x: 0, y: 0)
-        .animation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.65), value: accentRGB)
     }
 }

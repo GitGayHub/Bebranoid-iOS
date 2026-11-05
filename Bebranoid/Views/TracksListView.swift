@@ -489,6 +489,8 @@ public struct TrackRowView: View {
         let isCurrent = appState.currentTrack?.id == track.id
         let isPendingTarget = appState.pendingDownloadTrack?.id == track.id
         let downloadPct = appState.downloadProgress(for: track)
+        let isDownloadingRow = isPendingTarget || downloadPct != nil
+        let rowDownloadAccent = appState.downloadAccentColor(for: track)
         let isCached = appState.cacheIndex.isCached(track)
         let isLiked = appState.isFavorite(track)
 
@@ -516,7 +518,10 @@ public struct TrackRowView: View {
                 )
                 .frame(width: 48, height: 48)
                 .overlay {
-                    if isCurrent || isPendingTarget {
+                    if isDownloadingRow {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(rowDownloadAccent, lineWidth: 2)
+                    } else if isCurrent {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .stroke(appState.accentSwiftUIColor, lineWidth: 2)
                     }
@@ -525,8 +530,8 @@ public struct TrackRowView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(track.title)
-                            .font(.system(size: 15, weight: (isCurrent || isPendingTarget) ? .bold : .semibold, design: .rounded))
-                            .foregroundStyle((isCurrent || isPendingTarget) ? appState.accentSwiftUIColor : .white)
+                            .font(.system(size: 15, weight: (isCurrent || isDownloadingRow) ? .bold : .semibold, design: .rounded))
+                            .foregroundStyle(isDownloadingRow ? rowDownloadAccent : (isCurrent ? appState.accentSwiftUIColor : .white))
                             .lineLimit(1)
 
                         if let pct = downloadPct {
@@ -534,8 +539,8 @@ public struct TrackRowView: View {
                                 .font(.system(size: 10, weight: .heavy, design: .monospaced))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(appState.accentSwiftUIColor.opacity(0.24), in: Capsule())
-                                .foregroundStyle(appState.accentSwiftUIColor)
+                                .background(rowDownloadAccent.opacity(0.24), in: Capsule())
+                                .foregroundStyle(rowDownloadAccent)
                         } else if isCached {
                             Image(systemName: "arrow.down.circle.fill")
                                 .font(.system(size: 11))
@@ -555,7 +560,7 @@ public struct TrackRowView: View {
                     if let pct = downloadPct {
                         Text("Скачивание: \(pct)% • \(track.artist)")
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(appState.accentSwiftUIColor)
+                            .foregroundStyle(rowDownloadAccent)
                             .lineLimit(1)
                     } else {
                         Text("\(track.artist) • \(track.album)")
@@ -589,7 +594,12 @@ public struct TrackRowView: View {
                     .fill(Color.white.opacity(isSelected ? 0.18 : (isCurrent ? 0.14 : 0.06)))
                     .overlay(
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(Color.white.opacity(isCurrent ? 0.22 : 0.08), lineWidth: 0.7)
+                            .strokeBorder(
+                                isDownloadingRow
+                                    ? rowDownloadAccent.opacity(0.82)
+                                    : Color.white.opacity(isCurrent ? 0.22 : 0.08),
+                                lineWidth: isDownloadingRow ? 1.35 : 0.7
+                            )
                     )
             )
         }
@@ -612,7 +622,15 @@ public struct TrackRowView: View {
             Button {
                 appState.inspectedTrackForInfo = track
             } label: {
-                Label("Сведения о файле", systemImage: "info.circle")
+                Label("Свойства трека", systemImage: "info.circle")
+            }
+
+            if TrackMetadataActions.canJumpToTelegram(track) {
+                Button {
+                    TrackMetadataActions.openInTelegram(track)
+                } label: {
+                    Label("Показать в Telegram", systemImage: "paperplane.fill")
+                }
             }
 
             Menu("Добавить в плейлист") {

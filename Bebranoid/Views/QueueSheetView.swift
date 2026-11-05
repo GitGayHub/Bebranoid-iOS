@@ -1,7 +1,208 @@
 import SwiftUI
 
-/// Модальное окно очереди воспроизведения в стиле Liquid Glass (iOS 26 / iOS 27)
-/// с поддержкой перетаскивания (`onMove`) и быстрого перехода к треку.
+/// Компактная плавающая карточка очереди воспроизведения на 4 трека для полноэкранного плеера (`FullScreenPlayerView`):
+/// - Располагается в верхней части над названием трека и подписью плейлиста/альбома, никогда их не загораживая
+/// - Вмещает ровно 4 трека по высоте и сразу прокручивается пальцем вверх/вниз без раскрытия на весь экран
+public struct CompactPlayerQueueOverlayView: View {
+    @ObservedObject var appState: BebranoidAppState
+
+    public init(appState: BebranoidAppState) {
+        self.appState = appState
+    }
+
+    public var body: some View {
+        let queue = appState.queue
+        let currentIdx = appState.currentIndex
+
+        VStack(spacing: 0) {
+            // Компактная шапка очереди
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(appState.accentSwiftUIColor)
+                    Text("Очередь • \(queue.count)")
+                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+
+                Spacer()
+
+                Button {
+                    appState.toggleShuffle()
+                } label: {
+                    Image(systemName: "shuffle")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(appState.isShuffleEnabled ? appState.accentSwiftUIColor : .white.opacity(0.62))
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle()
+                                .fill(appState.isShuffleEnabled ? appState.accentSwiftUIColor.opacity(0.20) : Color.white.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    appState.cycleRepeatMode()
+                } label: {
+                    Image(systemName: appState.repeatMode == .one ? "repeat.1" : "repeat")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(appState.repeatMode != .none ? appState.accentSwiftUIColor : .white.opacity(0.62))
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle()
+                                .fill(appState.repeatMode != .none ? appState.accentSwiftUIColor.opacity(0.20) : Color.white.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    appState.haptics.softSelection()
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                        appState.isQueueSheetPresented = false
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.12), in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+
+            Divider()
+                .overlay(Color.white.opacity(0.10))
+
+            if queue.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "music.note.list")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.42))
+                    Text("Очередь воспроизведения пуста")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 208)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        LazyVStack(spacing: 4) {
+                            ForEach(Array(queue.enumerated()), id: \.offset) { index, item in
+                                let isCurrent = (index == currentIdx)
+                                let dlPct = appState.downloadProgress(for: item)
+                                let isPendingDl = (appState.pendingDownloadTrack?.id == item.id) || (dlPct != nil)
+                                let rowDlColor = appState.downloadAccentColor(for: item)
+
+                                Button {
+                                    appState.playTrack(item, in: queue)
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Text("\(index + 1)")
+                                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(
+                                                isPendingDl
+                                                    ? rowDlColor
+                                                    : (isCurrent ? appState.accentSwiftUIColor : .white.opacity(0.44))
+                                            )
+                                            .frame(width: 22, alignment: .leading)
+
+                                        ArtworkThumbnailView(
+                                            track: item,
+                                            localPath: appState.libraryState.customAlbumCovers[item.album] ?? item.coverPath,
+                                            remoteURL: item.remoteArtworkURL,
+                                            fallbackSeed: "\(item.album)|\(item.artist)",
+                                            cornerRadius: 8,
+                                            sizeTier: .listThumbnail
+                                        )
+                                        .frame(width: 36, height: 36)
+                                        .overlay {
+                                            if isPendingDl {
+                                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                    .strokeBorder(rowDlColor, lineWidth: 1.4)
+                                            }
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 1.5) {
+                                            Text(item.title)
+                                                .font(.system(size: 13.5, weight: (isCurrent || isPendingDl) ? .bold : .semibold, design: .rounded))
+                                                .foregroundStyle(
+                                                    isPendingDl
+                                                        ? rowDlColor
+                                                        : (isCurrent ? appState.accentSwiftUIColor : .white)
+                                                )
+                                                .lineLimit(1)
+
+                                            Text(item.artist)
+                                                .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                                                .foregroundStyle(.white.opacity(0.62))
+                                                .lineLimit(1)
+                                        }
+
+                                        Spacer(minLength: 4)
+
+                                        if let pct = dlPct {
+                                            Text("\(pct)%")
+                                                .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                                                .foregroundStyle(rowDlColor)
+                                        } else if isCurrent {
+                                            Image(systemName: "waveform")
+                                                .font(.system(size: 12, weight: .bold))
+                                                .foregroundStyle(appState.accentSwiftUIColor)
+                                        }
+
+                                        Text(FullScreenPlayerView.formatSeconds(item.duration))
+                                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.52))
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .frame(height: 48)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                            .fill(
+                                                isPendingDl
+                                                    ? rowDlColor.opacity(0.14)
+                                                    : (isCurrent ? appState.accentSwiftUIColor.opacity(0.16) : Color.white.opacity(0.04))
+                                            )
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                                    .strokeBorder(
+                                                        isPendingDl
+                                                            ? rowDlColor.opacity(0.75)
+                                                            : Color.white.opacity(isCurrent ? 0.22 : 0.05),
+                                                        lineWidth: isPendingDl ? 1.1 : 0.6
+                                                    )
+                                            )
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .id(index)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                    }
+                    // Ровно 4 трека по высоте (4 × 52pt = 208pt), прокручиваются пальцем напрямую без растягивания окна
+                    .frame(height: 208)
+                    .onAppear {
+                        let target = min(max(0, currentIdx), max(0, queue.count - 1))
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            withAnimation(.easeOut(duration: 0.20)) {
+                                proxy.scrollTo(target, anchor: .top)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .liquidGlassCard(cornerRadius: 24, tint: appState.accentSwiftUIColor, tintOpacity: 0.10, isInteractive: true)
+    }
+}
+
+/// Модальное окно очереди воспроизведения в стиле Liquid Glass
 public struct QueueSheetView: View {
     @ObservedObject var appState: BebranoidAppState
     @Environment(\.dismiss) private var dismiss
@@ -11,117 +212,22 @@ public struct QueueSheetView: View {
     }
 
     public var body: some View {
-        NavigationStack {
-            ZStack {
-                LiquidGlassSheetBackdrop(accentColor: appState.accentSwiftUIColor)
-
-                if appState.queue.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "music.note.list")
-                            .font(.system(size: 40, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.45))
-                        Text("Очередь воспроизведения пуста")
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.68))
-                    }
-                    .padding(28)
-                    .liquidGlassCard(cornerRadius: 24, tint: appState.accentSwiftUIColor, tintOpacity: 0.08, isSheer: true)
-                    .padding(.horizontal, 24)
-                } else {
-                    List {
-                        ForEach(Array(appState.queue.enumerated()), id: \.element.id) { index, track in
-                            let isCurrent = index == appState.currentIndex
-                            Button {
-                                appState.playTrack(track, in: appState.queue)
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Text("\(index + 1)")
-                                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(isCurrent ? appState.accentSwiftUIColor : .white.opacity(0.48))
-                                        .frame(width: 24, alignment: .leading)
-
-                                    ArtworkThumbnailView(
-                                        track: track,
-                                        localPath: appState.libraryState.customAlbumCovers[track.album] ?? track.coverPath,
-                                        remoteURL: track.remoteArtworkURL,
-                                        fallbackSeed: "\(track.album)|\(track.artist)",
-                                        cornerRadius: 10,
-                                        sizeTier: .listThumbnail
-                                    )
-                                    .frame(width: 44, height: 44)
-
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(track.title)
-                                            .font(.system(size: 15, weight: isCurrent ? .bold : .semibold, design: .rounded))
-                                            .foregroundStyle(isCurrent ? appState.accentSwiftUIColor : .white)
-                                            .lineLimit(1)
-                                        Text(track.artist)
-                                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                                            .foregroundStyle(.white.opacity(0.65))
-                                            .lineLimit(1)
-                                    }
-
-                                    Spacer()
-
-                                    if isCurrent {
-                                        Image(systemName: "waveform")
-                                            .foregroundStyle(appState.accentSwiftUIColor)
-                                    }
-
-                                    Text(FullScreenPlayerView.formatSeconds(track.duration))
-                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                        .foregroundStyle(.white.opacity(0.58))
-                                }
-                                .padding(.vertical, 2)
-                            }
-                            .listRowBackground(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(isCurrent ? appState.accentSwiftUIColor.opacity(0.16) : Color.white.opacity(0.07))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                            .strokeBorder(Color.white.opacity(isCurrent ? 0.28 : 0.10), lineWidth: 0.7)
-                                    )
-                                    .padding(.vertical, 2)
-                            )
-                            .listRowSeparator(.hidden)
-                        }
-                        .onMove { from, to in
-                            appState.queue.move(fromOffsets: from, toOffset: to)
-                            if let current = appState.currentTrack,
-                               let updatedIdx = appState.queue.firstIndex(where: { $0.id == current.id }) {
-                                appState.currentIndex = updatedIdx
-                            }
-                        }
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
+        ZStack {
+            Color.black.opacity(0.24)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    dismiss()
                 }
-            }
-            .navigationTitle("Очередь (\(appState.queue.count))")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Готово") { dismiss() }
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
-                #if os(iOS)
-                ToolbarItem(placement: .primaryAction) {
-                    EditButton()
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundStyle(appState.accentSwiftUIColor)
-                }
-                #endif
-            }
+
+            CompactPlayerQueueOverlayView(appState: appState)
+                .padding(.horizontal, 18)
         }
-        .liquidGlassSheetPresentation()
+        .presentationBackground(.clear)
     }
 }
 
-/// Модальное окно технических сведений о файле (`src/components/TrackInfoModal.jsx` 1:1) в стиле Liquid Glass.
+/// Всплывающее полупрозрачное окно «Свойства трека» (`src/components/TrackInfoModal.jsx` 1:1) в эстетике Apple Liquid Glass:
+/// не скрывает задний фон (оставляет его видимым) и содержит дату выгрузки трека и переход к сообщению в Telegram.
 public struct TrackInfoSheetView: View {
     public let track: Track
     public let formatInfo: AudioFormatInfo?
@@ -137,103 +243,164 @@ public struct TrackInfoSheetView: View {
     public var body: some View {
         let resolvedFormat = formatInfo ?? AudioFormatInfo.fallbackFromFilename(track.filename, fileSize: track.fileSize, duration: track.duration)
         let badge = resolvedFormat.computeQualityBadge()
+        let isLossless = (badge.tier == .hiRes || badge.tier == .lossless)
+        let canOpenTG = TrackMetadataActions.canJumpToTelegram(track)
 
-        NavigationStack {
-            ZStack {
-                LiquidGlassSheetBackdrop(accentColor: accentColor)
-
-                ScrollView {
-                    VStack(spacing: 16) {
-                        glassSection(title: "Метаданные трека") {
-                            infoRow("Название", track.title)
-                            infoRow("Исполнитель", track.artist)
-                            infoRow("Альбом", track.album)
-                            if let year = track.year {
-                                infoRow("Год", "\(year)")
-                            }
-                            infoRow("Длительность", FullScreenPlayerView.formatSeconds(track.duration))
-                        }
-
-                        glassSection(title: "Качество и кодек") {
-                            infoRow("Класс качества", badge.label)
-                            infoRow("Кодек", resolvedFormat.codec)
-                            if let sr = resolvedFormat.sampleRateHz {
-                                infoRow("Частота дискретизации", "\(sr) Hz")
-                            }
-                            if let bps = resolvedFormat.bitsPerSample {
-                                infoRow("Разрядность", "\(bps)-bit")
-                            }
-                            if let br = resolvedFormat.bitrateKbps {
-                                infoRow("Битрейт", "\(br) kbps")
-                            }
-                            if let ch = resolvedFormat.channels {
-                                infoRow("Каналы", ch == 2 ? "Стерео (2)" : "\(ch)")
-                            }
-                        }
-
-                        glassSection(title: "Источник и хранилище") {
-                            infoRow("Источник", track.sourceKind.rawValue.uppercased())
-                            infoRow("Внутренний ID", track.id)
-                            infoRow("Имя файла", track.filename)
-                            if let size = track.fileSize, size > 0 {
-                                let mb = Double(size) / (1024.0 * 1024.0)
-                                infoRow("Размер файла", String(format: "%.2f МБ", mb))
-                            }
-                            if track.isFromArchive {
-                                infoRow("Статус архива", "Архивный чат (Read-Only)")
-                            }
-                        }
-                    }
-                    .padding(18)
+        ZStack {
+            // Полупрозрачная дымка, сквозь которую полностью виден задний фон приложения
+            Color.black.opacity(0.26)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    HapticsManager.shared.lightTap()
+                    dismiss()
                 }
-            }
-            .navigationTitle("Сведения о треке")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Закрыть") { dismiss() }
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
+
+            VStack(spacing: 14) {
+                // Шапка окна «Свойства трека»
+                HStack {
+                    Text("Свойства трека")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
+                    Spacer()
+                    Button {
+                        HapticsManager.shared.lightTap()
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.82))
+                            .frame(width: 28, height: 28)
+                            .background(Color.white.opacity(0.12), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Карточка трека с обложкой и бейджем качества
+                HStack(spacing: 13) {
+                    ArtworkThumbnailView(
+                        track: track,
+                        localPath: track.coverPath,
+                        remoteURL: track.remoteArtworkURL,
+                        fallbackSeed: "\(track.album)|\(track.artist)",
+                        cornerRadius: 14,
+                        sizeTier: .albumGrid
+                    )
+                    .frame(width: 68, height: 68)
+                    .shadow(color: .black.opacity(0.32), radius: 10, x: 0, y: 5)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            Image(systemName: isLossless ? "waveform.badge.checkmark" : "waveform")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(isLossless ? "Lossless Audio (Без потерь)" : "Сжатый звук (Lossy)")
+                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(accentColor.opacity(0.22), in: Capsule())
+                        .foregroundStyle(accentColor)
+
+                        Text(track.title)
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+
+                        Text("\(track.artist) • \(track.album)")
+                            .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.70))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                Divider()
+                    .overlay(Color.white.opacity(0.12))
+
+                // Сетка параметров 1:1 как в ПК-версии (`src/components/TrackInfoModal.jsx`)
+                VStack(spacing: 8) {
+                    infoRow("Формат", resolvedFormat.codec)
+                    infoRow(
+                        "Разрядность",
+                        resolvedFormat.bitsPerSample != nil ? "\(resolvedFormat.bitsPerSample!) bit" : "— (Поток с потерями)"
+                    )
+                    infoRow(
+                        "Частота дискретизации",
+                        resolvedFormat.sampleRateHz != nil
+                            ? String(format: "%.1f kHz", Double(resolvedFormat.sampleRateHz!) / 1000.0)
+                            : "44.1 kHz"
+                    )
+                    infoRow(
+                        "Каналы",
+                        resolvedFormat.channels != nil
+                            ? "\(resolvedFormat.channels!) (\(resolvedFormat.channels == 1 ? "Моно" : "Стерео"))"
+                            : "2 (Стерео)"
+                    )
+                    infoRow(
+                        "Битрейт",
+                        resolvedFormat.bitrateKbps != nil ? "\(resolvedFormat.bitrateKbps!) kbps" : "Авто"
+                    )
+                    if let size = track.fileSize, size > 0 {
+                        let mb = Double(size) / (1024.0 * 1024.0)
+                        infoRow("Размер файла", String(format: "%.2f МБ", mb))
+                    }
+                    infoRow("Длительность", FullScreenPlayerView.formatSeconds(track.duration))
+                    infoRow("Дата выгрузки", TrackMetadataActions.formatUploadDate(track.dateAdded))
+                }
+
+                // Кнопка перехода к сообщению в Telegram (как в ПК-версии `TrackInfoModal.jsx`)
+                if canOpenTG {
+                    Button {
+                        HapticsManager.shared.mediumImpact()
+                        TrackMetadataActions.openInTelegram(track)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 13, weight: .bold))
+                            Text("Показать в Telegram")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(
+                            Capsule()
+                                .fill(Color(red: 0.20, green: 0.58, blue: 0.98).opacity(0.32))
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(Color(red: 0.35, green: 0.72, blue: 1.0).opacity(0.65), lineWidth: 0.8)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
                 }
             }
+            .padding(20)
+            .frame(maxWidth: 360)
+            .liquidGlassCard(cornerRadius: 28, tint: accentColor, tintOpacity: 0.12, isInteractive: false)
+            .padding(.horizontal, 20)
         }
-        .liquidGlassSheetPresentation()
-    }
-
-    @ViewBuilder
-    private func glassSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.system(size: 13, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white.opacity(0.75))
-                .padding(.horizontal, 4)
-
-            VStack(spacing: 10) {
-                content()
-            }
-            .padding(15)
-            .liquidGlassCard(cornerRadius: 20, tint: accentColor, tintOpacity: 0.06, isSheer: true)
-        }
+        .presentationBackground(.clear)
     }
 
     private func infoRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 10) {
             Text(label)
-                .font(.system(size: 13.5, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.66))
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.65))
             Spacer(minLength: 8)
             Text(value)
-                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                .font(.system(size: 13, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.trailing)
         }
     }
 }
 
-/// Панель звуковых эффектов, скорости, Bass Boost и кроссфейда (`src/App.jsx` + `src/components/Player.jsx`) в стиле Liquid Glass.
+/// Панель звуковых эффектов, скорости, Bass Boost и кроссфейда (`src/App.jsx` + `src/components/Player.jsx`) в стиле Liquid Glass
+/// с оригинальными иконками красной розочки (`Slowed`) и синей розочки (`Speed Up`).
 public struct AudioFXSheetView: View {
     @ObservedObject var appState: BebranoidAppState
     @Environment(\.dismiss) private var dismiss
@@ -261,28 +428,38 @@ public struct AudioFXSheetView: View {
                             VStack(spacing: 8) {
                                 ForEach(AudioFXMode.allCases) { mode in
                                     let isSelected = appState.audioFXMode == mode
+                                    let modeTint = FXRoseStyle.tintColor(for: mode, fallbackAccent: appState.accentSwiftUIColor)
                                     Button {
                                         appState.haptics.softSelection()
                                         appState.audioFXMode = mode
                                     } label: {
-                                        HStack {
+                                        HStack(spacing: 10) {
+                                            if mode != .normal {
+                                                FXRoseBadgeIcon(mode: mode, size: 18)
+                                            } else {
+                                                Image(systemName: "waveform")
+                                                    .font(.system(size: 14, weight: .bold))
+                                                    .foregroundStyle(.white.opacity(0.75))
+                                                    .frame(width: 18, height: 18)
+                                            }
+
                                             Text(mode.displayName)
                                                 .font(.system(size: 15, weight: isSelected ? .bold : .semibold, design: .rounded))
                                                 .foregroundStyle(.white)
                                             Spacer()
                                             if isSelected {
                                                 Image(systemName: "checkmark.circle.fill")
-                                                    .foregroundStyle(appState.accentSwiftUIColor)
+                                                    .foregroundStyle(modeTint)
                                             }
                                         }
                                         .padding(14)
                                         .background(
                                             RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                                .fill(isSelected ? appState.accentSwiftUIColor.opacity(0.18) : Color.white.opacity(0.06))
+                                                .fill(isSelected ? modeTint.opacity(0.20) : Color.white.opacity(0.06))
                                                 .overlay(
                                                     RoundedRectangle(cornerRadius: 15, style: .continuous)
                                                         .strokeBorder(
-                                                            isSelected ? appState.accentSwiftUIColor.opacity(0.55) : Color.white.opacity(0.10),
+                                                            isSelected ? modeTint.opacity(0.60) : Color.white.opacity(0.10),
                                                             lineWidth: 0.9
                                                         )
                                                 )

@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Плавающий Liquid Glass мини-плеер над нижним TabBar iPhone.
-/// Отображает обложку, название трека, артиста, плашку качества (`Hi-Res` / `Lossless`), плавную полоску прогресса,
-/// кнопку избранного, Play/Pause и Next. При нажатии или свайпе вверх открывает `FullScreenPlayerView`.
+/// Отображает обложку, название трека, артиста, плашку качества (`Hi-Res` / `Lossless`), значок красной/синей розочки (`Slowed` / `Speed Up`),
+/// плавную полоску прогресса, кнопку избранного, Play/Pause и Next. При нажатии или свайпе вверх открывает `FullScreenPlayerView`.
 public struct MiniPlayerCardView: View {
     @ObservedObject var appState: BebranoidAppState
 
@@ -13,6 +13,8 @@ public struct MiniPlayerCardView: View {
     public var body: some View {
         if let track = appState.currentTrack {
             let downloadPct = appState.downloadProgress(for: track)
+            let dlColor = appState.downloadAccentColor(for: track)
+            let fxMode = appState.audioFXMode
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
@@ -26,21 +28,42 @@ public struct MiniPlayerCardView: View {
                         enableSmoothTransition: true
                     )
                     .frame(width: 44, height: 44)
+                    .overlay {
+                        if downloadPct != nil {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .strokeBorder(dlColor.opacity(0.85), lineWidth: 1.2)
+                        }
+                    }
 
                     VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 5) {
                             Text(track.title)
                                 .font(.system(size: 14, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
 
-                            if let pct = downloadPct {
+                            if fxMode != .normal {
+                                let fxTint = FXRoseStyle.tintColor(for: fxMode, fallbackAccent: appState.accentSwiftUIColor)
+                                HStack(spacing: 3) {
+                                    FXRoseBadgeIcon(mode: fxMode, size: 11)
+                                    Text(fxMode == .slowed || fxMode == .slowedReverb ? "Slowed" : "Speed Up")
+                                        .font(.system(size: 9, weight: .heavy, design: .rounded))
+                                        .foregroundStyle(fxTint)
+                                }
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(fxTint.opacity(0.18), in: Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(fxTint.opacity(0.38), lineWidth: 0.5)
+                                )
+                            } else if let pct = downloadPct {
                                 Text("\(pct)%")
                                     .font(.system(size: 10, weight: .heavy, design: .monospaced))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(appState.accentSwiftUIColor.opacity(0.28), in: Capsule())
-                                    .foregroundStyle(appState.accentSwiftUIColor)
+                                    .background(dlColor.opacity(0.26), in: Capsule())
+                                    .foregroundStyle(dlColor)
                             } else {
                                 let badge = appState.currentQualityBadge
                                 if badge.tier == .hiRes || badge.tier == .lossless {
@@ -48,7 +71,7 @@ public struct MiniPlayerCardView: View {
                                         .font(.system(size: 9, weight: .heavy, design: .rounded))
                                         .padding(.horizontal, 5)
                                         .padding(.vertical, 2)
-                                        .background(appState.accentSwiftUIColor.opacity(0.24), in: Capsule())
+                                        .background(appState.accentSwiftUIColor.opacity(0.22), in: Capsule())
                                         .foregroundStyle(appState.accentSwiftUIColor)
                                 }
                             }
@@ -57,12 +80,12 @@ public struct MiniPlayerCardView: View {
                         if let pct = downloadPct {
                             Text("Загрузка \(pct)% • \(track.artist)")
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(appState.accentSwiftUIColor)
+                                .foregroundStyle(dlColor)
                                 .lineLimit(1)
                         } else {
                             Text(track.artist)
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.70))
+                                .foregroundStyle(.white.opacity(0.72))
                                 .lineLimit(1)
                         }
                     }
@@ -81,7 +104,7 @@ public struct MiniPlayerCardView: View {
 
                     if downloadPct != nil {
                         ProgressView()
-                            .tint(appState.accentSwiftUIColor)
+                            .tint(dlColor)
                             .frame(width: 36, height: 36)
                     } else {
                         Button {
@@ -124,7 +147,7 @@ public struct MiniPlayerCardView: View {
                             Rectangle()
                                 .fill(Color.white.opacity(0.10))
                             Rectangle()
-                                .fill(appState.accentSwiftUIColor)
+                                .fill(downloadPct != nil ? dlColor : appState.accentSwiftUIColor)
                                 .frame(width: geo.size.width * progress)
                         }
                     }
@@ -132,7 +155,13 @@ public struct MiniPlayerCardView: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.09, isInteractive: true)
+            .liquidGlassCard(cornerRadius: 20, tint: appState.accentSwiftUIColor, tintOpacity: 0.06, isInteractive: true)
+            .overlay {
+                if downloadPct != nil {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(dlColor.opacity(0.82), lineWidth: 1.3)
+                }
+            }
             .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .onTapGesture {
                 appState.haptics.lightTap()
