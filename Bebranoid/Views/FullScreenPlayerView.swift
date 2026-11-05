@@ -1144,7 +1144,7 @@ public struct FullScreenPlayerView: View {
                 return "YouTube"
             case .telegram:
                 return appState.libraryState.selectedTelegramChatTitle.isEmpty ? "Telegram Облако" : appState.libraryState.selectedTelegramChatTitle
-            case .localFile:
+            default:
                 return "Локальная папка"
             }
         }()

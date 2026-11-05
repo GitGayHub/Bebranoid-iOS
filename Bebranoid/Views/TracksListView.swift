@@ -556,7 +556,9 @@ public struct TrackRowView: View {
                                 .foregroundStyle(.white.opacity(0.65))
                         }
 
-                        let formatBadge = isCurrent ? appState.currentQualityBadge : AudioFormatProbe.inferFromFilename(track.filename)
+                        let formatBadge = isCurrent
+                            ? appState.currentQualityBadge
+                            : (track.formatInfo ?? AudioFormatInfo.fallbackFromFilename(track.filename, fileSize: track.fileSize, duration: track.duration)).computeQualityBadge()
                         if formatBadge.tier == .hiRes || formatBadge.tier == .lossless {
                             Text(formatBadge.tier == .hiRes ? "Hi-Res Lossless" : "Lossless")
                                 .font(.system(size: 8.5, weight: .heavy, design: .rounded))
