@@ -473,11 +473,11 @@ public struct FXRoseBadgeIcon: View {
                 .scaledToFit()
                 .frame(width: size, height: size)
         } else {
-            Image(systemName: mode.sfSymbolName)
+            Image(systemName: "waveform")
                 .font(.system(size: max(10, size - 2), weight: .bold))
         }
         #else
-        Image(systemName: mode.sfSymbolName)
+        Image(systemName: "waveform")
             .font(.system(size: max(10, size - 2), weight: .bold))
         #endif
     }
@@ -487,13 +487,13 @@ public struct FXRoseBadgeIcon: View {
 
 public enum TrackMetadataActions {
     public static func canJumpToTelegram(_ track: Track) -> Bool {
-        track.sourceKind == .telegram && track.telegramChatId != nil && track.telegramMessageId != nil
+        track.sourceKind == .telegram && track.chatId != nil && track.messageId != nil
     }
 
     /// Открывает сообщение с треком напрямую в приложении Telegram (`electron/main.js` `jumpToTelegramMessage` parity)
     public static func openInTelegram(_ track: Track) {
-        guard let chatId = track.telegramChatId, let rawMessageId = track.telegramMessageId else { return }
-        let rawChatString = String(chatId)
+        guard let rawChatString = track.chatId, let rawMessageIdInt = track.messageId else { return }
+        let rawMessageId = Int64(rawMessageIdInt)
         let cleanChatId: String
         if rawChatString.hasPrefix("-100") {
             cleanChatId = String(rawChatString.dropFirst(4))
