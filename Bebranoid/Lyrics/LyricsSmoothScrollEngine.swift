@@ -167,6 +167,7 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
     let nodeFrames: [String: CGRect]
     let documentSignature: String
     let syncTriggerToken: Int
+    let layoutCompensationToken: Int
     let isPlainLyrics: Bool
     @Binding var isUserBrowsing: Bool
 
@@ -201,18 +202,21 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
             coordinator.lastDocumentSignature = documentSignature
             coordinator.lastTargetNodeId = targetNodeId
             coordinator.lastSyncTriggerToken = syncTriggerToken
+            coordinator.lastLayoutCompensationToken = layoutCompensationToken
             coordinator.hasPerformedInitialPositioning = false
             coordinator.scrollToNode(id: targetNodeId, animated: false)
             return
         }
 
-        // Если при включении/выключении перевода RU или смене кегля высота строк изменилась,
-        // компенсируем сдвиг `deltaY` синхронно, чтобы текущая строка осталась ровно на своём месте без прыжка!
-        if !framesCountChanged,
-           let oldMid = oldTargetMidY,
-           let newMid = newTargetMidY,
-           abs(newMid - oldMid) > 1.0 {
-            coordinator.compensateLayoutShift(deltaY: newMid - oldMid, targetId: targetNodeId)
+        // Мгновенную компенсацию `deltaY` применяем строго при переключении перевода RU или размера шрифта,
+        // а при обычном ходе песни и раскрытии/схлопывании 3 точек интерлюда работает мягкая 120 Гц пружина без рывков!
+        if coordinator.lastLayoutCompensationToken != layoutCompensationToken {
+            coordinator.lastLayoutCompensationToken = layoutCompensationToken
+            if let oldMid = oldTargetMidY,
+               let newMid = newTargetMidY,
+               abs(newMid - oldMid) > 1.0 {
+                coordinator.compensateLayoutShift(deltaY: newMid - oldMid, targetId: targetNodeId)
+            }
         }
 
         if coordinator.lastSyncTriggerToken != syncTriggerToken {
@@ -255,6 +259,7 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
         var lastDocumentSignature: String = ""
         var lastTargetNodeId: String? = nil
         var lastSyncTriggerToken: Int = 0
+        var lastLayoutCompensationToken: Int = 0
         var hasPerformedInitialPositioning: Bool = false
 
         private weak var scrollView: UIScrollView?

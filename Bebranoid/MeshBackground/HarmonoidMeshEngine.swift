@@ -597,7 +597,7 @@ public enum HarmonoidMeshEngine {
     }
 
     /// Адаптация 4-точечной синусоидальной логики Harmonoid под экран iPhone:
-    /// выразительное, более чёткое и заметное движение цветовых пятен обложки.
+    /// эстетичное, сдержанное и обволакивающее движение цветовых пятен обложки (умеренная скорость и мягкость ~на 15% спокойнее).
     public static func mobileBlobCenters(
         at timeSec: Double,
         width: Double,
@@ -606,23 +606,23 @@ public enum HarmonoidMeshEngine {
     ) -> [MeshBlobPoint] {
         let cols = meshColors.count >= 4 ? meshColors : defaultPalette
         let maxDim = max(width, height)
-        let mobileSpeed = motionSpeed * 1.68
-        let ampBoost = 1.42
+        let mobileSpeed = motionSpeed * 1.40
+        let ampBoost = 1.24
 
         return (0..<4).map { i in
             let p = controlPoints[i]
             let x = (p.bx + sin(timeSec * mobileSpeed * p.sx + p.p) * (p.ax * ampBoost)) * width
             let y = (p.by + cos(timeSec * mobileSpeed * p.sy + p.p * 0.8) * (p.ay * ampBoost)) * height
-            let radius = maxDim * (0.48 + 0.14 * sin(timeSec * 0.56 + Double(i) * 1.15))
+            let radius = maxDim * (0.50 + 0.115 * sin(timeSec * 0.46 + Double(i) * 1.15))
             let baseCol = cols[i]
             let hsv = rgbToHsv(baseCol.r, baseCol.g, baseCol.b)
             let vividCol: MeshRGB
             if hsv.s > 0.06 {
-                let boostedS = min(0.92, hsv.s * 1.22 + 0.05)
-                let boostedV = min(0.56, max(0.22, hsv.v * 1.38 + (i % 2 == 0 ? 0.06 : 0.02)))
+                let boostedS = min(0.82, hsv.s * 1.08 + 0.03)
+                let boostedV = min(0.47, max(0.19, hsv.v * 1.18 + (i % 2 == 0 ? 0.04 : 0.015)))
                 vividCol = hsvToRgb(hsv.h, boostedS, boostedV)
             } else {
-                let boostedV = min(0.42, max(0.16, hsv.v * 1.28))
+                let boostedV = min(0.36, max(0.15, hsv.v * 1.15))
                 vividCol = hsvToRgb(hsv.h, hsv.s, boostedV)
             }
             return MeshBlobPoint(

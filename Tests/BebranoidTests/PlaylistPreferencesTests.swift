@@ -57,4 +57,20 @@ final class PlaylistPreferencesTests: XCTestCase {
         XCTAssertEqual(reconciled[1].cacheKey, makeYTTrack(3).cacheKey)
         XCTAssertEqual(reconciled[2].id, "local_bonus.flac")
     }
+
+    func testMergeProgressivePlaylistPrefixPrependsNewestAndNeverTruncates2500Tracks() {
+        let existing2500 = (1...2500).map { makeYTTrack($0) }
+        let page1Prefix = [makeYTTrack(9991), makeYTTrack(9992)] + Array(existing2500.prefix(98))
+
+        let merged = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
+            existingTracks: existing2500,
+            prefixSnapshots: page1Prefix
+        )
+
+        XCTAssertEqual(merged.newlyAddedCount, 2)
+        XCTAssertEqual(merged.tracks.count, 2502)
+        XCTAssertEqual(merged.tracks[0].cacheKey, makeYTTrack(9991).cacheKey)
+        XCTAssertEqual(merged.tracks[1].cacheKey, makeYTTrack(9992).cacheKey)
+        XCTAssertEqual(merged.tracks.last?.cacheKey, makeYTTrack(2500).cacheKey)
+    }
 }

@@ -136,4 +136,39 @@ final class LRCParserTests: XCTestCase {
         XCTAssertTrue(finalFrame.isCountdownPhase)
         XCTAssertGreaterThan(finalFrame.dots[2].opacity, finalFrame.dots[0].opacity)
     }
+
+    func testInterludeContinuousWaveAndSmoothThreeSecondCountdown() {
+        let start = 10.0
+        let end = 22.0 // 12-секундный проигрыш: 9с ровного ожидания + 3с отсчёт 1-2-3
+        let dt = 1.0 / 120.0
+
+        var prev = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: start - 0.20)
+        var t = start - 0.20 + dt
+        while t <= end + 0.40 {
+            let cur = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: t)
+            XCTAssertLessThan(abs(cur.groupOpacity - prev.groupOpacity), 0.07, "Jump in groupOpacity at t=\(t)")
+            for idx in 0..<3 {
+                let dOpacity = abs(cur.dots[idx].opacity - prev.dots[idx].opacity)
+                let dScale = abs(cur.dots[idx].scale - prev.dots[idx].scale)
+                XCTAssertLessThan(dOpacity, 0.045, "Jump in dot[\(idx)].opacity at t=\(t)")
+                XCTAssertLessThan(dScale, 0.035, "Jump in dot[\(idx)].scale at t=\(t)")
+            }
+            prev = cur
+            t += dt
+        }
+
+        // За 5 секунд до строки — ещё ровное ожидание, не фаза отсчёта
+        let waiting = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: 17.0)
+        XCTAssertFalse(waiting.isCountdownPhase)
+        XCTAssertEqual(waiting.expansionProgress, 1.0, accuracy: 1e-6)
+
+        // В последние 3 секунды точки последовательно наполняются: 1 -> 2 -> 3
+        let step1 = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: 19.8)
+        let step2 = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: 20.8)
+        let step3 = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: 21.85)
+        XCTAssertTrue(step1.isCountdownPhase)
+        XCTAssertGreaterThan(step1.dots[0].opacity, step1.dots[2].opacity)
+        XCTAssertGreaterThan(step2.dots[1].opacity, 0.70)
+        XCTAssertGreaterThan(step3.dots[2].opacity, step3.dots[0].opacity)
+    }
 }

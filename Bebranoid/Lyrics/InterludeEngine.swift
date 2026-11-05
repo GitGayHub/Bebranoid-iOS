@@ -1,6 +1,6 @@
 import Foundation
 
-/// Состояние одной из 3 точек проигрыша (`src/beautiful-lyrics/Interlude.js`)
+/// Состояние одной из 3 точек инструментального проигрыша (`Interlude`)
 public struct InterludeDotVisualState: Equatable, Sendable {
     public var scale: Double
     public var yOffset: Double
@@ -17,7 +17,7 @@ public struct InterludeDotVisualState: Equatable, Sendable {
     }
 }
 
-/// Состояние всего индикатора инструментального проигрыша (3 точки с «marble roll» волной)
+/// Состояние индикатора инструментального проигрыша (3 точки ожидания и отсчёта 1–2–3)
 public struct InterludeFrameState: Equatable, Sendable {
     public var isVisible: Bool
     public var expansionProgress: Double
@@ -43,16 +43,15 @@ public struct InterludeFrameState: Equatable, Sendable {
     }
 }
 
-/// Точный 1:1 порт `C:\VibeCoding\Bebranoid\src\beautiful-lyrics\Interlude.js`.
-/// Непрерывный «шарик» (`marbleAt(i, crest)`) перекатывается точка 1 → 2 → 3 в цикле,
-/// а в финальные `22%` паузы делает плавный завершающий раскат с остановкой на 3-й точке (`crest = 2.4`)
-/// и мягким растворением (`smootherstep` за `0.75s`) прямо во вступление следующей строки вокала.
+/// Бесшовный C²-непрерывный математический движок 3 точек инструментальной паузы:
+/// 1. При долгом ожидании (`remaining > 3.0 с`) — абсолютно ровная непрерывная волна с одинаковым таймингом между точками (без рывков сброса цикла).
+/// 2. За `3.0 с` до вступления следующей строки — мягкая подкрутка и плавный отсчёт «раз – два – три – и идём» без скачков прозрачности или высоты.
 public enum InterludeEngine {
     public static let dotCount: Int = 3
-    public static let idealRollSec: Double = 2.2
-    public static let finalRollPortion: Double = 0.22
-    public static let minFinalRollSec: Double = 1.6
-    public static let exitOverlapSec: Double = 0.75
+    public static let steadyWavePeriodSec: Double = 1.80
+    public static let countdownWindowSec: Double = 3.0
+    public static let leadInSec: Double = 0.26
+    public static let exitDissolveSec: Double = 0.42
 
     private static func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double {
         min(hi, max(lo, v))
@@ -63,41 +62,59 @@ public enum InterludeEngine {
         return x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
     }
 
-    private static func easeSinOut(_ t: Double) -> Double {
-        let x = clamp(t, 0.0, 1.0)
-        return sin((x * .pi) * 0.5)
+    private static func lerp(_ a: Double, _ b: Double, _ w: Double) -> Double {
+        a + (b - a) * w
     }
 
-    /// Точная формула `marbleAt(i, crest)` из `src/beautiful-lyrics/Interlude.js` (строки 47–61)
-    private static func marbleAt(index i: Int, crest: Double) -> InterludeDotVisualState {
-        let idx = Double(i)
-        let dist = abs(idx - crest)
-        let raw = max(0.0, 1.0 - dist * 0.52)
-        let e = raw * raw * (3.0 - 2.0 * raw)
-        let passed: Double = (idx + 0.2 < crest)
-            ? clamp(1.0 - (crest - idx - 0.2) * 0.55, 0.0, 0.62)
-            : 0.0
-        let intensity = max(passed, e)
+    /// Непрерывная синусоидальная волна одинакового тайминга для длительного ожидания (0 разрывов производной)
+    private static func steadyWaitingDot(index i: Int, time t: Double) -> InterludeDotVisualState {
+        let omega = (2.0 * .pi) / steadyWavePeriodSec
+        let phase = omega * t - Double(i) * ((2.0 * .pi) / 3.0)
+        let rawWave = 0.5 + 0.5 * sin(phase)
+        let smoothWave = pow(rawWave, 1.55)
 
-        let scale = 0.68 + 0.52 * intensity
-        // В десктопном CSS `translateY(calc(var(--dot-size, 8px) * y))` -> умножаем безразмерный сдвиг на 8 pt
-        let yUnit = -0.24 * e + 0.03 * (1.0 - intensity)
-        let glow = 0.05 + 0.95 * intensity
-        let opacity = 0.20 + 0.80 * intensity
-        let isLit = opacity > 0.62 && scale > 0.88
+        let scale = 0.78 + 0.28 * smoothWave
+        let yOffset = -2.1 * smoothWave
+        let glow = 0.10 + 0.54 * smoothWave
+        let opacity = 0.36 + 0.50 * smoothWave
 
         return InterludeDotVisualState(
             scale: scale,
-            yOffset: yUnit * 8.0,
+            yOffset: yOffset,
             glow: glow,
             opacity: opacity,
-            isLit: isLit
+            isLit: opacity > 0.65
         )
     }
 
-    private static func crestFromProgress(_ u: Double, isFinal: Bool) -> Double {
-        let p = smootherstep(clamp(u, 0.0, 1.0))
-        return isFinal ? (p * 2.45) : (p * 2.35)
+    /// Плавный 3-секундный отсчёт «раз – два – три» перед вступлением вокала (`u` от `0.0` до `1.0`)
+    private static func countdownDot(index i: Int, progress u: Double) -> InterludeDotVisualState {
+        let step = clamp(u, 0.0, 1.0) * 3.0
+        let startBeat = Double(i) * 0.94
+        let fill = smootherstep((step - startBeat) / 0.88)
+
+        // Лёгкий импульс в момент загорания конкретного шага (1 -> 2 -> 3)
+        let crestCenter = Double(i) * 0.94 + 0.62
+        let distFromCrest = abs(step - crestCenter)
+        let crestRaw = max(0.0, 1.0 - distFromCrest * 1.15)
+        let crestPulse = crestRaw * crestRaw * (3.0 - 2.0 * crestRaw)
+
+        // После загорания точки остаются наполненными по нарастающей (1 < 2 < 3), чтобы 3-я точка вела прямо в строку
+        let settledOpacity = 0.78 + Double(i) * 0.10
+        let settledScale = 0.96 + Double(i) * 0.06
+
+        let opacity = lerp(0.28, settledOpacity, fill) + 0.08 * crestPulse * fill
+        let scale = lerp(0.74, settledScale, fill) + 0.14 * crestPulse * fill
+        let yOffset = (-1.4 * fill) + (-1.6 * crestPulse * fill)
+        let glow = (0.24 + Double(i) * 0.14) * fill + 0.36 * crestPulse * fill
+
+        return InterludeDotVisualState(
+            scale: clamp(scale, 0.65, 1.28),
+            yOffset: yOffset,
+            glow: clamp(glow, 0.0, 1.0),
+            opacity: clamp(opacity, 0.0, 1.0),
+            isLit: fill > 0.55
+        )
     }
 
     /// Рассчитывает состояние каждой из 3 точек в момент времени `timestamp` для паузы `[startTime, endTime]`
@@ -106,12 +123,11 @@ public enum InterludeEngine {
         endTime: Double,
         timestamp: Double
     ) -> InterludeFrameState {
-        let duration = max(0.15, endTime - startTime)
+        let duration = max(0.20, endTime - startTime)
         let relativeTime = timestamp - startTime
-        let leadInWindow: Double = startTime <= 0.05 ? 0.0 : 0.28
-        let collapseTailSec: Double = 0.32
+        let effectiveLeadIn = startTime <= 0.05 ? 0.0 : leadInSec
 
-        if relativeTime < -leadInWindow || relativeTime > duration + exitOverlapSec + collapseTailSec {
+        if relativeTime < -effectiveLeadIn || relativeTime > duration + exitDissolveSec {
             return InterludeFrameState(
                 isVisible: false,
                 expansionProgress: 0.0,
@@ -119,145 +135,82 @@ public enum InterludeEngine {
                 groupOpacity: 0.0,
                 isCountdownPhase: false,
                 dots: Array(
-                    repeating: InterludeDotVisualState(scale: 0.70, yOffset: 0, glow: 0, opacity: 0.0, isLit: false),
+                    repeating: InterludeDotVisualState(scale: 0.74, yOffset: 0, glow: 0, opacity: 0.0, isLit: false),
                     count: dotCount
                 )
             )
         }
 
-        // Планирование циклов и финального раската (`_planTimeline` в `Interlude.js`, строки 104–137)
-        var finalDur = max(minFinalRollSec, duration * finalRollPortion)
-        if finalDur > duration * 0.5 {
-            finalDur = max(1.1, duration * 0.38)
-        }
-        let isShort = duration < idealRollSec * 1.45
-
-        let loopPeriod: Double
-        let finalStart: Double
-        let finalDuration: Double
-
-        if isShort {
-            loopPeriod = duration
-            finalStart = 0.0
-            finalDuration = duration
-        } else {
-            var loopDur = duration - finalDur
-            var nCycles = max(1, Int(round(loopDur / idealRollSec)))
-            var period = loopDur / Double(nCycles)
-            if period < 1.5 {
-                nCycles = max(1, Int(floor(loopDur / 1.5)))
-                period = loopDur / Double(max(1, nCycles))
-            } else if period > 3.0 {
-                nCycles = max(1, Int(ceil(loopDur / 3.0)))
-                period = loopDur / Double(nCycles)
-            }
-            loopDur = Double(nCycles) * period
-            finalDur = max(0.9, duration - loopDur)
-            loopPeriod = period
-            finalStart = loopDur
-            finalDuration = finalDur
-        }
-
-        let visualActive = relativeTime >= 0.0 && relativeTime <= duration
-        let isExiting = relativeTime > duration && relativeTime <= duration + exitOverlapSec
-
-        // Плавное раскрытие/схлопывание высоты контейнера без рывка соседних строк на 1 кадре
+        // Раскрытие и схлопывание высоты контейнера только на краях паузы; в середине строго 1.0 (0 пересчётов VStack!)
         let expansion: Double = {
             if relativeTime < 0.0 {
-                guard leadInWindow > 0.01 else { return 1.0 }
-                return smootherstep((relativeTime + leadInWindow) / leadInWindow)
+                guard effectiveLeadIn > 0.01 else { return 1.0 }
+                return smootherstep((relativeTime + effectiveLeadIn) / effectiveLeadIn)
             }
-            if relativeTime <= duration + exitOverlapSec * 0.35 {
+            if relativeTime <= duration {
                 return 1.0
             }
-            let collapseSpan = exitOverlapSec * 0.65 + collapseTailSec
-            let u = clamp((relativeTime - (duration + exitOverlapSec * 0.35)) / max(0.15, collapseSpan), 0.0, 1.0)
-            return 1.0 - smootherstep(u)
+            let exitU = clamp((relativeTime - duration) / exitDissolveSec, 0.0, 1.0)
+            return 1.0 - smootherstep(exitU)
         }()
 
-        let t = clamp(relativeTime, 0.0, duration)
-        var crest: Double = 0.0
-        var phase = "idle"
+        let clampedT = clamp(relativeTime, 0.0, duration)
+        let countdownSpan = min(countdownWindowSec, duration)
+        let countdownStart = max(0.0, duration - countdownSpan)
+        let isShortInterlude = duration <= countdownWindowSec + 0.25
 
-        if visualActive {
-            if isShort || t >= finalStart {
-                phase = "final"
-                let u = clamp((t - finalStart) / max(1e-4, finalDuration), 0.0, 1.0)
-                crest = crestFromProgress(u, isFinal: true)
-                if u > 0.88 {
-                    crest = 2.35 + (u - 0.88) * 0.40
-                }
-            } else {
-                phase = "loop"
-                let animT = t / max(1e-4, loopPeriod)
-                let u = animT - floor(animT + 1e-9)
-                crest = crestFromProgress(u, isFinal: false)
-                let toFinal = finalStart - t
-                let blend = min(0.45, loopPeriod * 0.40)
-                if blend > 0.0 && toFinal < blend && toFinal >= 0.0 {
-                    let w = 1.0 - smootherstep(toFinal / blend)
-                    crest = crest * (1.0 - w)
-                    phase = "blend"
-                }
+        // Плавный вес перехода из ровного ожидания в 3-секундный отсчёт «раз-два-три»
+        let countdownWeight: Double = {
+            if isShortInterlude {
+                return 1.0
             }
-        } else if isExiting {
-            phase = "exit"
-            crest = 2.40
-        }
+            let blendHalf = 0.28
+            return smootherstep((clampedT - (countdownStart - blendHalf)) / (blendHalf * 2.0))
+        }()
 
-        var mainScale: Double = 0.0
-        var mainOpacity: Double = 0.0
+        let countdownProgress = clamp((clampedT - countdownStart) / max(0.08, countdownSpan), 0.0, 1.0)
 
-        if relativeTime < 0.0 {
-            let preIn = leadInWindow > 0.01 ? smootherstep((relativeTime + leadInWindow) / leadInWindow) : 0.0
-            mainOpacity = 0.35 * preIn
-            mainScale = 0.86 + 0.10 * preIn
-        } else if visualActive {
-            let edgeIn = min(0.40, duration * 0.09)
-            let inA = smootherstep(clamp(t / max(0.05, edgeIn), 0.0, 1.0))
-            mainOpacity = startTime <= 0.05 ? 1.0 : max(0.94, inA)
-            mainScale = 0.96 + 0.08 * inA
-            if phase == "loop" {
-                let pulse = 0.5 + 0.5 * sin((t / max(0.1, loopPeriod)) * .pi * 2.0)
-                mainScale *= (0.985 + 0.03 * pulse)
+        let envelope: Double = {
+            if effectiveLeadIn <= 0.01 && relativeTime >= 0.0 && relativeTime <= duration {
+                return smootherstep(clampedT / min(0.22, max(0.08, duration * 0.15)))
             }
-        } else if isExiting {
-            let u = clamp((relativeTime - duration) / max(0.12, exitOverlapSec), 0.0, 1.0)
-            let fade = 1.0 - smootherstep(u)
-            mainOpacity = fade
-            mainScale = 0.98 * (0.88 + 0.12 * fade)
-        }
+            return expansion
+        }()
 
-        let effectiveGroupOpacity = easeSinOut(mainOpacity)
-        let isCountdown = (phase == "final" || phase == "exit")
+        let groupOpacity = envelope
+        let groupScale = 0.88 + 0.12 * envelope
+        let exitFade: Double = relativeTime > duration ? expansion : 1.0
 
         var dotStates: [InterludeDotVisualState] = []
         dotStates.reserveCapacity(dotCount)
 
         for i in 0..<dotCount {
-            if !visualActive && !isExiting && relativeTime >= 0.0 {
-                dotStates.append(InterludeDotVisualState(scale: 0.70, yOffset: 0.0, glow: 0.0, opacity: 0.0, isLit: false))
-            } else {
-                var target = marbleAt(index: i, crest: crest)
-                if isExiting {
-                    let u = clamp((relativeTime - duration) / max(0.12, exitOverlapSec), 0.0, 1.0)
-                    let sm = smootherstep(u)
-                    let k = 1.0 - sm * 0.55
-                    target.scale *= k
-                    target.yOffset *= k
-                    target.glow *= (1.0 - sm * 0.70)
-                    target.opacity *= (0.50 + 0.50 * (1.0 - sm))
-                }
-                dotStates.append(target)
-            }
+            let waitTime = min(relativeTime, duration)
+            let waitDot = steadyWaitingDot(index: i, time: waitTime)
+            let countDot = countdownDot(index: i, progress: countdownProgress)
+
+            let blendedScale = lerp(waitDot.scale, countDot.scale, countdownWeight) * (0.86 + 0.14 * exitFade)
+            let blendedY = lerp(waitDot.yOffset, countDot.yOffset, countdownWeight) * exitFade
+            let blendedGlow = lerp(waitDot.glow, countDot.glow, countdownWeight) * exitFade
+            let blendedOpacity = lerp(waitDot.opacity, countDot.opacity, countdownWeight) * exitFade
+
+            dotStates.append(
+                InterludeDotVisualState(
+                    scale: blendedScale,
+                    yOffset: blendedY,
+                    glow: blendedGlow,
+                    opacity: blendedOpacity,
+                    isLit: blendedOpacity > 0.66
+                )
+            )
         }
 
         return InterludeFrameState(
-            isVisible: expansion > 0.005,
+            isVisible: expansion > 0.004,
             expansionProgress: expansion,
-            groupScale: mainScale,
-            groupOpacity: effectiveGroupOpacity,
-            isCountdownPhase: isCountdown,
+            groupScale: groupScale,
+            groupOpacity: groupOpacity,
+            isCountdownPhase: countdownWeight >= 0.5,
             dots: dotStates
         )
     }

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * Bebranoid iOS — Standalone Architectural, Mathematical & Security Integrity Verifier
  *
@@ -175,10 +175,10 @@ check("Beautiful Lyrics: Spring analytical solver (critically/under/over-damped)
   assert.ok(swiftSpring.includes("sleepEpsilon: Double = 5e-4"));
   assert.ok(swiftSpring.includes("sleepVelocityEpsilon: Double = 5e-3"));
   assert.ok(swiftInterlude.includes("dotCount: Int = 3"));
-  assert.ok(swiftInterlude.includes("idealRollSec: Double = 2.2"));
-  assert.ok(swiftInterlude.includes("finalRollPortion: Double = 0.22"));
-  assert.ok(swiftInterlude.includes("minFinalRollSec: Double = 1.6"));
-  assert.ok(swiftInterlude.includes("exitOverlapSec: Double = 0.75"));
+  assert.ok(swiftInterlude.includes("steadyWavePeriodSec: Double = 1.80"));
+  assert.ok(swiftInterlude.includes("countdownWindowSec: Double = 3.0"));
+  assert.ok(swiftInterlude.includes("leadInSec: Double = 0.26"));
+  assert.ok(swiftInterlude.includes("exitDissolveSec: Double = 0.42"));
   assert.ok(swiftTransform.includes("emphasisMinDurationSec: Double = 1.25"));
 });
 

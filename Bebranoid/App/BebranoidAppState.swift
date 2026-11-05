@@ -1491,13 +1491,14 @@ public final class BebranoidAppState: ObservableObject {
         saveLibraryState()
     }
 
-    /// Обновление конкретного плейлиста (pull-to-refresh внутри YouTube-плейлиста или «Последние 30»)
+    /// Обновление конкретного плейлиста (pull-to-refresh внутри YouTube-плейлиста или «Последние 30»):
+    /// начинает с самых последних добавленных треков (1-я страница мгновенно), а при неполном плейлисте догружает все 2500+ треков целиком.
     public func refreshPlaylist(_ playlist: Playlist) async {
         if playlist.isYouTubePlaylist {
             let source = playlist.sourceUrl ?? (playlist.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
             guard !source.isEmpty else { return }
             do {
-                try await importYouTubeURL(source, customTitle: playlist.name)
+                try await importYouTubeURL(source, customTitle: playlist.name, allowFastIncrementalStop: true)
             } catch {
                 statusBannerMessage = error.localizedDescription
             }
@@ -1516,7 +1517,7 @@ public final class BebranoidAppState: ObservableObject {
         for pl in ytPlaylists {
             let source = pl.sourceUrl ?? (pl.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
             if !source.isEmpty {
-                try? await importYouTubeURL(source, customTitle: pl.name)
+                try? await importYouTubeURL(source, customTitle: pl.name, allowFastIncrementalStop: true)
             }
         }
         invalidateLibraryCaches()
@@ -1577,17 +1578,81 @@ public final class BebranoidAppState: ObservableObject {
         }
     }
 
-    public func importYouTubeURL(_ input: String, customTitle: String = "") async throws {
-        let result = try await youtubeService.fetchYouTubeImport(input: input)
+    public func importYouTubeURL(
+        _ input: String,
+        customTitle: String = "",
+        allowFastIncrementalStop: Bool = false
+    ) async throws {
+        let parsedInput = YouTubeLinkParser.parseInput(input)
+        let targetPlaylistId = parsedInput.playlistId
+        let existingKnownVideoIds: Set<String> = {
+            guard let pid = targetPlaylistId,
+                  let existing = libraryState.playlists.first(where: { $0.youtubePlaylistId == pid }) else {
+                return []
+            }
+            return Set(existing.tracksSnapshot.compactMap { $0.youtubeVideoId })
+        }()
+
+        let result = try await youtubeService.fetchYouTubeImport(
+            input: input,
+            existingKnownVideoIds: existingKnownVideoIds,
+            allowFastIncrementalStop: allowFastIncrementalStop,
+            onPartialSnapshot: { [weak self] partial in
+                await MainActor.run {
+                    guard let self else { return }
+                    let resolvedTitle = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? partial.title : customTitle
+                    if let idx = self.libraryState.playlists.firstIndex(where: { $0.youtubePlaylistId == partial.playlistId }) {
+                        let merged = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
+                            existingTracks: self.libraryState.playlists[idx].tracksSnapshot,
+                            prefixSnapshots: partial.tracks
+                        )
+                        if merged.newlyAddedCount > 0 || merged.tracks.count != self.libraryState.playlists[idx].tracksSnapshot.count {
+                            self.libraryState.playlists[idx].tracksSnapshot = merged.tracks
+                            self.libraryState.playlists[idx].trackFilenames = merged.tracks.map { $0.cacheKey }
+                            self.libraryState.playlists[idx].lastSyncedAt = Date()
+                            self.invalidateLibraryCaches()
+                            self.artworkService.prewarmLibraryListThumbnails(
+                                tracks: Array(partial.tracks.prefix(24)),
+                                customAlbumCovers: self.libraryState.customAlbumCovers
+                            )
+                        }
+                    } else if !partial.tracks.isEmpty {
+                        let newPlaylist = Playlist(
+                            name: resolvedTitle,
+                            kind: .youtube,
+                            trackFilenames: partial.tracks.map { $0.cacheKey },
+                            tracksSnapshot: partial.tracks,
+                            sourceUrl: partial.canonicalURL,
+                            youtubePlaylistId: partial.playlistId,
+                            remoteArtworkURL: partial.thumbnailURL,
+                            lastSyncedAt: Date()
+                        )
+                        self.libraryState.playlists.append(newPlaylist)
+                        self.libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
+                        self.invalidateLibraryCaches()
+                    }
+                }
+            }
+        )
         let title = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result.title : customTitle
 
         if let existingIdx = libraryState.playlists.firstIndex(where: { $0.youtubePlaylistId == result.playlistId }) {
-            let reconciled = PlaylistPreferencesEngine.reconcilePlaylist(
-                existingTracks: libraryState.playlists[existingIdx].tracksSnapshot,
-                remoteSnapshots: result.tracks
-            )
-            libraryState.playlists[existingIdx].tracksSnapshot = reconciled
-            libraryState.playlists[existingIdx].trackFilenames = reconciled.map { $0.cacheKey }
+            // Полный `reconcilePlaylist` выполняем ТОЛЬКО если догружены все страницы до конца (`isCompleteSnapshot == true`),
+            // иначе используем `mergeProgressivePlaylistPrefix`, чтобы никогда не обрезать плейлист на 300 или 500 треках при сбое сети!
+            let updatedTracks: [Track]
+            if result.isCompleteSnapshot {
+                updatedTracks = PlaylistPreferencesEngine.reconcilePlaylist(
+                    existingTracks: libraryState.playlists[existingIdx].tracksSnapshot,
+                    remoteSnapshots: result.tracks
+                )
+            } else {
+                updatedTracks = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
+                    existingTracks: libraryState.playlists[existingIdx].tracksSnapshot,
+                    prefixSnapshots: result.tracks
+                ).tracks
+            }
+            libraryState.playlists[existingIdx].tracksSnapshot = updatedTracks
+            libraryState.playlists[existingIdx].trackFilenames = updatedTracks.map { $0.cacheKey }
             libraryState.playlists[existingIdx].lastSyncedAt = Date()
         } else {
             let newPlaylist = Playlist(
@@ -1603,9 +1668,10 @@ public final class BebranoidAppState: ObservableObject {
             libraryState.playlists.append(newPlaylist)
             libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
         }
+        invalidateLibraryCaches()
         saveLibraryState()
         artworkService.prewarmLibraryListThumbnails(
-            tracks: result.tracks,
+            tracks: Array(result.tracks.prefix(60)),
             customAlbumCovers: libraryState.customAlbumCovers
         )
     }

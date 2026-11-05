@@ -22,6 +22,7 @@ public struct BeautifulLyricsView: View {
     @State private var selectedPlainLineIndex: Int? = nil
     @State private var nodeFrames: [String: CGRect] = [:]
     @State private var syncTriggerToken: Int = 0
+    @State private var layoutCompensationToken: Int = 0
 
     public init(
         document: ParsedLyricsDocument,
@@ -47,6 +48,10 @@ public struct BeautifulLyricsView: View {
 
     private var documentSignature: String {
         "\(document.lines.count)|\(document.lines.first?.text ?? "")"
+    }
+
+    private var translatedLineCount: Int {
+        document.lines.reduce(0) { $0 + (($1.translation?.isEmpty == false) ? 1 : 0) }
     }
 
     private func targetNodeId(for lineIndex: Int, interludeId: String?) -> String? {
@@ -100,6 +105,7 @@ public struct BeautifulLyricsView: View {
                                 nodeFrames: nodeFrames,
                                 documentSignature: documentSignature,
                                 syncTriggerToken: syncTriggerToken,
+                                layoutCompensationToken: layoutCompensationToken,
                                 isPlainLyrics: document.kind == .plain,
                                 isUserBrowsing: $isUserBrowsing
                             )
@@ -122,7 +128,6 @@ public struct BeautifulLyricsView: View {
                                             )
                                             .reportLyricNodeFrame(id: id)
                                             .id(id)
-                                            .transition(.opacity.combined(with: .scale(scale: 0.84, anchor: .leading)))
                                         }
 
                                     case .vocal(let group):
@@ -189,6 +194,17 @@ public struct BeautifulLyricsView: View {
                         if didMeaningfullyChange {
                             nodeFrames = updatedFrames
                         }
+                    }
+                    .onChange(of: showTranslation) { _, _ in
+                        layoutCompensationToken &+= 1
+                    }
+                    .onChange(of: translatedLineCount) { _, _ in
+                        if showTranslation {
+                            layoutCompensationToken &+= 1
+                        }
+                    }
+                    .onChange(of: fontSizePreset) { _, _ in
+                        layoutCompensationToken &+= 1
                     }
                     .onAppear {
                         let now = liveTimeProvider()
@@ -271,7 +287,7 @@ private struct ActiveLineIndexDriverView: View {
     static func findVisibleInterludeId(in nodes: [BeautifulTimelineNode], timestamp: Double) -> String? {
         for node in nodes {
             if case .interlude(let id, let start, let end) = node {
-                if timestamp >= start - 0.15 && timestamp <= end + 0.25 {
+                if timestamp >= start - InterludeEngine.leadInSec && timestamp <= end + InterludeEngine.exitDissolveSec {
                     let st = InterludeEngine.evaluate(startTime: start, endTime: end, timestamp: timestamp)
                     if st.isVisible {
                         return id
@@ -283,7 +299,7 @@ private struct ActiveLineIndexDriverView: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { context in
             let _ = context.date
             let now = liveTimeProvider()
             let computedLine = LRCParser.findActiveLineIndex(lines: lines, currentTime: now)
@@ -298,19 +314,17 @@ private struct ActiveLineIndexDriverView: View {
                 }
                 .onChange(of: computedInterlude) { _, newInterlude in
                     if activeInterludeId != newInterlude {
-                        withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.34)) {
-                            activeInterludeId = newInterlude
-                        }
+                        activeInterludeId = newInterlude
                     }
                 }
         }
     }
 }
 
-/// Абсолютно плавный GPU-индикатор ожидания из 3 точек:
-/// 1) Монтируется ТОЛЬКО для единственного активного интерлюда (0 лишних `TimelineView` в неактивных паузах!)
-/// 2) Имеет фиксированную высоту `36 pt` без покадрового изменения `frame(height:)`, исключая перестроение всего `VStack` и лаги!
-/// 3) Свечение точек рисуется быстрым `RadialGradient` ореолом без тяжёлого размытия Гаусса `.shadow(radius:)` на каждом кадре.
+/// Абсолютно плавный 120 FPS ProMotion GPU-индикатор ожидания из 3 точек на базе `Canvas`:
+/// 1) Непрерывная волна одинакового тайминга при долгом ожидании (`remaining > 3.0 с`)
+/// 2) Плавная подкрутка и отсчёт «раз – два – три – и идём» за 3 секунды до следующей строки
+/// 3) Ноль булевых скачков яркости (`isLit`) и плавное раскрытие/схлопывание на краях без рывков `ScrollView`
 private struct InterludeDotsLiveContainer: View {
     let id: String
     let startTime: Double
@@ -319,49 +333,54 @@ private struct InterludeDotsLiveContainer: View {
     let liveTimeProvider: () -> Double
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { context in
+        TimelineView(.animation(paused: !isPlaying)) { context in
             let _ = context.date
             let now = liveTimeProvider()
             let state = InterludeEngine.evaluate(startTime: startTime, endTime: endTime, timestamp: now)
+            let slotHeight: CGFloat = state.expansionProgress >= 0.995
+                ? 36.0
+                : max(0.5, CGFloat(36.0 * state.expansionProgress))
 
-            HStack(spacing: 8.5) {
-                ForEach(0..<state.dots.count, id: \.self) { idx in
-                    let dot = state.dots[idx]
-                    let baseWhiteAlpha = dot.isLit ? 0.98 : 0.68
-                    let glowStrength = dot.glow * state.groupOpacity * state.expansionProgress
+            Canvas(rendersAsynchronously: true) { gfx, size in
+                let groupAlpha = state.groupOpacity * state.expansionProgress
+                guard groupAlpha > 0.005 else { return }
 
-                    ZStack {
-                        if glowStrength > 0.02 {
-                            Circle()
-                                .fill(
-                                    RadialGradient(
-                                        colors: [
-                                            Color.white.opacity(0.65 * glowStrength),
-                                            Color.white.opacity(0.18 * glowStrength),
-                                            Color.clear
-                                        ],
-                                        center: .center,
-                                        startRadius: 1,
-                                        endRadius: 13
-                                    )
-                                )
-                                .frame(width: 26, height: 26)
-                                .scaleEffect(CGFloat(0.85 + 0.30 * dot.glow))
-                        }
+                let gScale = CGFloat(state.groupScale * (0.86 + 0.14 * state.expansionProgress))
+                let centerY = size.height * 0.54
+                let baseRadius: CGFloat = 4.4 * gScale
+                let spacing: CGFloat = 19.5 * gScale
+                let firstX: CGFloat = 10.0
 
-                        Circle()
-                            .fill(Color.white.opacity(baseWhiteAlpha * dot.opacity))
-                            .frame(width: 8.5, height: 8.5)
-                            .scaleEffect(CGFloat(dot.scale))
+                for (idx, dot) in state.dots.enumerated() {
+                    let cx = firstX + CGFloat(idx) * spacing
+                    let cy = centerY + CGFloat(dot.yOffset) * gScale
+                    let r = max(1.5, baseRadius * CGFloat(dot.scale))
+                    let dotAlpha = min(1.0, max(0.0, dot.opacity * groupAlpha))
+                    let glowStrength = min(1.0, max(0.0, dot.glow * groupAlpha))
+
+                    if glowStrength > 0.02 {
+                        let glowR = r * (2.6 + 0.8 * CGFloat(dot.glow))
+                        let glowRect = CGRect(x: cx - glowR, y: cy - glowR, width: glowR * 2.0, height: glowR * 2.0)
+                        let glowGrad = Gradient(stops: [
+                            .init(color: Color.white.opacity(0.46 * glowStrength), location: 0.0),
+                            .init(color: Color.white.opacity(0.14 * glowStrength), location: 0.45),
+                            .init(color: Color.clear, location: 1.0)
+                        ])
+                        gfx.fill(
+                            Path(ellipseIn: glowRect),
+                            with: .radialGradient(glowGrad, center: CGPoint(x: cx, y: cy), startRadius: 0, endRadius: glowR)
+                        )
                     }
-                    .frame(width: 12, height: 12)
-                    .offset(y: CGFloat(dot.yOffset))
+
+                    let coreRect = CGRect(x: cx - r, y: cy - r, width: r * 2.0, height: r * 2.0)
+                    gfx.fill(
+                        Path(ellipseIn: coreRect),
+                        with: .color(Color.white.opacity(dotAlpha))
+                    )
                 }
             }
-            .scaleEffect(CGFloat(state.groupScale * (0.82 + 0.18 * state.expansionProgress)), anchor: .leading)
-            .opacity(state.groupOpacity * state.expansionProgress)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 36.0)
+            .frame(height: slotHeight)
         }
     }
 }

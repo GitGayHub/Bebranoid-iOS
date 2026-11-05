@@ -8,6 +8,8 @@ public struct ImportedYouTubePlaylistResult: Sendable {
     public var tracks: [Track]
     public var canonicalURL: String
     public var nextContinuationToken: String?
+    public var isCompleteSnapshot: Bool
+    public var reportedVideoCount: Int?
 
     public init(
         playlistId: String,
@@ -16,7 +18,9 @@ public struct ImportedYouTubePlaylistResult: Sendable {
         thumbnailURL: String? = nil,
         tracks: [Track],
         canonicalURL: String,
-        nextContinuationToken: String? = nil
+        nextContinuationToken: String? = nil,
+        isCompleteSnapshot: Bool = true,
+        reportedVideoCount: Int? = nil
     ) {
         self.playlistId = playlistId
         self.title = title
@@ -25,6 +29,8 @@ public struct ImportedYouTubePlaylistResult: Sendable {
         self.tracks = tracks
         self.canonicalURL = canonicalURL
         self.nextContinuationToken = nextContinuationToken
+        self.isCompleteSnapshot = isCompleteSnapshot
+        self.reportedVideoCount = reportedVideoCount
     }
 }
 
@@ -64,14 +70,24 @@ public final class YouTubeService: @unchecked Sendable {
     }
 
     /// Импортирует плейлист или одиночное видео по ссылке/ID
-    public func fetchYouTubeImport(input: String) async throws -> ImportedYouTubePlaylistResult {
+    public func fetchYouTubeImport(
+        input: String,
+        existingKnownVideoIds: Set<String> = [],
+        allowFastIncrementalStop: Bool = false,
+        onPartialSnapshot: (@Sendable (ImportedYouTubePlaylistResult) async -> Void)? = nil
+    ) async throws -> ImportedYouTubePlaylistResult {
         let parsed = YouTubeLinkParser.parseInput(input)
         switch parsed.kind {
         case .playlist:
             guard let pid = parsed.playlistId else {
                 throw NSError(domain: "YouTubeService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Не удалось распознать ID плейлиста YouTube"])
             }
-            return try await fetchPlaylistMetadata(playlistId: pid)
+            return try await fetchPlaylistMetadata(
+                playlistId: pid,
+                existingKnownVideoIds: existingKnownVideoIds,
+                allowFastIncrementalStop: allowFastIncrementalStop,
+                onPartialSnapshot: onPartialSnapshot
+            )
 
         case .video:
             guard let vid = parsed.videoId else {
@@ -84,7 +100,9 @@ public final class YouTubeService: @unchecked Sendable {
                 author: singleTrack.artist,
                 thumbnailURL: singleTrack.remoteArtworkURL,
                 tracks: [singleTrack],
-                canonicalURL: "https://www.youtube.com/watch?v=\(vid)"
+                canonicalURL: "https://www.youtube.com/watch?v=\(vid)",
+                isCompleteSnapshot: true,
+                reportedVideoCount: 1
             )
 
         case .invalid:
@@ -130,60 +148,147 @@ public final class YouTubeService: @unchecked Sendable {
         )
     }
 
-    /// Загружает список видео плейлиста с поддержкой многостраничной пагинации Innertube `browse` (`continuation`)
-    /// и дедупликацией до `AppConfig.maxPlaylistTrackLimit` (5000 треков).
-    public func fetchPlaylistMetadata(playlistId: String) async throws -> ImportedYouTubePlaylistResult {
-        // Основной путь — Innertube `/browse` (VL<playlistId>): HTML-страница в Европе отдаёт consent-экран,
-        // а видео теперь приходят в формате `lockupViewModel`, который старый regex не находил
-        // (отсюда ошибка «плейлист не найден», хотя он существует). HTML остаётся запасным вариантом.
-        var extracted: ImportedYouTubePlaylistResult
-        if let viaBrowse = try? await fetchPlaylistFirstPageViaBrowse(playlistId: playlistId),
-           !viaBrowse.tracks.isEmpty {
-            extracted = viaBrowse
-        } else {
+    /// Загружает список видео плейлиста с поддержкой многостраничной пагинации Innertube `browse` (`continuation`),
+    /// автоматическими повторами при сетевых сбоях (чтобы плейлист на 2500+ треков никогда не обрывался на 300 или 500)
+    /// и мгновенной отдачей первой страницы со свежими добавленными треками (`onPartialSnapshot`).
+    public func fetchPlaylistMetadata(
+        playlistId: String,
+        existingKnownVideoIds: Set<String> = [],
+        allowFastIncrementalStop: Bool = false,
+        onPartialSnapshot: (@Sendable (ImportedYouTubePlaylistResult) async -> Void)? = nil
+    ) async throws -> ImportedYouTubePlaylistResult {
+        var extracted: ImportedYouTubePlaylistResult?
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 350_000_000)
+            }
+            if let viaBrowse = try? await fetchPlaylistFirstPageViaBrowse(playlistId: playlistId),
+               !viaBrowse.tracks.isEmpty {
+                extracted = viaBrowse
+                break
+            }
+        }
+        if extracted == nil {
             extracted = try await fetchPlaylistFirstPageViaHTML(playlistId: playlistId)
         }
+        guard var result = extracted else {
+            throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Не удалось загрузить плейлист YouTube"])
+        }
 
-        var seenVideoIds = Set(extracted.tracks.compactMap { $0.youtubeVideoId })
-        var continuationToken = extracted.nextContinuationToken
+        // Сразу отдаём 1-ю страницу (самые последние добавленные треки), чтобы новые песни появились за ~0.5 с!
+        var initialPartial = result
+        initialPartial.isCompleteSnapshot = (result.nextContinuationToken == nil)
+        await onPartialSnapshot?(initialPartial)
+
+        // Если весь плейлист (например, 2500 треков) УЖЕ загружен на устройстве, и мы делаем быстрый pull-to-refresh:
+        // как только после новых треков сверху пошли подряд >= 45 уже известных треков, завершаем мгновенно без ожидания всех 25 страниц!
+        let reportedTotal = result.reportedVideoCount ?? 0
+        let playlistAlreadyFullyPopulated: Bool = {
+            if existingKnownVideoIds.count < 220 { return false }
+            if reportedTotal > 0 {
+                // В крупных плейлистах часть роликов бывает скрыта/удалена на самом YouTube (~10–18%), поэтому порог 0.80
+                return existingKnownVideoIds.count >= Int(Double(reportedTotal) * 0.80)
+            }
+            return existingKnownVideoIds.count >= 1800
+        }()
+
+        if allowFastIncrementalStop && playlistAlreadyFullyPopulated {
+            let tailSlice = result.tracks.suffix(45)
+            if tailSlice.count >= 45 && tailSlice.allSatisfy({ vid in
+                guard let id = vid.youtubeVideoId else { return false }
+                return existingKnownVideoIds.contains(id)
+            }) {
+                result.isCompleteSnapshot = false
+                return result
+            }
+        }
+
+        var seenVideoIds = Set(result.tracks.compactMap { $0.youtubeVideoId })
+        var continuationToken = result.nextContinuationToken
         var pageCount = 1
-        let maxContinuationPages = 50 // до 5000 треков
+        var emptyPageStreak = 0
+        let maxContinuationPages = 75 // поддержка до 5000+ доступных треков (даже при наличии удалённых роликов в плейлисте)
 
         while let token = continuationToken,
               !token.isEmpty,
-              extracted.tracks.count < AppConfig.maxPlaylistTrackLimit,
+              result.tracks.count < AppConfig.maxPlaylistTrackLimit,
               pageCount < maxContinuationPages {
             pageCount += 1
-            guard let pagePayload = try? await fetchContinuationPageRawJSON(continuationToken: token) else {
+
+            var pagePayload: String?
+            for retry in 0..<4 {
+                if retry > 0 {
+                    let delayNs = UInt64(280_000_000 * retry * retry)
+                    try? await Task.sleep(nanoseconds: delayNs)
+                }
+                if let fetched = try? await fetchContinuationPageRawJSON(continuationToken: token) {
+                    pagePayload = fetched
+                    break
+                }
+            }
+
+            guard let validPayload = pagePayload else {
+                // Сетевой обрыв после 4 попыток — выходим с `isCompleteSnapshot = false`, чтобы НЕ удалить хвост существующих треков!
                 break
             }
 
             let pageItems = Self.extractPlaylistItemsAndToken(
-                fromRawText: pagePayload,
-                playlistTitle: extracted.title,
+                fromRawText: validPayload,
+                playlistTitle: result.title,
                 seenVideoIds: &seenVideoIds,
-                remainingLimit: AppConfig.maxPlaylistTrackLimit - extracted.tracks.count
+                remainingLimit: AppConfig.maxPlaylistTrackLimit - result.tracks.count
             )
+
             if pageItems.tracks.isEmpty {
+                emptyPageStreak += 1
+            } else {
+                emptyPageStreak = 0
+                result.tracks.append(contentsOf: pageItems.tracks)
+            }
+
+            guard let nextTok = pageItems.nextToken, !nextTok.isEmpty, nextTok != continuationToken else {
+                continuationToken = nil
                 break
             }
-            extracted.tracks.append(contentsOf: pageItems.tracks)
-            if pageItems.nextToken == continuationToken {
+            if emptyPageStreak >= 4 {
                 break
             }
-            continuationToken = pageItems.nextToken
+            continuationToken = nextTok
+
+            // Быстрая остановка на 2–3-й странице, если новых треков было больше 60, но весь плейлист уже был в базе
+            if allowFastIncrementalStop && playlistAlreadyFullyPopulated {
+                let recentTail = pageItems.tracks.suffix(45)
+                if recentTail.count >= 45 && recentTail.allSatisfy({ t in
+                    guard let id = t.youtubeVideoId else { return false }
+                    return existingKnownVideoIds.contains(id)
+                }) {
+                    result.nextContinuationToken = continuationToken
+                    result.isCompleteSnapshot = false
+                    await onPartialSnapshot?(result)
+                    return result
+                }
+            }
+
+            // Плавное обновление счётчика в UI каждые 3 страницы (300 → 600 → 900 → ... → 2500)
+            if pageCount % 3 == 0 {
+                var progressSnap = result
+                progressSnap.nextContinuationToken = continuationToken
+                progressSnap.isCompleteSnapshot = false
+                await onPartialSnapshot?(progressSnap)
+            }
         }
 
-        extracted.nextContinuationToken = continuationToken
+        result.nextContinuationToken = continuationToken
+        result.isCompleteSnapshot = (continuationToken == nil || result.tracks.count >= AppConfig.maxPlaylistTrackLimit)
 
-        if extracted.tracks.isEmpty {
+        if result.tracks.isEmpty {
             throw NSError(
                 domain: "YouTubeService",
                 code: 404,
                 userInfo: [NSLocalizedDescriptionKey: "Плейлист пуст или является приватным. Откройте доступ по ссылке и повторите попытку."]
             )
         }
-        return extracted
+        return result
     }
 
     private static let webUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
@@ -238,6 +343,7 @@ public final class YouTubeService: @unchecked Sendable {
         let cleanId = playlistId.hasPrefix("VL") ? String(playlistId.dropFirst(2)) : playlistId
         let raw = try await fetchBrowseRawJSON(extra: ["browseId": "VL" + cleanId])
         let title = Self.extractPlaylistTitle(fromRawJSON: raw) ?? "YouTube Плейлист"
+        let reportedCount = Self.extractReportedVideoCount(fromRawJSON: raw)
         var seen = Set<String>()
         let page = Self.extractPlaylistItemsAndToken(
             fromRawText: raw,
@@ -252,7 +358,9 @@ public final class YouTubeService: @unchecked Sendable {
             thumbnailURL: page.tracks.first?.remoteArtworkURL,
             tracks: page.tracks,
             canonicalURL: "https://www.youtube.com/playlist?list=\(cleanId)",
-            nextContinuationToken: page.nextToken
+            nextContinuationToken: page.nextToken,
+            isCompleteSnapshot: page.nextToken == nil,
+            reportedVideoCount: reportedCount
         )
     }
 
@@ -302,6 +410,39 @@ public final class YouTubeService: @unchecked Sendable {
         return nil
     }
 
+    static func extractReportedVideoCount(fromRawJSON raw: String) -> Int? {
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sidebar = json["sidebar"] as? [String: Any],
+              let sidebarRenderer = sidebar["playlistSidebarRenderer"] as? [String: Any],
+              let items = sidebarRenderer["items"] as? [[String: Any]] else {
+            return nil
+        }
+        for item in items {
+            guard let primary = item["playlistSidebarPrimaryInfoRenderer"] as? [String: Any],
+                  let stats = primary["stats"] as? [[String: Any]],
+                  let firstStat = stats.first else {
+                continue
+            }
+            if let runs = firstStat["runs"] as? [[String: Any]],
+               let numText = runs.first?["text"] as? String {
+                let digits = numText.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) }
+                let str = String(String.UnicodeScalarView(digits))
+                if let val = Int(str), val > 0 {
+                    return val
+                }
+            }
+            if let simple = firstStat["simpleText"] as? String {
+                let digits = simple.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) }
+                let str = String(String.UnicodeScalarView(digits))
+                if let val = Int(str), val > 0 {
+                    return val
+                }
+            }
+        }
+        return nil
+    }
+
     /// Разбирает одну страницу ответа `/browse`. Элементы плейлиста берутся из массива, содержащего
     /// `lockupViewModel`/`playlistVideoRenderer`; токен продолжения — из того же массива (а не из меню сортировки).
     static func parsePlaylistPage(json: Any, albumTitle: String) -> PlaylistPage {
@@ -310,6 +451,22 @@ public final class YouTubeService: @unchecked Sendable {
         scanForItemArrays(node: json, albumTitle: albumTitle, tracks: &tracks, token: &token)
         return PlaylistPage(tracks: tracks, continuationToken: token)
     }
+
+    private static let prioritizedBrowseKeys: [String] = [
+        "onResponseReceivedActions",
+        "onResponseReceivedEndpoints",
+        "appendContinuationItemsAction",
+        "continuationItems",
+        "contents",
+        "twoColumnBrowseResultsRenderer",
+        "tabs",
+        "tabRenderer",
+        "content",
+        "sectionListRenderer",
+        "itemSectionRenderer",
+        "playlistVideoListRenderer",
+        "items"
+    ]
 
     private static func scanForItemArrays(node: Any, albumTitle: String, tracks: inout [Track], token: inout String?) {
         if let array = node as? [Any] {
@@ -340,8 +497,18 @@ public final class YouTubeService: @unchecked Sendable {
                 scanForItemArrays(node: element, albumTitle: albumTitle, tracks: &tracks, token: &token)
             }
         } else if let dict = node as? [String: Any] {
-            for value in dict.values {
-                scanForItemArrays(node: value, albumTitle: albumTitle, tracks: &tracks, token: &token)
+            // Детерминированный порядок обхода ключей (исключаем `sidebar` и случайный порядок `Dictionary.values` в Swift)
+            var visited = Set<String>(["sidebar", "header", "metadata", "frameworkUpdates", "responseContext"])
+            for key in prioritizedBrowseKeys {
+                if let val = dict[key] {
+                    visited.insert(key)
+                    scanForItemArrays(node: val, albumTitle: albumTitle, tracks: &tracks, token: &token)
+                }
+            }
+            for key in dict.keys.sorted() where !visited.contains(key) {
+                if let val = dict[key] {
+                    scanForItemArrays(node: val, albumTitle: albumTitle, tracks: &tracks, token: &token)
+                }
             }
         }
     }

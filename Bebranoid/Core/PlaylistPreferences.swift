@@ -137,4 +137,46 @@ public enum PlaylistPreferencesEngine {
 
         return mergedRemote + preservedLocalTracks
     }
+
+    /// Мгновенно подмешивает свежий верхний блок треков YouTube-плейлиста (начиная с самых последних добавленных)
+    /// поверх уже сохранённого списка без потери хвоста при частичной/поэтапной подгрузке (`mergeNewestPlaylistTracks`).
+    public static func mergeProgressivePlaylistPrefix(
+        existingTracks: [Track],
+        prefixSnapshots: [Track]
+    ) -> (tracks: [Track], newlyAddedCount: Int) {
+        guard !prefixSnapshots.isEmpty else { return (existingTracks, 0) }
+
+        var existingByKey: [String: Track] = [:]
+        for track in existingTracks {
+            existingByKey[track.cacheKey] = track
+        }
+
+        var mergedPrefix: [Track] = []
+        var seenKeys = Set<String>()
+        var addedCount = 0
+
+        for snapshot in prefixSnapshots {
+            let key = snapshot.cacheKey
+            if seenKeys.contains(key) { continue }
+            seenKeys.insert(key)
+
+            if var existing = existingByKey[key] {
+                existing.title = snapshot.title
+                existing.artist = snapshot.artist
+                if snapshot.duration > 0 {
+                    existing.duration = snapshot.duration
+                }
+                if let art = snapshot.remoteArtworkURL {
+                    existing.remoteArtworkURL = art
+                }
+                mergedPrefix.append(existing)
+            } else {
+                addedCount += 1
+                mergedPrefix.append(snapshot)
+            }
+        }
+
+        let remainingTail = existingTracks.filter { !seenKeys.contains($0.cacheKey) }
+        return (mergedPrefix + remainingTail, addedCount)
+    }
 }

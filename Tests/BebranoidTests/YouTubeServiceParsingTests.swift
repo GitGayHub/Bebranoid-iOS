@@ -222,4 +222,25 @@ final class YouTubeServiceParsingTests: XCTestCase {
         try WebMOpusRemuxer.remuxWebMFileToVerifiedCAF(webmURL: webmURL, cafDestinationURL: cafURL)
         XCTAssertTrue(FileManager.default.fileExists(atPath: cafURL.path))
     }
+
+    func testExtractsReported2500VideoCountWithNonBreakingSpaces() throws {
+        let root: [String: Any] = [
+            "sidebar": [
+                "playlistSidebarRenderer": [
+                    "items": [
+                        [
+                            "playlistSidebarPrimaryInfoRenderer": [
+                                "stats": [
+                                    ["runs": [["text": "2\u{00A0}500"], ["text": " видео"]]]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        let rawData = try JSONSerialization.data(withJSONObject: root)
+        let rawJSON = String(data: rawData, encoding: .utf8)!
+        XCTAssertEqual(YouTubeService.extractReportedVideoCount(fromRawJSON: rawJSON), 2500)
+    }
 }

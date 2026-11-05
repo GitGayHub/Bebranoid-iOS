@@ -188,9 +188,9 @@ public struct HarmonoidMeshView: View {
             let norm = blob.color.normalizedDouble
             let center = CGPoint(x: blob.x, y: blob.y)
             let gradient = Gradient(stops: useMobileMotionScale ? [
-                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(1.0), location: 0.0),
-                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.64), location: 0.36),
-                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.18), location: 0.72),
+                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.94), location: 0.0),
+                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.55), location: 0.38),
+                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.15), location: 0.74),
                 .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.0), location: 1.0)
             ] : [
                 .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.95), location: 0.0),
@@ -217,7 +217,7 @@ public struct HarmonoidMeshView: View {
 
         // 3. Canvas darkening
         let darkAlpha = useMobileMotionScale
-            ? HarmonoidMeshEngine.canvasDarkeningAlpha * 0.55
+            ? HarmonoidMeshEngine.canvasDarkeningAlpha * 0.72
             : HarmonoidMeshEngine.canvasDarkeningAlpha
         context.fill(
             Path(fullRect),
@@ -242,7 +242,7 @@ public struct HarmonoidMeshView: View {
 
         // 5. Top ambient overlay
         let ambAlpha = useMobileMotionScale
-            ? HarmonoidMeshEngine.ambientOverlayAlpha * 0.45
+            ? HarmonoidMeshEngine.ambientOverlayAlpha * 0.62
             : HarmonoidMeshEngine.ambientOverlayAlpha
         context.fill(
             Path(fullRect),

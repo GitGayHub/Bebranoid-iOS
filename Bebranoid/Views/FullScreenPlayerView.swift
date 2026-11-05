@@ -792,41 +792,26 @@ public struct FullScreenPlayerView: View {
     // MARK: - Subviews
 
     private var topHeaderBar: some View {
-        HStack {
-            Button {
-                appState.isFullScreenPlayerPresented = false
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.90))
-                    .frame(width: 42, height: 42)
-                    .liquidGlassCircle(tint: .white)
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
+        ZStack {
+            // Пилюля-полоска математически ровно по центру экрана
             Capsule()
                 .fill(Color.white.opacity(0.28))
                 .frame(width: 38, height: 5)
 
-            Spacer()
-
-            HStack(spacing: 10) {
+            HStack {
                 Button {
-                    appState.haptics.softSelection()
-                    withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
-                        appState.isQueueSheetPresented.toggle()
-                    }
+                    appState.isFullScreenPlayerPresented = false
+                    dismiss()
                 } label: {
-                    Image(systemName: "list.bullet")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(appState.isQueueSheetPresented ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.90))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.90))
                         .frame(width: 42, height: 42)
-                        .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: appState.isQueueSheetPresented)
+                        .liquidGlassCircle(tint: .white)
                 }
                 .buttonStyle(.plain)
+
+                Spacer()
 
                 Menu {
                     if let current = track {
@@ -917,90 +902,111 @@ public struct FullScreenPlayerView: View {
 
             Spacer(minLength: 8)
 
-            // Кнопка Лайк (Избранное) на месте бывшей кнопки Очередь справа от названия трека
+            // Справа по одной вертикальной оси: сверху лаконичная кнопка Очередь (без текста), ровно под ней — Сердечко
             let isLiked = track.map { appState.isFavorite($0) } ?? false
-            Button {
-                if let current = track {
-                    appState.toggleFavorite(track: current)
+            VStack(alignment: .center, spacing: 8) {
+                Button {
+                    appState.haptics.softSelection()
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                        appState.isQueueSheetPresented.toggle()
+                    }
+                } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 15.5, weight: .bold))
+                        .foregroundStyle(appState.isQueueSheetPresented ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.88))
+                        .frame(width: 38, height: 38)
+                        .liquidGlassCircle(tint: accentColor, isHighlighted: appState.isQueueSheetPresented)
                 }
-            } label: {
-                Image(systemName: isLiked ? "heart.fill" : "heart")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.88))
-                    .frame(width: 44, height: 44)
-                    .liquidGlassCircle(tint: isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Очередь")
+
+                Button {
+                    if let current = track {
+                        appState.toggleFavorite(track: current)
+                    }
+                } label: {
+                    Image(systemName: isLiked ? "heart.fill" : "heart")
+                        .font(.system(size: 16.5, weight: .semibold))
+                        .foregroundStyle(isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.88))
+                        .frame(width: 38, height: 38)
+                        .liquidGlassCircle(tint: isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Избранное")
             }
-            .buttonStyle(.plain)
         }
     }
 
     private func centerModePillRow(accentColor: Color) -> some View {
         let lyricsDisabled = track.map { appState.isLyricsDisabled(for: $0) } ?? false
-        // Если в песне нет текста — кнопки «Текст» сразу нет (никаких пустых предзагрузок)
+        // Если в песне нет текста — кнопки лириков сразу нет (минимализм без пустых предзагрузок)
         let hasAvailableLyrics = !lyricsDisabled && !appState.currentLyricsDocument.lines.isEmpty
         let fxMode = appState.audioFXMode
         let fxTint = FXRoseStyle.tintColor(for: fxMode, fallbackAccent: accentColor)
 
-        return HStack(spacing: 9) {
-            if hasAvailableLyrics {
-                Button {
-                    appState.haptics.lightTap()
-                    appState.isLyricsScreenPresented = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "music.note")
-                            .font(.system(size: 13.5, weight: .bold))
-                        Text("Текст")
-                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+        return ZStack {
+            // Слева: лаконичная кнопка только со значком лириков (без слова «Текст»)
+            HStack {
+                if hasAvailableLyrics {
+                    Button {
+                        appState.haptics.lightTap()
+                        appState.isLyricsScreenPresented = true
+                    } label: {
+                        Image(systemName: "quote.bubble.fill")
+                            .font(.system(size: 15.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .frame(width: 38, height: 38)
+                            .liquidGlassCircle(tint: accentColor, isHighlighted: false)
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .liquidGlassCapsule(tint: accentColor, isProminent: false)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Текст песни")
                 }
-                .buttonStyle(.plain)
+                Spacer()
             }
 
-            Button {
-                appState.haptics.lightTap()
+            // Строго по центру: капсула FX (нажатие переключает Обычный → Slowed → Speed Up, зажатие открывает меню выбора)
+            HStack(spacing: 6) {
+                if fxMode != .normal {
+                    FXRoseBadgeIcon(mode: fxMode, size: 15)
+                } else {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 12.5, weight: .semibold))
+                }
+                Text(fxPillTitle)
+                    .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(isAnyFXActive ? fxTint : .white.opacity(0.86))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .liquidGlassCapsule(tint: isAnyFXActive ? fxTint : accentColor, isProminent: false)
+            .contentShape(Capsule())
+            .onTapGesture {
+                cycleQuickAudioFXMode()
+            }
+            .onLongPressGesture(minimumDuration: 0.38) {
+                appState.haptics.mediumImpact()
                 appState.isAudioFXSheetPresented = true
-            } label: {
-                HStack(spacing: 6) {
-                    if fxMode != .normal {
-                        FXRoseBadgeIcon(mode: fxMode, size: 15)
-                    } else {
-                        Image(systemName: "waveform.badge.magnifyingglass")
-                            .font(.system(size: 13, weight: .semibold))
-                    }
-                    Text(fxPillTitle)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(isAnyFXActive ? fxTint : .white.opacity(0.86))
-                .padding(.horizontal, 15)
-                .padding(.vertical, 10)
-                .liquidGlassCapsule(tint: isAnyFXActive ? fxTint : accentColor, isProminent: false)
             }
-            .buttonStyle(.plain)
+            .accessibilityLabel("Режим звучания: \(fxPillTitle)")
+            .accessibilityHint("Нажмите для переключения Slowed и Speed Up, удерживайте для меню настроек звука")
+        }
+        .frame(minHeight: 38)
+    }
 
-            Button {
-                appState.haptics.softSelection()
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
-                    appState.isQueueSheetPresented.toggle()
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "list.bullet")
-                        .font(.system(size: 13, weight: .bold))
-                    Text("Очередь")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                }
-                .foregroundStyle(appState.isQueueSheetPresented ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.88))
-                .padding(.horizontal, 15)
-                .padding(.vertical, 10)
-                .liquidGlassCapsule(tint: accentColor, isProminent: appState.isQueueSheetPresented)
-            }
-            .buttonStyle(.plain)
+    private func cycleQuickAudioFXMode() {
+        appState.haptics.softSelection()
+        let nextMode: AudioFXMode
+        switch appState.audioFXMode {
+        case .normal:
+            nextMode = .slowed
+        case .slowed, .slowedReverb:
+            nextMode = .speedup
+        case .speedup, .speedupReverb:
+            nextMode = .normal
+        }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+            appState.audioFXMode = nextMode
         }
     }
 
@@ -1163,17 +1169,26 @@ public struct FullScreenPlayerView: View {
     }
 
     private var fxPillTitle: String {
-        var items: [String] = []
-        if appState.audioFXMode != .normal {
-            items.append(appState.audioFXMode.shortBadgeName)
-        }
+        let baseName: String = {
+            switch appState.audioFXMode {
+            case .normal: return "Обычный"
+            case .slowed: return "Slowed"
+            case .slowedReverb: return "Slowed + Rev"
+            case .speedup: return "Speed Up"
+            case .speedupReverb: return "Speed Up + Rev"
+            }
+        }()
+        var extras: [String] = []
         if appState.bassBoostEnabled {
-            items.append("Bass+")
+            extras.append("Bass+")
         }
         if abs(appState.playbackSpeed - 1.0) > 0.01 {
-            items.append(String(format: "%.2gx", appState.playbackSpeed))
+            extras.append(String(format: "%.2gx", appState.playbackSpeed))
         }
-        return items.isEmpty ? "Звук / FX" : items.joined(separator: " • ")
+        if extras.isEmpty {
+            return baseName
+        }
+        return ([baseName] + extras).joined(separator: " • ")
     }
 
     public static func formatSeconds(_ totalSeconds: Double) -> String {
@@ -1515,7 +1530,7 @@ public struct InteractiveSeekBarView: View {
 }
 
 /// Живая вращающаяся акцентная каёмка большой обложки (`.andro-cover-living-spin` из `src/index.css` ПК-версии):
-/// непрерывное 7.5-секундное вращение конического блика вдоль граней обложки на базе `CACurrentMediaTime()` без миганий и сбросов.
+/// умеренное, плавное 10.8-секундное вращение конического блика вдоль граней обложки на базе `CACurrentMediaTime()` без миганий и сбросов.
 private struct LivingCoverRimBorderView: View {
     let accentRGB: MeshRGB
     let cornerRadius: CGFloat
@@ -1525,24 +1540,24 @@ private struct LivingCoverRimBorderView: View {
         let norm = accentRGB.normalizedDouble
         let accent = Color(red: norm.r, green: norm.g, blue: norm.b)
         let brightAccent = Color(
-            red: min(1.0, norm.r * 1.24 + 0.14),
-            green: min(1.0, norm.g * 1.24 + 0.14),
-            blue: min(1.0, norm.b * 1.24 + 0.14)
+            red: min(1.0, norm.r * 1.18 + 0.11),
+            green: min(1.0, norm.g * 1.18 + 0.11),
+            blue: min(1.0, norm.b * 1.18 + 0.11)
         )
 
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
             let _ = context.date
-            let angleDeg = (CACurrentMediaTime().truncatingRemainder(dividingBy: 7.5) / 7.5) * 360.0
+            let angleDeg = (CACurrentMediaTime().truncatingRemainder(dividingBy: 10.8) / 10.8) * 360.0
             let conic = AngularGradient(
                 gradient: Gradient(stops: [
-                    .init(color: accent.opacity(0.18), location: 0.00),
-                    .init(color: accent.opacity(0.55), location: 0.16),
-                    .init(color: brightAccent.opacity(0.96), location: 0.30),
-                    .init(color: Color.white.opacity(0.88), location: 0.36),
-                    .init(color: brightAccent.opacity(0.92), location: 0.42),
-                    .init(color: accent.opacity(0.24), location: 0.58),
-                    .init(color: accent.opacity(0.12), location: 0.78),
-                    .init(color: accent.opacity(0.18), location: 1.00)
+                    .init(color: accent.opacity(0.15), location: 0.00),
+                    .init(color: accent.opacity(0.46), location: 0.16),
+                    .init(color: brightAccent.opacity(0.86), location: 0.30),
+                    .init(color: Color.white.opacity(0.76), location: 0.36),
+                    .init(color: brightAccent.opacity(0.82), location: 0.42),
+                    .init(color: accent.opacity(0.21), location: 0.58),
+                    .init(color: accent.opacity(0.10), location: 0.78),
+                    .init(color: accent.opacity(0.15), location: 1.00)
                 ]),
                 center: .center,
                 angle: .degrees(angleDeg)
@@ -1550,8 +1565,8 @@ private struct LivingCoverRimBorderView: View {
 
             ZStack {
                 shape
-                    .strokeBorder(conic, lineWidth: 2.2)
-                    .shadow(color: accent.opacity(0.34), radius: 5, x: 0, y: 0)
+                    .strokeBorder(conic, lineWidth: 1.9)
+                    .shadow(color: accent.opacity(0.26), radius: 4.5, x: 0, y: 0)
             }
         }
         .allowsHitTesting(false)
