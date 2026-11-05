@@ -92,50 +92,50 @@ public struct FullScreenPlayerView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
-                    Spacer(minLength: 10)
+                    Spacer(minLength: 8)
 
-                    // Верхняя центральная зона: либо компактная очередь на 4 трека (не закрывающая название трека и плейлист), либо 3D-обложка
-                    let coverSide = min(geo.size.width - 48, geo.size.height * 0.425)
-                    if appState.isQueueSheetPresented {
-                        CompactPlayerQueueOverlayView(appState: appState)
-                            .padding(.horizontal, 20)
-                            .frame(width: geo.size.width, height: coverSide, alignment: .bottom)
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
-                    } else {
-                        coverCarouselSection(
-                            coverSide: coverSide,
-                            discStride: discStride,
-                            liveAccentRGB: liveAccentRGB,
-                            liveAccentColor: liveAccentColor
-                        )
-                        .frame(width: geo.size.width, height: coverSide)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                    }
-
-                    Spacer(minLength: 18)
-
-                    // Блок названия трека, исполнителя/плейлиста и 2 круглых стеклянных кнопок справа (Heart, Queue)
-                    trackMetadataAndQuickActionsRow(accentColor: liveAccentColor)
-                        .padding(.horizontal, 24)
+                    // Верхняя центральная зона: 3D-обложка ВСЕГДА остаётся видимой
+                    let coverSide = min(geo.size.width - 52, geo.size.height * 0.405)
+                    coverCarouselSection(
+                        coverSide: coverSide,
+                        discStride: discStride,
+                        liveAccentRGB: liveAccentRGB,
+                        liveAccentColor: liveAccentColor
+                    )
+                    .frame(width: geo.size.width, height: coverSide)
 
                     Spacer(minLength: 14)
 
-                    // Центральная капсула переключения в Текст / FX (с красной розочкой Slowed и синей розочкой Speed Up)
-                    centerModePillRow(accentColor: liveAccentColor)
+                    // Блок из 3 строк (1: Название трека, 2: Артист, 3: Плейлист/Папка/Альбом • Год) + кнопка Лайк справа
+                    trackMetadataAndQuickActionsRow(accentColor: liveAccentColor)
                         .padding(.horizontal, 24)
 
-                    Spacer(minLength: 18)
+                    Spacer(minLength: 12)
 
-                    // Крупные центральные кнопки управления воспроизведением
-                    transportControlsRow(accentColor: liveAccentColor)
-                        .padding(.horizontal, 28)
+                    // Нижняя половина экрана: если открыта очередь — она располагается НИЖЕ названия трека и перекрывает нижние контролы плеера
+                    if appState.isQueueSheetPresented {
+                        CompactPlayerQueueOverlayView(appState: appState)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, max(14, geo.safeAreaInsets.bottom > 0 ? 10 : 18))
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    } else {
+                        // Центральная капсула переключения в Текст / FX / Очередь
+                        centerModePillRow(accentColor: liveAccentColor)
+                            .padding(.horizontal, 24)
 
-                    Spacer(minLength: 20)
+                        Spacer(minLength: 16)
 
-                    // Плавный 120 Гц слайдер прогресса + время + кодек/частота/битрейт
-                    progressAndTechnicalFooter(accentColor: liveAccentColor)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, max(18, geo.safeAreaInsets.bottom > 0 ? 12 : 22))
+                        // Крупные центральные кнопки управления воспроизведением
+                        transportControlsRow(accentColor: liveAccentColor)
+                            .padding(.horizontal, 28)
+
+                        Spacer(minLength: 18)
+
+                        // Плавный 120 Гц слайдер прогресса + время + кодек/частота/битрейт
+                        progressAndTechnicalFooter(accentColor: liveAccentColor)
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, max(18, geo.safeAreaInsets.bottom > 0 ? 12 : 22))
+                    }
                 }
                 .scaleEffect(max(0.92, 1.0 - (dragDismissOffset / 1800.0)))
                 .offset(y: dragDismissOffset)
@@ -481,9 +481,11 @@ public struct FullScreenPlayerView: View {
         let swipeRatio = min(1.0, abs(coverHorizontalOffset) / max(1.0, discStride))
         let outgoingScale = 1.0 - 0.10 * swipeRatio
         let outgoingOpacity = 1.0 - 0.30 * swipeRatio
-        let activeDownloadingTarget = appState.pendingDownloadTrack ?? (activeDownloadPercent != nil ? track : nil)
-        let activeDownloadBorderColor: Color? = activeDownloadingTarget != nil
-            ? appState.downloadAccentColor(for: activeDownloadingTarget)
+        // Обводка загрузки на большой обложке включается ТОЛЬКО если сам отображаемый сейчас трек качается,
+        // а если играет старый трек (например фиолетовый) и в фоне качается новый (зелёный), большая обложка остаётся в цвете играющего трека!
+        let isDisplayedTrackDownloading = (activeDownloadPercent != nil) && (appState.pendingDownloadTrack == nil || appState.pendingDownloadTrack?.id == track?.id)
+        let activeDownloadBorderColor: Color? = isDisplayedTrackDownloading
+            ? appState.downloadAccentColor(for: track)
             : nil
 
         ZStack {
@@ -811,85 +813,7 @@ public struct FullScreenPlayerView: View {
 
             Spacer()
 
-            Menu {
-                if let current = track {
-                    Button {
-                        withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
-                            isCover3DPreviewPresented = true
-                        }
-                    } label: {
-                        Label("Обложка и сведения (3D Touch)", systemImage: "viewfinder")
-                    }
-
-                    Button {
-                        appState.isAudioFXSheetPresented = true
-                    } label: {
-                        Label("Звуковые эффекты и скорость", systemImage: "slider.horizontal.3")
-                    }
-
-                    Button {
-                        appState.toggleLyricsDisabled(for: current)
-                    } label: {
-                        Label(
-                            appState.isLyricsDisabled(for: current) ? "Включить текст для трека" : "Отключить текст для трека",
-                            systemImage: appState.isLyricsDisabled(for: current) ? "text.quote" : "eye.slash"
-                        )
-                    }
-
-                    Divider()
-
-                    Button {
-                        appState.haptics.softSelection()
-                        appState.isGyroscope3DCoverEnabled.toggle()
-                    } label: {
-                        Label(
-                            appState.isGyroscope3DCoverEnabled ? "Выключить 3D-гироскоп обложки" : "Включить 3D-гироскоп обложки",
-                            systemImage: appState.isGyroscope3DCoverEnabled ? "gyroscope" : "cube.transparent"
-                        )
-                    }
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.90))
-                    .frame(width: 42, height: 42)
-                    .liquidGlassCircle(tint: .white)
-            }
-        }
-    }
-
-    private func trackMetadataAndQuickActionsRow(accentColor: Color) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(track?.title ?? "Трек не выбран")
-                    .font(.system(size: 23, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-
-                Text(subtitleText)
-                    .font(.system(size: 15, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.70))
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 6)
-
-            // 2 круглые стеклянные кнопки: Избранное и Очередь (открывает компактное 4-трековое окно очереди над названием трека)
             HStack(spacing: 10) {
-                let isLiked = track.map { appState.isFavorite($0) } ?? false
-                Button {
-                    if let current = track {
-                        appState.toggleFavorite(track: current)
-                    }
-                } label: {
-                    Image(systemName: isLiked ? "heart.fill" : "heart")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.88))
-                        .frame(width: 42, height: 42)
-                        .liquidGlassCircle(tint: isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white)
-                }
-                .buttonStyle(.plain)
-
                 Button {
                     appState.haptics.softSelection()
                     withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
@@ -897,42 +821,140 @@ public struct FullScreenPlayerView: View {
                     }
                 } label: {
                     Image(systemName: "list.bullet")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(appState.isQueueSheetPresented ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.88))
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(appState.isQueueSheetPresented ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.90))
                         .frame(width: 42, height: 42)
-                        .liquidGlassCircle(tint: accentColor, isHighlighted: appState.isQueueSheetPresented)
+                        .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: appState.isQueueSheetPresented)
                 }
                 .buttonStyle(.plain)
+
+                Menu {
+                    if let current = track {
+                        Button {
+                            withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
+                                isCover3DPreviewPresented = true
+                            }
+                        } label: {
+                            Label("Свойства трека", systemImage: "info.circle")
+                        }
+
+                        if TrackMetadataActions.canJumpToTelegram(current) {
+                            Button {
+                                TrackMetadataActions.openInTelegram(current)
+                            } label: {
+                                Label("Показать в Telegram", systemImage: "paperplane.fill")
+                            }
+                        }
+
+                        if TrackMetadataActions.canJumpToYouTube(current) {
+                            Button {
+                                TrackMetadataActions.openInYouTube(current)
+                            } label: {
+                                Label("Открыть на YouTube", systemImage: "play.rectangle.fill")
+                            }
+                        }
+
+                        Button {
+                            appState.isAudioFXSheetPresented = true
+                        } label: {
+                            Label("Звуковые эффекты и скорость", systemImage: "slider.horizontal.3")
+                        }
+
+                        Button {
+                            appState.toggleLyricsDisabled(for: current)
+                        } label: {
+                            Label(
+                                appState.isLyricsDisabled(for: current) ? "Включить текст для трека" : "Отключить текст для трека",
+                                systemImage: appState.isLyricsDisabled(for: current) ? "text.quote" : "eye.slash"
+                            )
+                        }
+
+                        Divider()
+
+                        Button {
+                            appState.haptics.softSelection()
+                            appState.isGyroscope3DCoverEnabled.toggle()
+                        } label: {
+                            Label(
+                                appState.isGyroscope3DCoverEnabled ? "Выключить 3D-гироскоп обложки" : "Включить 3D-гироскоп обложки",
+                                systemImage: appState.isGyroscope3DCoverEnabled ? "gyroscope" : "cube.transparent"
+                            )
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.90))
+                        .frame(width: 42, height: 42)
+                        .liquidGlassCircle(tint: .white)
+                }
             }
+        }
+    }
+
+    private func trackMetadataAndQuickActionsRow(accentColor: Color) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            // 3 строки метаданных как на ПК (`NowPlaying.jsx`):
+            // 1) Название трека
+            // 2) Артист
+            // 3) Из какого плейлиста / папки / альбома / YouTube + год выпуска
+            VStack(alignment: .leading, spacing: 3) {
+                Text(track?.title ?? "Трек не выбран")
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                Text(track?.artist ?? "Bebranoid iOS")
+                    .font(.system(size: 15.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.84))
+                    .lineLimit(1)
+
+                Text(contextSourceAndYearLine)
+                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.56))
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            // Кнопка Лайк (Избранное) на месте бывшей кнопки Очередь справа от названия трека
+            let isLiked = track.map { appState.isFavorite($0) } ?? false
+            Button {
+                if let current = track {
+                    appState.toggleFavorite(track: current)
+                }
+            } label: {
+                Image(systemName: isLiked ? "heart.fill" : "heart")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.88))
+                    .frame(width: 44, height: 44)
+                    .liquidGlassCircle(tint: isLiked ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white)
+            }
+            .buttonStyle(.plain)
         }
     }
 
     private func centerModePillRow(accentColor: Color) -> some View {
         let lyricsDisabled = track.map { appState.isLyricsDisabled(for: $0) } ?? false
-        let hasAvailableLyrics = !lyricsDisabled && (!appState.currentLyricsDocument.lines.isEmpty || appState.isLoadingLyrics)
+        // Если в песне нет текста — кнопки «Текст» сразу нет (никаких пустых предзагрузок)
+        let hasAvailableLyrics = !lyricsDisabled && !appState.currentLyricsDocument.lines.isEmpty
         let fxMode = appState.audioFXMode
         let fxTint = FXRoseStyle.tintColor(for: fxMode, fallbackAccent: accentColor)
 
-        return HStack(spacing: 10) {
+        return HStack(spacing: 9) {
             if hasAvailableLyrics {
                 Button {
                     appState.haptics.lightTap()
                     appState.isLyricsScreenPresented = true
                 } label: {
-                    HStack(spacing: 7) {
-                        if appState.isLoadingLyrics && appState.currentLyricsDocument.lines.isEmpty {
-                            ProgressView()
-                                .tint(.white)
-                                .scaleEffect(0.72)
-                        } else {
-                            Image(systemName: "music.note")
-                                .font(.system(size: 14, weight: .bold))
-                        }
+                    HStack(spacing: 6) {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 13.5, weight: .bold))
                         Text("Текст")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
                     }
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .liquidGlassCapsule(tint: accentColor, isProminent: false)
                 }
@@ -952,11 +974,31 @@ public struct FullScreenPlayerView: View {
                     }
                     Text(fxPillTitle)
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
                 }
                 .foregroundStyle(isAnyFXActive ? fxTint : .white.opacity(0.86))
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 15)
                 .padding(.vertical, 10)
                 .liquidGlassCapsule(tint: isAnyFXActive ? fxTint : accentColor, isProminent: false)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                appState.haptics.softSelection()
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                    appState.isQueueSheetPresented.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 13, weight: .bold))
+                    Text("Очередь")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(appState.isQueueSheetPresented ? Color(red: 0.08, green: 0.06, blue: 0.14) : .white.opacity(0.88))
+                .padding(.horizontal, 15)
+                .padding(.vertical, 10)
+                .liquidGlassCapsule(tint: accentColor, isProminent: appState.isQueueSheetPresented)
             }
             .buttonStyle(.plain)
         }
@@ -1084,17 +1126,36 @@ public struct FullScreenPlayerView: View {
         }
     }
 
-    private var subtitleText: String {
-        guard let track else { return "Bebranoid iOS" }
-        if let matchedPlaylist = appState.libraryState.playlists.first(where: { pl in
-            !pl.isRecentAutoPlaylist && (pl.trackFilenames.contains(track.cacheKey) || pl.trackFilenames.contains(track.filename) || pl.tracksSnapshot.contains(where: { $0.id == track.id }))
-        }) {
-            return "\(track.artist) • \(matchedPlaylist.name)"
+    /// Третья строка метаданных в полноэкранном плеере (1:1 с ПК-версией `NowPlaying.jsx`):
+    /// Показывает источник (Плейлист / Папка / Альбом / YouTube) и год выпуска трека.
+    private var contextSourceAndYearLine: String {
+        guard let track else { return "Медиатека" }
+        let sourceName: String = {
+            if let matchedPlaylist = appState.libraryState.playlists.first(where: { pl in
+                !pl.isRecentAutoPlaylist && (pl.trackFilenames.contains(track.cacheKey) || pl.trackFilenames.contains(track.filename) || pl.tracksSnapshot.contains(where: { $0.id == track.id }))
+            }) {
+                return matchedPlaylist.isYouTubePlaylist ? "YouTube • \(matchedPlaylist.name)" : matchedPlaylist.name
+            }
+            if !track.album.isEmpty && track.album != "Без альбома" {
+                return track.album
+            }
+            switch track.sourceKind {
+            case .youtube:
+                return "YouTube"
+            case .telegram:
+                return appState.libraryState.selectedTelegramChatTitle.isEmpty ? "Telegram Облако" : appState.libraryState.selectedTelegramChatTitle
+            case .localFile:
+                return "Локальная папка"
+            }
+        }()
+
+        if let releaseYear = TrackMetadataActions.resolvedReleaseYear(for: track) {
+            if sourceName.contains(String(releaseYear)) {
+                return sourceName
+            }
+            return "\(sourceName) • \(releaseYear)"
         }
-        if !track.album.isEmpty && track.album != "Без альбома" {
-            return "\(track.artist) — \(track.album)"
-        }
-        return track.artist
+        return sourceName
     }
 
     private var isAnyFXActive: Bool {
@@ -1142,17 +1203,23 @@ private struct Cover3DTouchPreviewOverlay: View {
         let badge = resolvedFormat.computeQualityBadge()
         let isLossless = (badge.tier == .hiRes || badge.tier == .lossless)
         let canOpenTG = TrackMetadataActions.canJumpToTelegram(track)
-        let cardWidth = min(viewportSize.width - 36, 368.0)
+        let canOpenYT = TrackMetadataActions.canJumpToYouTube(track)
+        let cardWidth = min(viewportSize.width - 28, 376.0)
 
-        ZStack {
-            // Лёгкая полупрозрачная дымка, оставляющая живой фон и интерфейс плеера полностью видимыми
-            Color.black.opacity(0.28)
+        ZStack(alignment: .bottom) {
+            // Лёгкая полупрозрачная дымка, оставляющая обложку трека в верхней половине экрана открытой
+            Color.black.opacity(0.24)
                 .ignoresSafeArea()
                 .onTapGesture {
                     onDismiss()
                 }
 
-            VStack(spacing: 14) {
+            VStack(spacing: 12) {
+                Capsule()
+                    .fill(Color.white.opacity(0.28))
+                    .frame(width: 36, height: 4.5)
+                    .padding(.top, -4)
+
                 HStack {
                     Text("Свойства трека")
                         .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -1170,40 +1237,40 @@ private struct Cover3DTouchPreviewOverlay: View {
                     .buttonStyle(.plain)
                 }
 
-                HStack(spacing: 13) {
+                HStack(spacing: 12) {
                     ArtworkThumbnailView(
                         track: track,
                         localPath: localCoverPath,
                         remoteURL: track.remoteArtworkURL,
                         fallbackSeed: "\(track.album)|\(track.artist)",
-                        cornerRadius: 14,
-                        sizeTier: .originalSource,
+                        cornerRadius: 12,
+                        sizeTier: .albumGrid,
                         enableSmoothTransition: true,
                         showBorder: true
                     )
-                    .frame(width: 72, height: 72)
-                    .shadow(color: Color.black.opacity(0.36), radius: 12, x: 0, y: 6)
+                    .frame(width: 56, height: 56)
+                    .shadow(color: Color.black.opacity(0.32), radius: 8, x: 0, y: 4)
 
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 2.5) {
                         HStack(spacing: 5) {
                             Image(systemName: isLossless ? "waveform.badge.checkmark" : "waveform")
-                                .font(.system(size: 10, weight: .bold))
-                            Text(isLossless ? "Lossless Audio (Без потерь)" : "Сжатый звук (Lossy)")
-                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text(badge.tier == .hiRes ? "Hi-Res Lossless" : (isLossless ? "Lossless Audio" : "Сжатый звук (Lossy)"))
+                                .font(.system(size: 9.5, weight: .heavy, design: .rounded))
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
                         .background(accentColor.opacity(0.22), in: Capsule())
                         .foregroundStyle(accentColor)
 
                         Text(track.title)
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
-                            .lineLimit(2)
+                            .lineLimit(1)
 
                         Text("\(track.artist) • \(track.album)")
-                            .font(.system(size: 12.5, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.72))
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.70))
                             .lineLimit(1)
                     }
                     Spacer(minLength: 0)
@@ -1212,7 +1279,7 @@ private struct Cover3DTouchPreviewOverlay: View {
                 Divider()
                     .overlay(Color.white.opacity(0.14))
 
-                VStack(spacing: 8) {
+                VStack(spacing: 6.5) {
                     detailRow("Формат", resolvedFormat.codec)
                     detailRow(
                         "Разрядность",
@@ -1241,38 +1308,71 @@ private struct Cover3DTouchPreviewOverlay: View {
                     detailRow("Дата выгрузки", TrackMetadataActions.formatUploadDate(track.dateAdded))
                 }
 
-                if canOpenTG {
-                    Button {
-                        HapticsManager.shared.mediumImpact()
-                        TrackMetadataActions.openInTelegram(track)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "paperplane.fill")
-                                .font(.system(size: 13, weight: .bold))
-                            Text("Показать в Telegram")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 11, weight: .bold))
-                        }
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .background(
-                            Capsule()
-                                .fill(Color(red: 0.20, green: 0.58, blue: 0.98).opacity(0.32))
-                                .overlay(
+                if canOpenTG || canOpenYT {
+                    HStack(spacing: 8) {
+                        if canOpenTG {
+                            Button {
+                                HapticsManager.shared.mediumImpact()
+                                TrackMetadataActions.openInTelegram(track)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "paperplane.fill")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                    Text("Показать в Telegram")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10.5)
+                                .background(
                                     Capsule()
-                                        .strokeBorder(Color(red: 0.35, green: 0.72, blue: 1.0).opacity(0.65), lineWidth: 0.8)
+                                        .fill(Color(red: 0.20, green: 0.58, blue: 0.98).opacity(0.32))
+                                        .overlay(
+                                            Capsule()
+                                                .strokeBorder(Color(red: 0.35, green: 0.72, blue: 1.0).opacity(0.65), lineWidth: 0.8)
+                                        )
                                 )
-                        )
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if canOpenYT {
+                            Button {
+                                HapticsManager.shared.mediumImpact()
+                                TrackMetadataActions.openInYouTube(track)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "play.rectangle.fill")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                    Text("Открыть на YouTube")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10.5)
+                                .background(
+                                    Capsule()
+                                        .fill(Color(red: 0.96, green: 0.20, blue: 0.24).opacity(0.32))
+                                        .overlay(
+                                            Capsule()
+                                                .strokeBorder(Color(red: 1.0, green: 0.36, blue: 0.40).opacity(0.65), lineWidth: 0.8)
+                                        )
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .buttonStyle(.plain)
                     .padding(.top, 2)
                 }
             }
-            .padding(20)
+            .padding(18)
             .frame(width: cardWidth)
             .liquidGlassCard(cornerRadius: 28, tint: accentColor, tintOpacity: 0.12, isInteractive: false)
+            .padding(.bottom, 18)
             .offset(y: dragDownOffset)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 12)
@@ -1414,10 +1514,54 @@ public struct InteractiveSeekBarView: View {
     }
 }
 
-/// Монолитная 3D-плита обложки (`Sculpted3DCoverSlabView`) в минималистичной эстетике Apple Music:
-/// - Исходное разрешение обложки (`.originalSource`) без искусственного неонового свечения по краям и без мигания
-/// - Эстетичное продолжение крайних пикселей обложки в 3D-объёме при наклоне гироскопа
-/// - Когда скачивается новый трек, рисует аккуратную обводку в цвете обложки скачивающегося трека (`downloadBorderColor`)
+/// Живая вращающаяся акцентная каёмка большой обложки (`.andro-cover-living-spin` из `src/index.css` ПК-версии):
+/// непрерывное 7.5-секундное вращение конического блика вдоль граней обложки на базе `CACurrentMediaTime()` без миганий и сбросов.
+private struct LivingCoverRimBorderView: View {
+    let accentRGB: MeshRGB
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let norm = accentRGB.normalizedDouble
+        let accent = Color(red: norm.r, green: norm.g, blue: norm.b)
+        let brightAccent = Color(
+            red: min(1.0, norm.r * 1.24 + 0.14),
+            green: min(1.0, norm.g * 1.24 + 0.14),
+            blue: min(1.0, norm.b * 1.24 + 0.14)
+        )
+
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            let _ = context.date
+            let angleDeg = (CACurrentMediaTime().truncatingRemainder(dividingBy: 7.5) / 7.5) * 360.0
+            let conic = AngularGradient(
+                gradient: Gradient(stops: [
+                    .init(color: accent.opacity(0.18), location: 0.00),
+                    .init(color: accent.opacity(0.55), location: 0.16),
+                    .init(color: brightAccent.opacity(0.96), location: 0.30),
+                    .init(color: Color.white.opacity(0.88), location: 0.36),
+                    .init(color: brightAccent.opacity(0.92), location: 0.42),
+                    .init(color: accent.opacity(0.24), location: 0.58),
+                    .init(color: accent.opacity(0.12), location: 0.78),
+                    .init(color: accent.opacity(0.18), location: 1.00)
+                ]),
+                center: .center,
+                angle: .degrees(angleDeg)
+            )
+
+            ZStack {
+                shape
+                    .strokeBorder(conic, lineWidth: 2.2)
+                    .shadow(color: accent.opacity(0.34), radius: 5, x: 0, y: 0)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Монолитная 3D-плита обложки (`Sculpted3DCoverSlabView`):
+/// - Исходное разрешение обложки (`.originalSource`), строго обрезанное 1:1
+/// - Заметный 3D-объём и блик при наклоне гироскопа + фирменная бегущая акцентная каёмка `LivingCoverRimBorderView`
+/// - Когда скачивается сам этот трек, рисует аккуратную обводку в цвете его обложки (`downloadBorderColor`)
 private struct Sculpted3DCoverSlabView: View {
     let primaryImage: CGImage?
     let outgoingImage: CGImage?
@@ -1431,54 +1575,51 @@ private struct Sculpted3DCoverSlabView: View {
     let specularOffset: CGSize
 
     var body: some View {
-        let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 20.0)
+        let tiltMagnitude = min(1.0, hypot(tiltX, tiltY) / 16.0)
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
         ZStack {
             // Идеальное продолжение крайних пикселей самой обложки по бокам при наклоне гироскопа
-            if tiltMagnitude > 0.015 {
-                ForEach((1...6).reversed(), id: \.self) { sliceIdx in
-                    let frac = Double(sliceIdx) / 6.0
+            if tiltMagnitude > 0.010 {
+                ForEach((1...7).reversed(), id: \.self) { sliceIdx in
+                    let frac = Double(sliceIdx) / 7.0
                     coverFullSliceLayer(radius: cornerRadius)
                         .overlay(
                             shape
-                                .fill(Color.black.opacity(0.16 + 0.34 * frac))
+                                .fill(Color.black.opacity(0.14 + 0.34 * frac))
                         )
                         .offset(
-                            x: CGFloat(-tiltY * 0.44 * frac),
-                            y: CGFloat(tiltX * 0.44 * frac)
+                            x: CGFloat(-tiltY * 0.56 * frac),
+                            y: CGFloat(tiltX * 0.56 * frac)
                         )
                         .allowsHitTesting(false)
                 }
             }
 
-            // Чистая лицевая грань обложки на всю ширину без неонового вращающегося кольца
+            // Лицевая грань обложки строго 1:1 с живым бликом и бегущей каёмкой
             coverFaceLayer(radius: cornerRadius)
                 .overlay {
-                    if tiltMagnitude > 0.012 {
-                        let lightCenter = UnitPoint(
-                            x: max(0.05, min(0.95, 0.5 - specularOffset.width * 0.42)),
-                            y: max(0.05, min(0.95, 0.38 - specularOffset.height * 0.42))
-                        )
-                        shape
-                            .fill(
-                                RadialGradient(
-                                    colors: [
-                                        Color.white.opacity(0.11 * tiltMagnitude),
-                                        Color.white.opacity(0.02 * tiltMagnitude),
-                                        Color.clear
-                                    ],
-                                    center: lightCenter,
-                                    startRadius: 8,
-                                    endRadius: coverSide * 0.78
-                                )
+                    let lightCenter = UnitPoint(
+                        x: max(0.05, min(0.95, 0.5 - specularOffset.width * 0.46)),
+                        y: max(0.05, min(0.95, 0.36 - specularOffset.height * 0.46))
+                    )
+                    shape
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color.white.opacity(0.06 + 0.16 * tiltMagnitude),
+                                    Color.white.opacity(0.02 + 0.04 * tiltMagnitude),
+                                    Color.clear
+                                ],
+                                center: lightCenter,
+                                startRadius: 6,
+                                endRadius: coverSide * 0.78
                             )
-                            .allowsHitTesting(false)
-                    }
+                        )
+                        .allowsHitTesting(false)
                 }
                 .overlay {
                     if let dlBorder = downloadBorderColor {
-                        // Когда скачивается новый трек — обводка окрашивается строго в цвет обложки скачивающегося трека!
                         shape
                             .strokeBorder(
                                 LinearGradient(
@@ -1490,23 +1631,13 @@ private struct Sculpted3DCoverSlabView: View {
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
                                 ),
-                                lineWidth: 2.0
+                                lineWidth: 2.2
                             )
                     } else {
-                        // Минималистичная тонкая стеклянная фаска в стиле Apple Music (без неонового пересвета)
-                        shape
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(0.20),
-                                        Color.white.opacity(0.06),
-                                        Color.white.opacity(0.10)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 0.75
-                            )
+                        LivingCoverRimBorderView(
+                            accentRGB: accentRGB,
+                            cornerRadius: cornerRadius
+                        )
                     }
                 }
         }
@@ -1520,12 +1651,14 @@ private struct Sculpted3DCoverSlabView: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: coverSide, height: coverSide)
+                    .clipped()
             } else {
                 uniformBlackPlaceholder
                     .frame(width: coverSide, height: coverSide)
             }
         }
         .frame(width: coverSide, height: coverSide)
+        .clipped()
         .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
@@ -1538,6 +1671,7 @@ private struct Sculpted3DCoverSlabView: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: coverSide, height: coverSide)
+                    .clipped()
             }
 
             if let cur = primaryImage {
@@ -1545,6 +1679,7 @@ private struct Sculpted3DCoverSlabView: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: coverSide, height: coverSide)
+                    .clipped()
                     .opacity(outgoingImage != nil ? incomingAlpha : 1.0)
             } else {
                 uniformBlackPlaceholder
@@ -1553,6 +1688,7 @@ private struct Sculpted3DCoverSlabView: View {
             }
         }
         .frame(width: coverSide, height: coverSide)
+        .clipped()
         .background(Color(red: 5.0 / 255.0, green: 5.0 / 255.0, blue: 5.0 / 255.0))
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }

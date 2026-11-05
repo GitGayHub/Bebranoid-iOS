@@ -555,6 +555,17 @@ public struct TrackRowView: View {
                                 .background(Color.white.opacity(0.12), in: Capsule())
                                 .foregroundStyle(.white.opacity(0.65))
                         }
+
+                        let formatBadge = isCurrent ? appState.currentQualityBadge : AudioFormatProbe.inferFromFilename(track.filename)
+                        if formatBadge.tier == .hiRes || formatBadge.tier == .lossless {
+                            Text(formatBadge.tier == .hiRes ? "Hi-Res Lossless" : "Lossless")
+                                .font(.system(size: 8.5, weight: .heavy, design: .rounded))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(Color.white.opacity(0.11), in: Capsule())
+                                .foregroundStyle(.white.opacity(0.78))
+                                .fixedSize()
+                        }
                     }
 
                     if let pct = downloadPct {
@@ -630,6 +641,14 @@ public struct TrackRowView: View {
                     TrackMetadataActions.openInTelegram(track)
                 } label: {
                     Label("Показать в Telegram", systemImage: "paperplane.fill")
+                }
+            }
+
+            if TrackMetadataActions.canJumpToYouTube(track) {
+                Button {
+                    TrackMetadataActions.openInYouTube(track)
+                } label: {
+                    Label("Открыть на YouTube", systemImage: "play.rectangle.fill")
                 }
             }
 

@@ -596,8 +596,8 @@ public enum HarmonoidMeshEngine {
         }
     }
 
-    /// Адаптация той же самой 4-точечной синусоидальной логики Harmonoid под компактный экран iPhone:
-    /// мягкое, органичное дыхание пятен без резких пульсаций.
+    /// Адаптация 4-точечной синусоидальной логики Harmonoid под экран iPhone:
+    /// выразительное, более чёткое и заметное движение цветовых пятен обложки.
     public static func mobileBlobCenters(
         at timeSec: Double,
         width: Double,
@@ -606,20 +606,31 @@ public enum HarmonoidMeshEngine {
     ) -> [MeshBlobPoint] {
         let cols = meshColors.count >= 4 ? meshColors : defaultPalette
         let maxDim = max(width, height)
-        let mobileSpeed = motionSpeed * 1.12
-        let ampBoost = 1.15
+        let mobileSpeed = motionSpeed * 1.68
+        let ampBoost = 1.42
 
         return (0..<4).map { i in
             let p = controlPoints[i]
             let x = (p.bx + sin(timeSec * mobileSpeed * p.sx + p.p) * (p.ax * ampBoost)) * width
             let y = (p.by + cos(timeSec * mobileSpeed * p.sy + p.p * 0.8) * (p.ay * ampBoost)) * height
-            let radius = maxDim * (0.55 + 0.085 * sin(timeSec * 0.36 + Double(i)))
+            let radius = maxDim * (0.48 + 0.14 * sin(timeSec * 0.56 + Double(i) * 1.15))
+            let baseCol = cols[i]
+            let hsv = rgbToHsv(baseCol.r, baseCol.g, baseCol.b)
+            let vividCol: MeshRGB
+            if hsv.s > 0.06 {
+                let boostedS = min(0.92, hsv.s * 1.22 + 0.05)
+                let boostedV = min(0.56, max(0.22, hsv.v * 1.38 + (i % 2 == 0 ? 0.06 : 0.02)))
+                vividCol = hsvToRgb(hsv.h, boostedS, boostedV)
+            } else {
+                let boostedV = min(0.42, max(0.16, hsv.v * 1.28))
+                vividCol = hsvToRgb(hsv.h, hsv.s, boostedV)
+            }
             return MeshBlobPoint(
                 index: i,
                 x: x,
                 y: y,
                 radius: radius,
-                color: cols[i],
+                color: vividCol,
                 isSourceOver: i == 0
             )
         }

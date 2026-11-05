@@ -490,6 +490,70 @@ public enum TrackMetadataActions {
         track.sourceKind == .telegram && track.chatId != nil && track.messageId != nil
     }
 
+    public static func canJumpToYouTube(_ track: Track) -> Bool {
+        if let vid = track.youtubeVideoId, !vid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return track.sourceKind == .youtube && !track.filename.isEmpty
+    }
+
+    /// Открывает ролик/трек на YouTube (в приложении YouTube или в Safari)
+    public static func openInYouTube(_ track: Track) {
+        let vid: String = {
+            if let explicit = track.youtubeVideoId?.trimmingCharacters(in: .whitespacesAndNewlines), !explicit.isEmpty {
+                return explicit
+            }
+            if track.id.hasPrefix("yt:") {
+                let parts = track.id.split(separator: ":")
+                if let last = parts.last {
+                    return String(last)
+                }
+            }
+            return ""
+        }()
+        guard !vid.isEmpty else { return }
+        #if canImport(UIKit)
+        let appURL = URL(string: "youtube://watch?v=\(vid)")
+        let webURL = URL(string: "https://www.youtube.com/watch?v=\(vid)")
+        if let appURL {
+            UIApplication.shared.open(appURL, options: [:]) { success in
+                if !success, let webURL {
+                    UIApplication.shared.open(webURL, options: [:], completionHandler: nil)
+                }
+            }
+        } else if let webURL {
+            UIApplication.shared.open(webURL, options: [:], completionHandler: nil)
+        }
+        #endif
+    }
+
+    /// Определяет год выпуска трека: из явного `track.year`, из 4-значного года в `album` / `title` / `filename` или из `dateAdded`
+    public static func resolvedReleaseYear(for track: Track) -> Int? {
+        if let y = track.year, (1950...2099).contains(y) {
+            return y
+        }
+        let candidates = [track.album, track.title, track.filename]
+        let pattern = #"\b(19[5-9]\d|20[0-3]\d)\b"#
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            for text in candidates where !text.isEmpty {
+                let ns = text as NSString
+                let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+                if let lastMatch = matches.last,
+                   let yearVal = Int(ns.substring(with: lastMatch.range(at: 1))),
+                   (1950...2035).contains(yearVal) {
+                    return yearVal
+                }
+            }
+        }
+        if let added = track.dateAdded {
+            let y = Calendar.current.component(.year, from: added)
+            if (1970...2099).contains(y) {
+                return y
+            }
+        }
+        return nil
+    }
+
     /// Открывает сообщение с треком напрямую в приложении Telegram (`electron/main.js` `jumpToTelegramMessage` parity)
     public static func openInTelegram(_ track: Track) {
         guard let rawChatString = track.chatId, let rawMessageIdInt = track.messageId else { return }

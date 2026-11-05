@@ -62,12 +62,17 @@ public struct ArtworkThumbnailView: View {
     }
 
     public var body: some View {
-        ZStack {
-            artworkImageLayer
-            if showFavoriteOverlay {
-                favoriteOverlayLayer
+        GeometryReader { geo in
+            ZStack {
+                artworkImageLayer
+                if showFavoriteOverlay {
+                    favoriteOverlayLayer
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipped()
         }
+        .aspectRatio(1, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
             if showBorder {
@@ -109,7 +114,12 @@ public struct ArtworkThumbnailView: View {
 
     @ViewBuilder
     private var artworkImageLayer: some View {
-        let syncCached = ArtworkService.shared.memoryCachedImage(forKey: taskIdentifier, tier: sizeTier)
+        let syncCached = ArtworkService.shared.syncResolveImmediateImage(
+            track: track,
+            localPath: localPath,
+            key: taskIdentifier,
+            tier: sizeTier
+        )
         if enableSmoothTransition {
             ZStack {
                 if let prev = outgoingCGImage {

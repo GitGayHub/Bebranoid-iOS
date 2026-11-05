@@ -277,6 +277,9 @@ public final class LyricsService: @unchecked Sendable {
         }()
 
         if let cached = loadCachedLyrics(for: track, effectiveDuration: effectiveDuration) {
+            if cached.source == "none" {
+                return (ParsedLyricsDocument(kind: .plain, lines: []), cached)
+            }
             let raw = cached.syncedLyrics ?? cached.plainLyrics
             var doc = LRCParser.parseLRC(raw)
             if let translations = cached.translatedLines {
@@ -366,7 +369,21 @@ public final class LyricsService: @unchecked Sendable {
             return (fallback.doc, record)
         }
 
-        return (ParsedLyricsDocument(kind: .plain, lines: []), nil)
+        // 4. Кешируем отсутствие текста (`source: "none"`), чтобы мгновенно знать, что у трека нет лирики без повторного ожидания
+        let negativeRecord = CachedLyricsRecord(
+            trackId: track.id,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: effectiveDuration > 1 ? effectiveDuration : track.duration,
+            syncedLyrics: nil,
+            plainLyrics: nil,
+            source: "none",
+            translatedLines: nil,
+            savedAt: Date()
+        )
+        saveCachedLyrics(negativeRecord)
+        return (ParsedLyricsDocument(kind: .plain, lines: []), negativeRecord)
     }
 
     private static func pickBestResolvedCandidate(

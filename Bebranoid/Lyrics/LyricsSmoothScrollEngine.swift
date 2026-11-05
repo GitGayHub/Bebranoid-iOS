@@ -191,7 +191,9 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
         coordinator.isUserBrowsingBinding = $isUserBrowsing
         coordinator.isPlainLyrics = isPlainLyrics
         let framesCountChanged = coordinator.nodeFrames.count != nodeFrames.count
+        let oldTargetMidY = targetNodeId.flatMap { coordinator.nodeFrames[$0]?.midY }
         coordinator.nodeFrames = nodeFrames
+        let newTargetMidY = targetNodeId.flatMap { nodeFrames[$0]?.midY }
         coordinator.attachIfNeeded(from: uiView)
 
         let docChanged = coordinator.lastDocumentSignature != documentSignature
@@ -202,6 +204,15 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
             coordinator.hasPerformedInitialPositioning = false
             coordinator.scrollToNode(id: targetNodeId, animated: false)
             return
+        }
+
+        // Если при включении/выключении перевода RU или смене кегля высота строк изменилась,
+        // компенсируем сдвиг `deltaY` синхронно, чтобы текущая строка осталась ровно на своём месте без прыжка!
+        if !framesCountChanged,
+           let oldMid = oldTargetMidY,
+           let newMid = newTargetMidY,
+           abs(newMid - oldMid) > 1.0 {
+            coordinator.compensateLayoutShift(deltaY: newMid - oldMid, targetId: targetNodeId)
         }
 
         if coordinator.lastSyncTriggerToken != syncTriggerToken {
@@ -352,6 +363,22 @@ struct LyricsSmoothScrollBridge: UIViewRepresentable {
             spring.velocity = 0.0
             spring.setGoal(Double(goalY), replaceVelocity: false)
             wakeDisplayLink()
+        }
+
+        func compensateLayoutShift(deltaY: CGFloat, targetId: String?) {
+            guard let sv = scrollView, sv.bounds.height > 20 else { return }
+            let minY = -sv.adjustedContentInset.top
+            let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
+            if !isUserBrowsingBinding.wrappedValue, let exactGoal = computeClampedOffsetY(for: targetId, in: sv) {
+                spring.position = Double(exactGoal)
+                spring.setGoal(Double(exactGoal), replaceVelocity: true)
+                sv.setContentOffset(CGPoint(x: sv.contentOffset.x, y: exactGoal), animated: false)
+            } else {
+                let shiftedY = min(maxY, max(minY, sv.contentOffset.y + deltaY))
+                spring.position = Double(shiftedY)
+                spring.setGoal(Double(shiftedY), replaceVelocity: true)
+                sv.setContentOffset(CGPoint(x: sv.contentOffset.x, y: shiftedY), animated: false)
+            }
         }
 
         func scrollToNode(id: String?, animated: Bool) {

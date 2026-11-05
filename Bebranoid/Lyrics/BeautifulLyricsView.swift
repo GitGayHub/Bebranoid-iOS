@@ -46,7 +46,7 @@ public struct BeautifulLyricsView: View {
     }
 
     private var documentSignature: String {
-        "\(document.lines.count)|\(document.lines.first?.text ?? "")|\(fontSizePreset.rawValue)|\(showTranslation)"
+        "\(document.lines.count)|\(document.lines.first?.text ?? "")"
     }
 
     private func targetNodeId(for lineIndex: Int, interludeId: String?) -> String? {
@@ -240,18 +240,15 @@ public struct BeautifulLyricsView: View {
                             }
                             #endif
                         } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "arrow.up.and.down.circle.fill")
-                                Text("Синхр.")
-                                    .font(.system(size: 13.5, weight: .semibold, design: .rounded))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .liquidGlassCapsule(tint: accentColor, isProminent: false)
-                            .contentShape(Capsule())
+                            Image(systemName: "arrow.up.and.down")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .liquidGlassCircle(tint: accentColor, isHighlighted: false)
+                                .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Синхронизировать текст")
                         .padding(.trailing, 20)
                         .padding(.bottom, 16)
                         .transition(.scale.combined(with: .opacity))
@@ -394,18 +391,21 @@ private struct BeautifulVocalLineRow: View {
         return group.lineIndex < activeLineIndex
     }
 
-    /// Неактивные строки ВСЕГДА остаются мягкими серебристо-серыми (и при воспроизведении, и на паузе, и при прокрутке пальцем)
+    /// Приглушённый холодно-серый тон неактивных строк и ещё не спетых слов (1:1 с ПК-версией `BeautifulLyrics.css`)
+    fileprivate static let mutedInactiveColor = Color(red: 0.62, green: 0.64, blue: 0.69)
+
+    /// Неактивные строки ВСЕГДА остаются отчётливо приглушённо-серыми (`~0.24`), чтобы активная белая строка читалась мгновенно
     private var nonActiveLineOpacity: Double {
         if syncKind == .plain {
-            return 0.46
+            return 0.42
         }
         if activeLineIndex < 0 {
             let dist = min(4, group.lineIndex)
-            return max(0.20, 0.32 - Double(dist) * 0.03)
+            return max(0.18, 0.25 - Double(dist) * 0.015)
         }
         let dist = min(4, abs(group.lineIndex - activeLineIndex))
-        let base = isLinePast ? 0.38 : 0.29
-        return max(0.20, base - Double(dist) * 0.025)
+        let base = isLinePast ? 0.26 : 0.23
+        return max(0.17, base - Double(dist) * 0.015)
     }
 
     var body: some View {
@@ -445,7 +445,7 @@ private struct BeautifulVocalLineRow: View {
                             )
                             Text(group.mainText)
                                 .font(.system(size: 26 * scaleFactor * inactiveFit, weight: .bold, design: .rounded))
-                                .foregroundStyle(Color.white.opacity(nonActiveLineOpacity))
+                                .foregroundStyle(Self.mutedInactiveColor.opacity(nonActiveLineOpacity))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.30)
                                 .allowsTightening(true)
@@ -457,7 +457,7 @@ private struct BeautifulVocalLineRow: View {
                             .foregroundStyle(
                                 isLineActive
                                     ? Color.white
-                                    : Color.white.opacity(nonActiveLineOpacity)
+                                    : Self.mutedInactiveColor.opacity(nonActiveLineOpacity)
                             )
                             .lineLimit(1)
                             .minimumScaleFactor(0.30)
@@ -468,7 +468,7 @@ private struct BeautifulVocalLineRow: View {
                     if let bg = group.backgroundText, !bg.isEmpty {
                         Text(bg)
                             .font(.system(size: 17 * scaleFactor, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.white.opacity(isLineActive ? 0.68 : 0.26))
+                            .foregroundStyle(isLineActive ? Color.white.opacity(0.68) : Self.mutedInactiveColor.opacity(0.24))
                             .lineLimit(1)
                             .minimumScaleFactor(0.35)
                             .allowsTightening(true)
@@ -477,7 +477,7 @@ private struct BeautifulVocalLineRow: View {
                     if let romanized = group.romanizedText, !romanized.isEmpty {
                         Text(romanized)
                             .font(.system(size: 13.5 * scaleFactor, weight: .medium, design: .rounded))
-                            .foregroundStyle(Color.white.opacity(isLineActive ? 0.58 : 0.24))
+                            .foregroundStyle(isLineActive ? Color.white.opacity(0.58) : Self.mutedInactiveColor.opacity(0.22))
                             .lineLimit(1)
                             .minimumScaleFactor(0.38)
                             .allowsTightening(true)
@@ -486,14 +486,17 @@ private struct BeautifulVocalLineRow: View {
                     if showTranslation, let tr = group.translatedText, !tr.isEmpty {
                         Text(tr)
                             .font(.system(size: 15.5 * scaleFactor, weight: .medium, design: .rounded))
-                            .foregroundStyle(Color.white.opacity(isLineActive ? 0.80 : 0.30))
-                            .padding(.top, 1)
+                            .foregroundStyle(isLineActive ? Color.white.opacity(0.82) : Self.mutedInactiveColor.opacity(0.28))
+                            .padding(.top, 2)
                             .lineLimit(1)
                             .minimumScaleFactor(0.35)
                             .allowsTightening(true)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.easeInOut(duration: 0.26), value: showTranslation)
+                .animation(.easeInOut(duration: 0.26), value: group.translatedText != nil)
             }
             .scaleEffect(isLineActive ? 1.0 : (syncKind == .plain ? 0.98 : 0.956), anchor: .leading)
             .contentShape(Rectangle())
@@ -556,21 +559,22 @@ private struct SyllableWordSpanView: View {
                 .font(font)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: true)
-                .foregroundStyle(Color.white.opacity(opacity))
+                .foregroundStyle(BeautifulVocalLineRow.mutedInactiveColor.opacity(opacity))
 
-        case .active(let currentTime, let isPlaying):
+        case .active(let currentTime, _):
             let dur = max(0.06, syllable.duration)
             let rawProgress = HarmonoidMeshEngine.clamp((currentTime - syllable.startTime) / dur, 0.0, 1.0)
             let smoothCubic = rawProgress * rawProgress * (3.0 - 2.0 * rawProgress)
             let progress = 0.45 * rawProgress + 0.55 * smoothCubic
             let isActive = rawProgress > 0.001 && rawProgress < 0.999
             let isPast = rawProgress >= 0.999
-            // На паузе непропетые слова активной строки остаются светлыми (0.78), чтобы текущая строка всегда выделялась над серыми соседними!
-            let unsungAlpha: Double = isPlaying ? 0.38 : 0.78
+            // Ещё не пропетые слова активной строки всегда остаются приглушённо-серыми (как в ПК-версии `BeautifulLyrics.css`),
+            // чтобы пропетые белые слова (`Color.white`) резко и контрастно выделялись!
+            let unsungColor = BeautifulVocalLineRow.mutedInactiveColor.opacity(0.32)
 
             let fadeAt = fadePeer?.startTime ?? (syllable.endTime + 0.50)
             let fadeOut = isPast ? HarmonoidMeshEngine.clamp((currentTime - fadeAt) / 0.75, 0.0, 1.0) : 0.0
-            let restAlpha = 1.0 - 0.08 * fadeOut
+            let restAlpha = 1.0 - 0.06 * fadeOut
 
             let p = HarmonoidMeshEngine.clamp(progress, 0.01, 0.99)
             let softHalf = 0.14
@@ -586,15 +590,15 @@ private struct SyllableWordSpanView: View {
                             stops: [
                                 .init(color: .white, location: 0.0),
                                 .init(color: .white, location: lead),
-                                .init(color: .white.opacity(unsungAlpha), location: trail),
-                                .init(color: .white.opacity(unsungAlpha), location: 1.0)
+                                .init(color: unsungColor, location: trail),
+                                .init(color: unsungColor, location: 1.0)
                             ],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
                     )
                 } else {
-                    return AnyShapeStyle(Color.white.opacity(unsungAlpha))
+                    return AnyShapeStyle(unsungColor)
                 }
             }()
 

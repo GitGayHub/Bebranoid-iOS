@@ -44,7 +44,7 @@ public struct ClassicKaraokeLyricsView: View {
     }
 
     private var documentSignature: String {
-        "\(document.lines.count)|\(document.lines.first?.text ?? "")|\(fontSizePreset.rawValue)|\(showTranslation)"
+        "\(document.lines.count)|\(document.lines.first?.text ?? "")"
     }
 
     private var activeLineNodeId: String? {
@@ -167,18 +167,15 @@ public struct ClassicKaraokeLyricsView: View {
                         }
                         #endif
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.up.and.down.circle.fill")
-                            Text("Синхр.")
-                                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .liquidGlassCapsule(tint: accentColor, isProminent: false)
-                        .contentShape(Capsule())
+                        Image(systemName: "arrow.up.and.down")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .liquidGlassCircle(tint: accentColor, isHighlighted: false)
+                            .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Синхронизировать текст")
                     .padding(.trailing, 20)
                     .padding(.bottom, 16)
                     .transition(.scale.combined(with: .opacity))
@@ -231,12 +228,14 @@ private struct ClassicKaraokeLineRow: View {
         return index == activeLineIndex
     }
 
+    private static let mutedInactiveColor = Color(red: 0.62, green: 0.64, blue: 0.69)
+
     private var inactiveAlpha: Double {
         if syncKind == .plain {
-            return 0.46
+            return 0.42
         }
         let isPast = activeLineIndex >= 0 && index < activeLineIndex
-        return isPast ? 0.36 : 0.28
+        return isPast ? 0.26 : 0.23
     }
 
     var body: some View {
@@ -252,7 +251,7 @@ private struct ClassicKaraokeLineRow: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(line.text)
                         .font(.system(size: 24 * scaleFactor, weight: .bold, design: .rounded))
-                        .foregroundStyle(isActive ? Color.white : Color.white.opacity(inactiveAlpha))
+                        .foregroundStyle(isActive ? Color.white : Self.mutedInactiveColor.opacity(inactiveAlpha))
                         .lineLimit(1)
                         .minimumScaleFactor(0.30)
                         .allowsTightening(true)
@@ -271,13 +270,16 @@ private struct ClassicKaraokeLineRow: View {
                     if showTranslation, let tr = line.translation, !tr.isEmpty {
                         Text(tr)
                             .font(.system(size: 15 * scaleFactor, weight: .medium, design: .rounded))
-                            .foregroundStyle(isActive ? accentColor : Color.white.opacity(0.32))
+                            .foregroundStyle(isActive ? accentColor : Self.mutedInactiveColor.opacity(0.28))
                             .lineLimit(1)
                             .minimumScaleFactor(0.35)
                             .allowsTightening(true)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.easeInOut(duration: 0.26), value: showTranslation)
+                .animation(.easeInOut(duration: 0.26), value: line.translation != nil)
             }
             .padding(.vertical, 4)
             .scaleEffect(isActive ? 1.0 : 0.956, anchor: .leading)

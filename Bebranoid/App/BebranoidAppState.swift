@@ -194,6 +194,10 @@ public final class BebranoidAppState: ObservableObject {
         restorePreviousSession()
         if !availableLibraryTracks.isEmpty {
             artworkService.prefetchArtistCovers(artists: computedArtists)
+            artworkService.prewarmLibraryListThumbnails(
+                tracks: availableLibraryTracks,
+                customAlbumCovers: libraryState.customAlbumCovers
+            )
         }
         guard !TelegramClientService.isRunningUnderXCTest else { return }
         Task { [weak self] in
@@ -812,6 +816,18 @@ public final class BebranoidAppState: ObservableObject {
         }
         let nextTrack = queue[nextIdx]
         prepareNextTrackPalette(for: nextTrack)
+        // Заранее определяем наличие/отсутствие текста у следующего трека, чтобы кнопка «Текст» появлялась или скрывалась мгновенно
+        let nextDisabled = isLyricsDisabled(for: nextTrack)
+        if !nextDisabled, lyricsService.loadCachedLyrics(for: nextTrack) == nil {
+            let nextLocalURL = cacheIndex.isCached(nextTrack) ? storage.cachedAudioFileURL(for: nextTrack) : nil
+            Task.detached(priority: .utility) { [lyricsService] in
+                _ = await lyricsService.resolveLyrics(
+                    for: nextTrack,
+                    localFileURL: nextLocalURL,
+                    isDisabledForTrack: false
+                )
+            }
+        }
         guard !cacheIndex.isCached(nextTrack) else { return }
 
         Task.detached { [weak self, telegramClient] in
@@ -1074,12 +1090,44 @@ public final class BebranoidAppState: ObservableObject {
         if disabled {
             currentLyricsDocument = ParsedLyricsDocument(kind: .plain, lines: [])
             currentBeautifulNodes = []
+            isLoadingLyrics = false
             if isLyricsScreenPresented {
                 isLyricsScreenPresented = false
             }
             return
         }
 
+        // Синхронная мгновенная проверка кеша (0 мс): если известно, что у трека нет текста (`source == "none"`),
+        // или текст уже в кеше, сразу выставляем состояние без малейшей задержки и без спиннера!
+        if let syncCached = lyricsService.loadCachedLyrics(for: track) {
+            if syncCached.source == "none" {
+                currentLyricsDocument = ParsedLyricsDocument(kind: .plain, lines: [])
+                currentBeautifulNodes = []
+                isLoadingLyrics = false
+                if isLyricsScreenPresented {
+                    isLyricsScreenPresented = false
+                }
+                return
+            }
+            let raw = syncCached.syncedLyrics ?? syncCached.plainLyrics
+            var doc = LRCParser.parseLRC(raw)
+            if let translations = syncCached.translatedLines {
+                doc = LyricsService.attachTranslations(translations, to: doc)
+            }
+            if !doc.lines.isEmpty {
+                currentLyricsDocument = doc
+                currentBeautifulNodes = BeautifulLyricsTransform.transform(document: doc)
+                isLoadingLyrics = false
+                if showLyricsTranslation {
+                    Task { await ensureCurrentLyricsTranslated() }
+                }
+                return
+            }
+        }
+
+        // Сбрасываем текст предыдущего трека сразу, чтобы кнопка «Текст» не светилась на песнях без лирики
+        currentLyricsDocument = ParsedLyricsDocument(kind: .plain, lines: [])
+        currentBeautifulNodes = []
         isLoadingLyrics = true
         let localURL = cacheIndex.isCached(track) ? storage.cachedAudioFileURL(for: track) : nil
 
@@ -1556,6 +1604,10 @@ public final class BebranoidAppState: ObservableObject {
             libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
         }
         saveLibraryState()
+        artworkService.prewarmLibraryListThumbnails(
+            tracks: result.tracks,
+            customAlbumCovers: libraryState.customAlbumCovers
+        )
     }
 
     // MARK: - Persistence & Restoration
@@ -1795,6 +1847,10 @@ public final class BebranoidAppState: ObservableObject {
             statusBannerMessage = nil
             saveLibraryState()
             artworkService.prefetchArtistCovers(artists: computedArtists)
+            artworkService.prewarmLibraryListThumbnails(
+                tracks: availableLibraryTracks,
+                customAlbumCovers: libraryState.customAlbumCovers
+            )
 
             if var currentReport = lastTelegramAccessReport {
                 let normMain = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramChatId)

@@ -91,6 +91,7 @@ public final class ArtworkService: @unchecked Sendable {
     private var syncCoverPathCache: [String: CachedSyncCoverLookup] = [:]
     private var checkedTracksWithoutEmbeddedArt = Set<String>()
     private var artistPrefetchTask: Task<Void, Never>? = nil
+    private var libraryPrewarmTask: Task<Void, Never>? = nil
     private var dataCache = NSCache<NSString, NSData>()
     #if canImport(CoreGraphics)
     private var cgImageCache = NSCache<NSString, CGImage>()
@@ -118,13 +119,13 @@ public final class ArtworkService: @unchecked Sendable {
     public init(storage: StorageManager = .shared, session: URLSession = .shared) {
         self.storage = storage
         self.session = session
-        self.dataCache.countLimit = 180
-        self.dataCache.totalCostLimit = 36 * 1024 * 1024
+        self.dataCache.countLimit = 450
+        self.dataCache.totalCostLimit = 64 * 1024 * 1024
         #if canImport(CoreGraphics)
-        self.cgImageCache.countLimit = 80
-        self.cgImageCache.totalCostLimit = 56 * 1024 * 1024
-        self.trackTierImageCache.countLimit = 140
-        self.trackTierImageCache.totalCostLimit = 40 * 1024 * 1024
+        self.cgImageCache.countLimit = 1200
+        self.cgImageCache.totalCostLimit = 96 * 1024 * 1024
+        self.trackTierImageCache.countLimit = 2500
+        self.trackTierImageCache.totalCostLimit = 120 * 1024 * 1024
         #endif
         let albumsDir = self.albumsCoversDirectory
         _ = self.thumbsCoversDirectory
@@ -378,9 +379,8 @@ public final class ArtworkService: @unchecked Sendable {
                 continue
             }
 
-            let isYouTubeHost = (url.host?.contains("ytimg.com") == true) || track.sourceKind == .youtube
             let finalData: Data = {
-                if isYouTubeHost, let cropped = Self.cropYouTubeThumbnailToSquare(rawData) {
+                if let cropped = Self.cropYouTubeThumbnailToSquare(rawData) {
                     return cropped
                 }
                 return rawData
@@ -447,7 +447,60 @@ public final class ArtworkService: @unchecked Sendable {
         trackTierImageCache.setObject(image, forKey: cacheKey, cost: cost)
     }
 
-    /// Декодирует изображение: для `.originalSource` сохраняет 100% исходное разрешение пиксель-в-пиксель без даунскейла!
+    /// Мгновенное синхронное разрешение обложки из RAM или локального файла на диске (0 мс задержки при скролле списка).
+    public func syncResolveImmediateImage(
+        track: Track?,
+        localPath: String?,
+        key: String,
+        tier: ArtworkSizeTier
+    ) -> CGImage? {
+        if let mem = memoryCachedImage(forKey: key, tier: tier) {
+            return mem
+        }
+        // Для миниатюр списков и сеток декодируем локальный файл сразу в первого кадра без ожидания async Task
+        guard tier == .listThumbnail || tier == .albumGrid else {
+            return nil
+        }
+        if let lp = localPath, !lp.isEmpty, isValidImageFile(atPath: lp) {
+            if let cg = loadCGImage(from: URL(fileURLWithPath: lp), tier: tier) {
+                storeMemoryCachedImage(cg, forKey: key, tier: tier)
+                return cg
+            }
+        }
+        if let tr = track,
+           let syncHit = resolveLocalCoverURLSync(for: tr, allowEmbeddedExtraction: false),
+           let cg = loadCGImage(from: syncHit.url, tier: tier) {
+            storeMemoryCachedImage(cg, forKey: key, tier: tier)
+            return cg
+        }
+        return nil
+    }
+
+    /// Обрезает любое неквадратное `CGImage` строго по центру до квадрата `1:1` (`width == height`),
+    /// а для 4:3 YouTube-превью с чёрными полосами сверху и снизу убирает полосы (`side = min(h, floor(w * 9 / 16))`).
+    public static func cropCGImageToSquareIfNeeded(_ cgImage: CGImage) -> CGImage {
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0, width != height else {
+            return cgImage
+        }
+        let aspect = Double(width) / Double(height)
+        // Если это стандартное превью 4:3 YouTube (например, 480x360 hqdefault.jpg с чёрными полосами сверху/снизу),
+        // вырезаем центральный квадрат из 16:9 рабочей зоны без чёрных полос
+        let isFourByThreeLetterbox = abs(aspect - (4.0 / 3.0)) < 0.04 && width >= 320
+        let side: Int
+        if isFourByThreeLetterbox {
+            side = max(1, min(height, Int(floor(Double(width) * 9.0 / 16.0))))
+        } else {
+            side = max(1, min(width, height))
+        }
+        let cropX = max(0, (width - side) / 2)
+        let cropY = max(0, (height - side) / 2)
+        let cropRect = CGRect(x: cropX, y: cropY, width: side, height: side)
+        return cgImage.cropping(to: cropRect) ?? cgImage
+    }
+
+    /// Декодирует изображение и гарантирует строгий квадрат 1:1 (`width == height`), чтобы обложки никогда не вылезали за пределы!
     public func loadCGImage(from fileURL: URL, tier: ArtworkSizeTier = .albumGrid) -> CGImage? {
         let cacheKey = "\(fileURL.path)|\(tier.rawValue)" as NSString
         if let cached = cgImageCache.object(forKey: cacheKey) {
@@ -478,10 +531,11 @@ public final class ArtworkService: @unchecked Sendable {
                 ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
         }
 
-        guard let thumb = decoded else {
+        guard let rawThumb = decoded else {
             return nil
         }
 
+        let thumb = Self.cropCGImageToSquareIfNeeded(rawThumb)
         let cost = max(1024, thumb.width * thumb.height * 4)
         cgImageCache.setObject(thumb, forKey: cacheKey, cost: cost)
         recordArtworkLoaded()
@@ -639,6 +693,57 @@ public final class ArtworkService: @unchecked Sendable {
         let finalData = (isYT ? Self.cropYouTubeThumbnailToSquare(rawData) : nil) ?? rawData
         try? finalData.write(to: targetURL, options: .atomic)
         return isValidImageFile(atPath: targetURL.path) ? targetURL : nil
+    }
+
+    /// Фоновый прогрев 1:1 миниатюр (`.listThumbnail`) для всей медиатеки, чтобы при прокрутке списка треков вниз
+    /// обложки уже находились в памяти `trackTierImageCache` и отображались мгновенно без подгрузки на глазах.
+    public func prewarmLibraryListThumbnails(tracks: [Track], customAlbumCovers: [String: String] = [:]) {
+        libraryPrewarmTask?.cancel()
+        guard !tracks.isEmpty else { return }
+
+        libraryPrewarmTask = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            // Проход 1: мгновенное декодирование уже лежащих на диске обложек в RAM-кеш
+            for track in tracks {
+                if Task.isCancelled { return }
+                #if canImport(CoreGraphics)
+                if self.memoryCachedImage(forKey: track.id, tier: .listThumbnail) != nil {
+                    continue
+                }
+                if let customPath = customAlbumCovers[track.album],
+                   !customPath.isEmpty,
+                   self.isValidImageFile(atPath: customPath),
+                   let cg = self.loadCGImage(from: URL(fileURLWithPath: customPath), tier: .listThumbnail) {
+                    self.storeMemoryCachedImage(cg, forKey: track.id, tier: .listThumbnail)
+                    continue
+                }
+                if let syncHit = self.resolveLocalCoverURLSync(for: track, customAlbumCovers: customAlbumCovers, allowEmbeddedExtraction: false),
+                   let cg = self.loadCGImage(from: syncHit.url, tier: .listThumbnail) {
+                    self.storeMemoryCachedImage(cg, forKey: track.id, tier: .listThumbnail)
+                }
+                #endif
+            }
+
+            // Проход 2: фоновая подкачка недостающих миниатюр (Telegram thumb / YouTube cover / встроенные во FLAC)
+            var fetchedCount = 0
+            for track in tracks {
+                if Task.isCancelled { return }
+                #if canImport(CoreGraphics)
+                if self.memoryCachedImage(forKey: track.id, tier: .listThumbnail) != nil {
+                    continue
+                }
+                if let resolved = await self.resolveArtwork(for: track, customAlbumCovers: customAlbumCovers),
+                   let url = resolved.fileURL,
+                   let cg = self.loadCGImage(from: url, tier: .listThumbnail) {
+                    self.storeMemoryCachedImage(cg, forKey: track.id, tier: .listThumbnail)
+                    fetchedCount += 1
+                    if fetchedCount % 4 == 0 {
+                        try? await Task.sleep(nanoseconds: 25_000_000)
+                    }
+                }
+                #endif
+            }
+        }
     }
 
     /// Мягкая фоновая предзагрузка обложек представителей всех артистов (ограниченная 2 потоками без нагрева CPU),

@@ -187,7 +187,12 @@ public struct HarmonoidMeshView: View {
 
             let norm = blob.color.normalizedDouble
             let center = CGPoint(x: blob.x, y: blob.y)
-            let gradient = Gradient(stops: [
+            let gradient = Gradient(stops: useMobileMotionScale ? [
+                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(1.0), location: 0.0),
+                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.64), location: 0.36),
+                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.18), location: 0.72),
+                .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.0), location: 1.0)
+            ] : [
                 .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.95), location: 0.0),
                 .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.45), location: 0.45),
                 .init(color: Color(red: norm.r, green: norm.g, blue: norm.b).opacity(0.0), location: 1.0)
@@ -210,10 +215,13 @@ public struct HarmonoidMeshView: View {
             )
         }
 
-        // 3. Canvas 12% darkening: rgba(0, 0, 0, 0.12)
+        // 3. Canvas darkening
+        let darkAlpha = useMobileMotionScale
+            ? HarmonoidMeshEngine.canvasDarkeningAlpha * 0.55
+            : HarmonoidMeshEngine.canvasDarkeningAlpha
         context.fill(
             Path(fullRect),
-            with: .color(Color.black.opacity(HarmonoidMeshEngine.canvasDarkeningAlpha))
+            with: .color(Color.black.opacity(darkAlpha))
         )
 
         // 4. Desktop Now Playing vignette
@@ -232,10 +240,13 @@ public struct HarmonoidMeshView: View {
             )
         )
 
-        // 5. Top ambient overlay: rgba(0, 0, 0, 0.18)
+        // 5. Top ambient overlay
+        let ambAlpha = useMobileMotionScale
+            ? HarmonoidMeshEngine.ambientOverlayAlpha * 0.45
+            : HarmonoidMeshEngine.ambientOverlayAlpha
         context.fill(
             Path(fullRect),
-            with: .color(Color.black.opacity(HarmonoidMeshEngine.ambientOverlayAlpha))
+            with: .color(Color.black.opacity(ambAlpha))
         )
     }
 }

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Компактная плавающая карточка очереди воспроизведения на 4 трека для полноэкранного плеера (`FullScreenPlayerView`):
-/// - Располагается в верхней части над названием трека и подписью плейлиста/альбома, никогда их не загораживая
+/// - Располагается в нижней половине экрана ниже названия трека и подписи плейлиста/альбома, перекрывая нижние контролы плеера
 /// - Вмещает ровно 4 трека по высоте и сразу прокручивается пальцем вверх/вниз без раскрытия на весь экран
 public struct CompactPlayerQueueOverlayView: View {
     @ObservedObject var appState: BebranoidAppState
@@ -212,7 +212,7 @@ public struct QueueSheetView: View {
     }
 
     public var body: some View {
-        ZStack {
+        ZStack(alignment: .bottom) {
             Color.black.opacity(0.24)
                 .ignoresSafeArea()
                 .onTapGesture {
@@ -221,13 +221,14 @@ public struct QueueSheetView: View {
 
             CompactPlayerQueueOverlayView(appState: appState)
                 .padding(.horizontal, 18)
+                .padding(.bottom, 18)
         }
         .presentationBackground(.clear)
     }
 }
 
 /// Всплывающее полупрозрачное окно «Свойства трека» (`src/components/TrackInfoModal.jsx` 1:1) в эстетике Apple Liquid Glass:
-/// не скрывает задний фон (оставляет его видимым) и содержит дату выгрузки трека и переход к сообщению в Telegram.
+/// открывается в нижней половине экрана (не перекрывая обложку сверху), оставляет задний фон видимым и содержит дату выгрузки трека и переход к сообщению в Telegram / видео на YouTube.
 public struct TrackInfoSheetView: View {
     public let track: Track
     public let formatInfo: AudioFormatInfo?
@@ -245,17 +246,23 @@ public struct TrackInfoSheetView: View {
         let badge = resolvedFormat.computeQualityBadge()
         let isLossless = (badge.tier == .hiRes || badge.tier == .lossless)
         let canOpenTG = TrackMetadataActions.canJumpToTelegram(track)
+        let canOpenYT = TrackMetadataActions.canJumpToYouTube(track)
 
-        ZStack {
-            // Полупрозрачная дымка, сквозь которую полностью виден задний фон приложения
-            Color.black.opacity(0.26)
+        ZStack(alignment: .bottom) {
+            // Полупрозрачная дымка, сквозь которую полностью виден задний фон приложения и обложка сверху
+            Color.black.opacity(0.24)
                 .ignoresSafeArea()
                 .onTapGesture {
                     HapticsManager.shared.lightTap()
                     dismiss()
                 }
 
-            VStack(spacing: 14) {
+            VStack(spacing: 12) {
+                Capsule()
+                    .fill(Color.white.opacity(0.28))
+                    .frame(width: 36, height: 4.5)
+                    .padding(.top, -4)
+
                 // Шапка окна «Свойства трека»
                 HStack {
                     Text("Свойства трека")
@@ -276,37 +283,37 @@ public struct TrackInfoSheetView: View {
                 }
 
                 // Карточка трека с обложкой и бейджем качества
-                HStack(spacing: 13) {
+                HStack(spacing: 12) {
                     ArtworkThumbnailView(
                         track: track,
                         localPath: track.coverPath,
                         remoteURL: track.remoteArtworkURL,
                         fallbackSeed: "\(track.album)|\(track.artist)",
-                        cornerRadius: 14,
+                        cornerRadius: 12,
                         sizeTier: .albumGrid
                     )
-                    .frame(width: 68, height: 68)
-                    .shadow(color: .black.opacity(0.32), radius: 10, x: 0, y: 5)
+                    .frame(width: 56, height: 56)
+                    .shadow(color: .black.opacity(0.32), radius: 8, x: 0, y: 4)
 
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 2.5) {
                         HStack(spacing: 5) {
                             Image(systemName: isLossless ? "waveform.badge.checkmark" : "waveform")
-                                .font(.system(size: 10, weight: .bold))
-                            Text(isLossless ? "Lossless Audio (Без потерь)" : "Сжатый звук (Lossy)")
-                                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text(badge.tier == .hiRes ? "Hi-Res Lossless" : (isLossless ? "Lossless Audio" : "Сжатый звук (Lossy)"))
+                                .font(.system(size: 9.5, weight: .heavy, design: .rounded))
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
                         .background(accentColor.opacity(0.22), in: Capsule())
                         .foregroundStyle(accentColor)
 
                         Text(track.title)
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
-                            .lineLimit(2)
+                            .lineLimit(1)
 
                         Text("\(track.artist) • \(track.album)")
-                            .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.70))
                             .lineLimit(1)
                     }
@@ -317,7 +324,7 @@ public struct TrackInfoSheetView: View {
                     .overlay(Color.white.opacity(0.12))
 
                 // Сетка параметров 1:1 как в ПК-версии (`src/components/TrackInfoModal.jsx`)
-                VStack(spacing: 8) {
+                VStack(spacing: 6.5) {
                     infoRow("Формат", resolvedFormat.codec)
                     infoRow(
                         "Разрядность",
@@ -347,40 +354,73 @@ public struct TrackInfoSheetView: View {
                     infoRow("Дата выгрузки", TrackMetadataActions.formatUploadDate(track.dateAdded))
                 }
 
-                // Кнопка перехода к сообщению в Telegram (как в ПК-версии `TrackInfoModal.jsx`)
-                if canOpenTG {
-                    Button {
-                        HapticsManager.shared.mediumImpact()
-                        TrackMetadataActions.openInTelegram(track)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "paperplane.fill")
-                                .font(.system(size: 13, weight: .bold))
-                            Text("Показать в Telegram")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 11, weight: .bold))
-                        }
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .background(
-                            Capsule()
-                                .fill(Color(red: 0.20, green: 0.58, blue: 0.98).opacity(0.32))
-                                .overlay(
+                // Кнопки перехода к сообщению в Telegram и/или ролику на YouTube
+                if canOpenTG || canOpenYT {
+                    HStack(spacing: 8) {
+                        if canOpenTG {
+                            Button {
+                                HapticsManager.shared.mediumImpact()
+                                TrackMetadataActions.openInTelegram(track)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "paperplane.fill")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                    Text("Показать в Telegram")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10.5)
+                                .background(
                                     Capsule()
-                                        .strokeBorder(Color(red: 0.35, green: 0.72, blue: 1.0).opacity(0.65), lineWidth: 0.8)
+                                        .fill(Color(red: 0.20, green: 0.58, blue: 0.98).opacity(0.32))
+                                        .overlay(
+                                            Capsule()
+                                                .strokeBorder(Color(red: 0.35, green: 0.72, blue: 1.0).opacity(0.65), lineWidth: 0.8)
+                                        )
                                 )
-                        )
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if canOpenYT {
+                            Button {
+                                HapticsManager.shared.mediumImpact()
+                                TrackMetadataActions.openInYouTube(track)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "play.rectangle.fill")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                    Text("Открыть на YouTube")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10.5)
+                                .background(
+                                    Capsule()
+                                        .fill(Color(red: 0.96, green: 0.20, blue: 0.24).opacity(0.32))
+                                        .overlay(
+                                            Capsule()
+                                                .strokeBorder(Color(red: 1.0, green: 0.36, blue: 0.40).opacity(0.65), lineWidth: 0.8)
+                                        )
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .buttonStyle(.plain)
                     .padding(.top, 2)
                 }
             }
-            .padding(20)
-            .frame(maxWidth: 360)
+            .padding(18)
+            .frame(maxWidth: 376)
             .liquidGlassCard(cornerRadius: 28, tint: accentColor, tintOpacity: 0.12, isInteractive: false)
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 18)
         }
         .presentationBackground(.clear)
     }

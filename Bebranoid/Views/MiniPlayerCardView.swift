@@ -42,22 +42,7 @@ public struct MiniPlayerCardView: View {
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
 
-                            if fxMode != .normal {
-                                let fxTint = FXRoseStyle.tintColor(for: fxMode, fallbackAccent: appState.accentSwiftUIColor)
-                                HStack(spacing: 3) {
-                                    FXRoseBadgeIcon(mode: fxMode, size: 11)
-                                    Text(fxMode == .slowed || fxMode == .slowedReverb ? "Slowed" : "Speed Up")
-                                        .font(.system(size: 9, weight: .heavy, design: .rounded))
-                                        .foregroundStyle(fxTint)
-                                }
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(fxTint.opacity(0.18), in: Capsule())
-                                .overlay(
-                                    Capsule()
-                                        .strokeBorder(fxTint.opacity(0.38), lineWidth: 0.5)
-                                )
-                            } else if let pct = downloadPct {
+                            if let pct = downloadPct {
                                 Text("\(pct)%")
                                     .font(.system(size: 10, weight: .heavy, design: .monospaced))
                                     .padding(.horizontal, 6)
@@ -67,13 +52,18 @@ public struct MiniPlayerCardView: View {
                             } else {
                                 let badge = appState.currentQualityBadge
                                 if badge.tier == .hiRes || badge.tier == .lossless {
-                                    Text(badge.tier == .hiRes ? "Hi-Res" : "Lossless")
-                                        .font(.system(size: 9, weight: .heavy, design: .rounded))
-                                        .padding(.horizontal, 5)
+                                    Text(badge.tier == .hiRes ? "Hi-Res Lossless" : "Lossless")
+                                        .font(.system(size: 8.5, weight: .heavy, design: .rounded))
+                                        .padding(.horizontal, 5.5)
                                         .padding(.vertical, 2)
-                                        .background(appState.accentSwiftUIColor.opacity(0.22), in: Capsule())
+                                        .background(appState.accentSwiftUIColor.opacity(0.20), in: Capsule())
                                         .foregroundStyle(appState.accentSwiftUIColor)
+                                        .fixedSize()
                                 }
+                            }
+
+                            if fxMode != .normal {
+                                FXRoseBadgeIcon(mode: fxMode, size: 12)
                             }
                         }
 
@@ -96,24 +86,34 @@ public struct MiniPlayerCardView: View {
                         appState.toggleFavorite(track: track)
                     } label: {
                         Image(systemName: appState.isFavorite(track) ? "heart.fill" : "heart")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(appState.isFavorite(track) ? Color(red: 1.0, green: 0.34, blue: 0.52) : .white.opacity(0.78))
-                            .frame(width: 34, height: 34)
+                            .frame(width: 30, height: 34)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        appState.skipToPrevious()
+                    } label: {
+                        Image(systemName: "backward.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .frame(width: 30, height: 34)
                     }
                     .buttonStyle(.plain)
 
                     if downloadPct != nil {
                         ProgressView()
                             .tint(dlColor)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 34, height: 34)
                     } else {
                         Button {
                             appState.togglePlayPause()
                         } label: {
                             Image(systemName: appState.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 19, weight: .bold))
+                                .font(.system(size: 18, weight: .bold))
                                 .foregroundStyle(.white)
-                                .frame(width: 36, height: 36)
+                                .frame(width: 34, height: 34)
                         }
                         .buttonStyle(.plain)
                     }
@@ -122,9 +122,9 @@ public struct MiniPlayerCardView: View {
                         appState.skipToNext(isManualUserAction: true)
                     } label: {
                         Image(systemName: "forward.fill")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.88))
-                            .frame(width: 34, height: 34)
+                            .frame(width: 30, height: 34)
                     }
                     .buttonStyle(.plain)
                 }
