@@ -257,13 +257,13 @@ final class YouTubeServiceParsingTests: XCTestCase {
     }
 
     func testProgressiveMergePrependsNewlyAddedYouTubeTracksAndFixesOrder() {
-        let old1 = Track(id: "yt_COX6kiuRvFc", filename: "youtube-COX6kiuRvFc.m4a", title: "Ты моя...", artist: "Artist", album: "PL", duration: 180, sourceKind: .youtube, youtubeVideoId: "COX6kiuRvFc", playlistIndex: 1)
-        let old2 = Track(id: "yt_fbrz9lifcPI", filename: "youtube-fbrz9lifcPI.m4a", title: "Hafanana", artist: "Afric Simone", album: "PL", duration: 200, sourceKind: .youtube, youtubeVideoId: "fbrz9lifcPI", playlistIndex: 2)
-        let old3 = Track(id: "yt_4Jmz-OWycyk", filename: "youtube-4Jmz-OWycyk.m4a", title: "#Сумасшедшая", artist: "Алексей Воробьёв", album: "PL", duration: 195, sourceKind: .youtube, youtubeVideoId: "4Jmz-OWycyk", playlistIndex: 3)
+        let old1 = Track.makeYouTubeTrack(videoId: "COX6kiuRvFc", title: "Ты моя...", artist: "Artist", album: "PL", duration: 180)
+        let old2 = Track.makeYouTubeTrack(videoId: "fbrz9lifcPI", title: "Hafanana", artist: "Afric Simone", album: "PL", duration: 200)
+        let old3 = Track.makeYouTubeTrack(videoId: "4Jmz-OWycyk", title: "#Сумасшедшая", artist: "Алексей Воробьёв", album: "PL", duration: 195)
 
         // Пользователь добавил 2 новые песни в плейлист YouTube («Рыбка» и «Good Luck, Babe!»)
-        let new1 = Track(id: "yt_4wYcbNqgwYA", filename: "youtube-4wYcbNqgwYA.m4a", title: "Рыбка", artist: "Artist", album: "PL", duration: 170, sourceKind: .youtube, youtubeVideoId: "4wYcbNqgwYA", playlistIndex: 1)
-        let new2 = Track(id: "yt_VZ-oGLluGAc", filename: "youtube-VZ-oGLluGAc.m4a", title: "Good Luck, Babe!", artist: "Chappell Roan", album: "PL", duration: 218, sourceKind: .youtube, youtubeVideoId: "VZ-oGLluGAc", playlistIndex: 2)
+        let new1 = Track.makeYouTubeTrack(videoId: "4wYcbNqgwYA", title: "Рыбка", artist: "Artist", album: "PL", duration: 170)
+        let new2 = Track.makeYouTubeTrack(videoId: "VZ-oGLluGAc", title: "Good Luck, Babe!", artist: "Chappell Roan", album: "PL", duration: 218)
 
         let merged = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
             existingTracks: [old2, old1, old3], // даже если раньше порядок был сбит

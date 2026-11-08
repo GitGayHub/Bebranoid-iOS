@@ -2102,13 +2102,13 @@ public final class BebranoidAppState: ObservableObject {
 
         var mergedTelegram = Array(byId.values)
         mergedTelegram.sort { a, b in
-            let dateA = a.addedAt?.timeIntervalSince1970 ?? 0
-            let dateB = b.addedAt?.timeIntervalSince1970 ?? 0
+            let dateA = a.dateAdded.timeIntervalSince1970
+            let dateB = b.dateAdded.timeIntervalSince1970
             if abs(dateA - dateB) > 0.5 {
                 return dateA > dateB
             }
-            let msgA = Int64(a.messageId ?? "") ?? 0
-            let msgB = Int64(b.messageId ?? "") ?? 0
+            let msgA = a.messageId ?? 0
+            let msgB = b.messageId ?? 0
             if msgA != msgB {
                 return msgA > msgB
             }
