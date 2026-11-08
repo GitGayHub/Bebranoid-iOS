@@ -22,7 +22,7 @@ public struct PlaylistsGridView: View {
     }
 
     public var body: some View {
-        NavigationStack {
+        NavigationStack(path: $appState.navigationPlaylistPath) {
             ZStack {
                 Color.black.opacity(0.28).ignoresSafeArea()
 
@@ -97,7 +97,7 @@ public struct PlaylistsGridView: View {
 
                         LazyVGrid(columns: columns, spacing: 18) {
                             ForEach(appState.allPlaylistsWithRecent30) { playlist in
-                                NavigationLink(value: playlist) {
+                                NavigationLink(value: playlist.id) {
                                     PlaylistGridCard(playlist: playlist, appState: appState)
                                 }
                                 .buttonStyle(.plain)
@@ -113,8 +113,10 @@ public struct PlaylistsGridView: View {
                 }
             }
             .navigationTitle("Плейлисты")
-            .navigationDestination(for: Playlist.self) { playlist in
-                PlaylistDetailView(playlist: playlist, appState: appState)
+            .navigationDestination(for: String.self) { playlistId in
+                if let pl = appState.allPlaylistsWithRecent30.first(where: { $0.id == playlistId }) {
+                    PlaylistDetailView(playlist: pl, appState: appState)
+                }
             }
             .sheet(isPresented: $isYouTubeImportPresented) {
                 YouTubeImportSheet(appState: appState)
@@ -258,7 +260,10 @@ public struct PlaylistDetailView: View {
     }
 
     private var livePlaylist: Playlist {
-        appState.allPlaylistsWithRecent30.first(where: { $0.id == playlist.id }) ?? playlist
+        appState.allPlaylistsWithRecent30.first(where: {
+            $0.id == playlist.id ||
+            ($0.youtubePlaylistId != nil && $0.youtubePlaylistId == playlist.youtubePlaylistId)
+        }) ?? playlist
     }
 
     private var currentPreference: PlaylistShufflePreference {
@@ -443,8 +448,38 @@ public struct PlaylistDetailView: View {
                 appState.haptics.softSelection()
                 await appState.refreshPlaylist(livePlaylist)
             }
+            .task(id: livePlaylist.id) {
+                guard livePlaylist.isYouTubePlaylist else { return }
+                if let last = livePlaylist.lastSyncedAt, Date().timeIntervalSince(last) < 20 {
+                    return
+                }
+                await appState.refreshPlaylist(livePlaylist)
+            }
         }
         .navigationTitle(livePlaylist.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    appState.haptics.lightTap()
+                    Task {
+                        isSyncingYouTube = true
+                        await appState.refreshPlaylist(livePlaylist)
+                        isSyncingYouTube = false
+                    }
+                } label: {
+                    if isSyncingYouTube || appState.isSyncingYouTubePlaylists || appState.isSyncingTelegramLibrary {
+                        ProgressView()
+                            .tint(appState.accentSwiftUIColor)
+                            .scaleEffect(0.8)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .disabled(isSyncingYouTube || appState.isSyncingYouTubePlaylists || appState.isSyncingTelegramLibrary)
+            }
+        }
     }
 
     private var youtubeShufflePreferencesCard: some View {

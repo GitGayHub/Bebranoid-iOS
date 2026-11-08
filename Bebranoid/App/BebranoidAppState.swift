@@ -148,6 +148,7 @@ public final class BebranoidAppState: ObservableObject {
 
     // MARK: - Navigation & Modal Presentation State
     @Published public var selectedTab: Int = 0
+    @Published public var navigationPlaylistPath: [String] = []
     @Published public var isFullScreenPlayerPresented: Bool = false
     @Published public var isLyricsScreenPresented: Bool = false
     @Published public var isQueueSheetPresented: Bool = false
@@ -162,6 +163,7 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var youtubeSyncProgressText: String = ""
     @Published public var isVerifyingTelegramAccess: Bool = false
     @Published public var lastTelegramAccessReport: TelegramLiveAccessReport? = nil
+    private var lastForegroundAutoSyncTime: TimeInterval = 0
     #if DEBUG
     @Published public var demoDirectScreenOverride: String? = nil
     @Published public var demoFixedMeshTime: Double? = nil
@@ -192,6 +194,11 @@ public final class BebranoidAppState: ObservableObject {
         #if DEBUG
         if UITestingDemoSeeder.isDemoModeActive {
             UITestingDemoSeeder.applyIfNeeded(to: self)
+            return
+        }
+        if UITestingDemoSeeder.isLiveEmulatorVerifyModeActive {
+            ensureDefaultYouTubePlaylistRegistered()
+            UITestingDemoSeeder.runLiveEmulatorVerification(on: self)
             return
         }
         #endif
@@ -374,6 +381,19 @@ public final class BebranoidAppState: ObservableObject {
                 self.mergeIncomingTelegramTracksIntoLibrary([newTrack])
             }
             .store(in: &cancellables)
+
+        #if canImport(UIKit) && os(iOS)
+        NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                guard now - self.lastForegroundAutoSyncTime > 15.0 else { return }
+                self.lastForegroundAutoSyncTime = now
+                Task { await self.refreshFullLibraryAndYouTubePlaylists() }
+            }
+            .store(in: &cancellables)
+        #endif
     }
 
     public func effectiveAccentRGB(extraProgress: Double = 0.0) -> MeshRGB {
@@ -1630,6 +1650,7 @@ public final class BebranoidAppState: ObservableObject {
     /// начинает с самых последних добавленных треков (1-я страница мгновенно), а при неполном плейлисте догружает все 2500+ треков целиком.
     public func refreshPlaylist(_ playlist: Playlist) async {
         if playlist.isYouTubePlaylist {
+            guard !isSyncingYouTubePlaylists else { return }
             let source = playlist.sourceUrl ?? (playlist.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
             guard !source.isEmpty else { return }
             isSyncingYouTubePlaylists = true
@@ -1787,6 +1808,9 @@ public final class BebranoidAppState: ObservableObject {
                             self.libraryState.playlists[idx].kind = .youtube
                             self.libraryState.playlists[idx].youtubePlaylistId = partial.playlistId
                             self.libraryState.playlists[idx].sourceUrl = partial.canonicalURL
+                            if let thumb = partial.thumbnailURL, !thumb.isEmpty {
+                                self.libraryState.playlists[idx].remoteArtworkURL = thumb
+                            }
                             self.libraryState.playlists[idx].tracksSnapshot = merged.tracks
                             self.libraryState.playlists[idx].trackFilenames = mergedKeys
                             self.libraryState.playlists[idx].lastSyncedAt = Date()
@@ -1837,6 +1861,9 @@ public final class BebranoidAppState: ObservableObject {
             libraryState.playlists[existingIdx].kind = .youtube
             libraryState.playlists[existingIdx].youtubePlaylistId = result.playlistId
             libraryState.playlists[existingIdx].sourceUrl = result.canonicalURL
+            if let thumb = result.thumbnailURL, !thumb.isEmpty {
+                libraryState.playlists[existingIdx].remoteArtworkURL = thumb
+            }
             libraryState.playlists[existingIdx].tracksSnapshot = updatedTracks
             libraryState.playlists[existingIdx].trackFilenames = updatedTracks.map { $0.cacheKey }
             libraryState.playlists[existingIdx].lastSyncedAt = Date()

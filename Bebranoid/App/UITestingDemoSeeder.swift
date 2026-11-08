@@ -20,6 +20,19 @@ public enum UITestingDemoSeeder {
         CommandLine.arguments.contains("--ui-testing-demo")
     }
 
+    public static var isLiveEmulatorVerifyModeActive: Bool {
+        CommandLine.arguments.contains("--verify-live-emulator")
+    }
+
+    public static var requestedLiveStep: String? {
+        for arg in CommandLine.arguments {
+            if arg.hasPrefix("--live-step=") {
+                return String(arg.dropFirst("--live-step=".count)).lowercased()
+            }
+        }
+        return nil
+    }
+
     public static var requestedScreen: String? {
         for arg in CommandLine.arguments {
             if arg.hasPrefix("--screen=") {
@@ -627,6 +640,213 @@ public enum UITestingDemoSeeder {
             UInt8((v >> 16) & 0xFF),
             UInt8((v >> 24) & 0xFF)
         ]
+    }
+
+    // MARK: - Live Emulator Verification (Real YouTube Playlist + Dynamic Telegram Update + Idle Pause Guard)
+
+    public static func runLiveEmulatorVerification(on appState: BebranoidAppState) {
+        let step = requestedLiveStep ?? "youtube-after"
+        let ytId = AppConfig.defaultPersonalYouTubePlaylistId
+        let ytURL = AppConfig.defaultPersonalYouTubePlaylistURL
+        let ytTitle = AppConfig.defaultPersonalYouTubePlaylistTitle
+        let playlistKey = "yt_\(ytId)"
+
+        // Старый снимок плейлиста до добавления на YouTube новых песен («Рыбка» и «Good Luck, Babe!»)
+        let olderYouTubeSnapshot: [Track] = [
+            Track.makeYouTubeTrack(
+                videoId: "COX6kiuRvFc",
+                title: "Ты моя...",
+                artist: "Веселые биоритмы",
+                album: ytTitle,
+                duration: 214,
+                thumbnailURL: "https://i.ytimg.com/vi/COX6kiuRvFc/hqdefault.jpg"
+            ),
+            Track.makeYouTubeTrack(
+                videoId: "fbrz9lifcPI",
+                title: "Hafanana",
+                artist: "Afric Simone",
+                album: ytTitle,
+                duration: 211,
+                thumbnailURL: "https://i.ytimg.com/vi/fbrz9lifcPI/hqdefault.jpg"
+            ),
+            Track.makeYouTubeTrack(
+                videoId: "4Jmz-OWycyk",
+                title: "#Сумасшедшая",
+                artist: "Алексей Воробьёв",
+                album: ytTitle,
+                duration: 199,
+                thumbnailURL: "https://i.ytimg.com/vi/4Jmz-OWycyk/hqdefault.jpg"
+            ),
+            Track.makeYouTubeTrack(
+                videoId: "wT0SRBm0SpU",
+                title: "ПИРАТ, ФУЛЛ ВЕРСИЯ",
+                artist: "Александр Пистолетов",
+                album: ytTitle,
+                duration: 204,
+                thumbnailURL: "https://i.ytimg.com/vi/wT0SRBm0SpU/hqdefault.jpg"
+            ),
+            Track.makeYouTubeTrack(
+                videoId: "eNqrvLZdDCQ",
+                title: "f*ck love instrumental (slowed & reverb)",
+                artist: "XXXTENTACION",
+                album: ytTitle,
+                duration: 162,
+                thumbnailURL: "https://i.ytimg.com/vi/eNqrvLZdDCQ/hqdefault.jpg"
+            )
+        ]
+
+        let storage = StorageManager.shared
+        let coverAurora = generateDemoCoverOnDisk(filename: "live_verify_aurora.jpg", theme: .emeraldAurora)
+        let coverRuby = generateDemoCoverOnDisk(filename: "live_verify_ruby.jpg", theme: .rubyCrystal)
+
+        let baseTelegramTracks: [Track] = [
+            Track(
+                id: "\(AppConfig.defaultPersonalMainChatId):5001",
+                messageId: 5001,
+                chatId: AppConfig.defaultPersonalMainChatId,
+                title: "Звезда по имени Солнце (Remastered)",
+                artist: "Кино",
+                album: "Звезда по имени Солнце",
+                year: 1989,
+                duration: 225,
+                filename: "Kino_Zvezda.flac",
+                mimeType: "audio/flac",
+                fileSize: 28_400_000,
+                dateAdded: Date(timeIntervalSinceNow: -3600),
+                coverPath: coverAurora,
+                sourceKind: .telegram
+            ),
+            Track(
+                id: "\(AppConfig.defaultPersonalMainChatId):5000",
+                messageId: 5000,
+                chatId: AppConfig.defaultPersonalMainChatId,
+                title: "Midnight City",
+                artist: "M83",
+                album: "Hurry Up, We're Dreaming",
+                year: 2011,
+                duration: 243,
+                filename: "M83_Midnight_City.flac",
+                mimeType: "audio/flac",
+                fileSize: 29_100_000,
+                dateAdded: Date(timeIntervalSinceNow: -7200),
+                coverPath: coverRuby,
+                sourceKind: .telegram
+            )
+        ]
+        for (i, t) in baseTelegramTracks.enumerated() {
+            seedPlayableAudioCacheFile(for: t, frequencyHz: 220.0 + Double(i) * 110.0, storage: storage)
+        }
+
+        appState.libraryState.selectedTelegramChatId = AppConfig.defaultPersonalMainChatId
+        appState.libraryState.selectedTelegramChatTitle = AppConfig.defaultPersonalMainChatTitle
+        appState.libraryState.selectedTelegramArchiveChatId = AppConfig.defaultPersonalArchiveChatId
+        appState.libraryState.selectedTelegramArchiveChatTitle = AppConfig.defaultPersonalArchiveChatTitle
+        appState.libraryState.tracks = baseTelegramTracks
+        appState.libraryState.playlists = [
+            Playlist(
+                id: playlistKey,
+                name: ytTitle,
+                kind: .youtube,
+                trackFilenames: olderYouTubeSnapshot.map(\.cacheKey),
+                tracksSnapshot: olderYouTubeSnapshot,
+                sourceUrl: ytURL,
+                youtubePlaylistId: ytId,
+                lastSyncedAt: (step == "youtube-before") ? Date() : nil
+            )
+        ]
+        appState.invalidateLibraryCaches()
+
+        switch step {
+        case "youtube-before":
+            appState.selectedTab = 3
+            appState.navigationPlaylistPath = [playlistKey]
+
+        case "youtube-after":
+            appState.selectedTab = 3
+            appState.navigationPlaylistPath = [playlistKey]
+            Task { @MainActor in
+                if let pl = appState.libraryState.playlists.first(where: { $0.id == playlistKey }) {
+                    await appState.refreshPlaylist(pl)
+                }
+            }
+
+        case "playlists-grid":
+            appState.selectedTab = 3
+            appState.navigationPlaylistPath = []
+            Task { @MainActor in
+                await appState.refreshAllYouTubePlaylists(allowFastIncrementalStop: true)
+            }
+
+        case "telegram-dynamic":
+            appState.selectedTab = 0
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                // Эмулируем приход нового аудиосообщения через живой обработчик TDLib updateNewMessage -> .telegramNewMessageReceived
+                let rawNewMsg = RawTelegramAudioMessage(
+                    messageId: 5009,
+                    chatId: AppConfig.defaultPersonalMainChatId,
+                    messageThreadId: nil,
+                    date: Int(Date().timeIntervalSince1970),
+                    caption: "Chappell Roan - Good Luck, Babe! (Telegram Cloud Sync)\nАльбом: AndroSend Live Update",
+                    performer: "Chappell Roan",
+                    title: "Good Luck, Babe! (Новое в Telegram Облаке)",
+                    fileName: "Chappell_Roan_Good_Luck_Babe_Live.flac",
+                    mimeType: "audio/flac",
+                    duration: 218,
+                    fileSize: 32_500_000,
+                    fileId: "5009",
+                    fileUniqueId: "uid_live_5009",
+                    thumbnailFileId: nil
+                )
+                NotificationCenter.default.post(
+                    name: .telegramNewMessageReceived,
+                    object: nil,
+                    userInfo: [
+                        "rawMessage": rawNewMsg,
+                        "chatId": AppConfig.defaultPersonalMainChatId
+                    ]
+                )
+                if let added = appState.libraryState.tracks.first(where: { $0.messageId == 5009 }) {
+                    seedPlayableAudioCacheFile(for: added, frequencyHz: 440.0, storage: storage)
+                    appState.invalidateLibraryCaches()
+                }
+                appState.statusBannerMessage = "Telegram Облако обновлено: +1 новый трек сверху"
+            }
+
+        case "idle-no-random-play":
+            appState.selectedTab = 0
+            // 1. Восстанавливаем трек в состоянии паузы (`autoPlay: false`)
+            let pausedTrack = baseTelegramTracks[0]
+            appState.queue = baseTelegramTracks
+            appState.originalQueueSource = baseTelegramTracks
+            appState.currentIndex = 0
+            appState.currentTrack = pausedTrack
+            appState.duration = pausedTrack.duration
+            appState.currentTime = 18.0
+            appState.updatePalette(for: pausedTrack)
+            Task { @MainActor in
+                let url = storage.cachedAudioFileURL(for: pausedTrack)
+                _ = await appState.audioEngine.loadAndPlay(track: pausedTrack, fileURL: url, startAt: 18.0, autoPlay: false)
+                // 2. Запускаем нескачанный трек и тут же ставим на паузу (проверка отмены фоновых задач)
+                let uncachedTrack = Track.makeYouTubeTrack(
+                    videoId: "4wYcbNqgwYA",
+                    title: "Рыбка",
+                    artist: "YouTube Track",
+                    album: ytTitle,
+                    duration: 170
+                )
+                appState.playTrack(uncachedTrack, in: [ pausedTrack, uncachedTrack ])
+                appState.togglePlayPause() // Пользователь нажал Паузу -> все фоновые загрузки обязаны отмениться!
+                // 3. Посылаем системное прерывание AVAudioSession (.began -> .ended + shouldResume)
+                appState.audioEngine.handleAudioSessionInterruption(began: true, shouldResume: false)
+                appState.audioEngine.handleAudioSessionInterruption(began: false, shouldResume: true)
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                appState.statusBannerMessage = "Пауза стабильна: isPlaying=\(appState.isPlaying), автооткрытие заблокировано"
+            }
+
+        default:
+            break
+        }
     }
 }
 #endif

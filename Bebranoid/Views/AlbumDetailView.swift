@@ -58,18 +58,53 @@ public struct AlbumDetailView: View {
                     await appState.refreshFullLibraryAndYouTubePlaylists()
                 }
             }
+            .task(id: liveAlbum.id) {
+                if let plId = liveAlbum.linkedPlaylistId,
+                   let pl = appState.libraryState.playlists.first(where: { $0.id == plId }),
+                   pl.isYouTubePlaylist {
+                    if let last = pl.lastSyncedAt, Date().timeIntervalSince(last) < 20 {
+                        return
+                    }
+                    await appState.refreshPlaylist(pl)
+                }
+            }
         }
         .navigationTitle(liveAlbum.name)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
-            #if os(iOS)
             ToolbarItem(placement: .primaryAction) {
-                EditButton()
-                    .foregroundStyle(.white)
+                HStack(spacing: 12) {
+                    Button {
+                        appState.haptics.lightTap()
+                        Task {
+                            if let plId = liveAlbum.linkedPlaylistId,
+                               let pl = appState.libraryState.playlists.first(where: { $0.id == plId }) {
+                                await appState.refreshPlaylist(pl)
+                            } else {
+                                await appState.refreshFullLibraryAndYouTubePlaylists()
+                            }
+                        }
+                    } label: {
+                        if appState.isSyncingYouTubePlaylists || appState.isSyncingTelegramLibrary {
+                            ProgressView()
+                                .tint(appState.accentSwiftUIColor)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .disabled(appState.isSyncingYouTubePlaylists || appState.isSyncingTelegramLibrary)
+
+                    #if os(iOS)
+                    EditButton()
+                        .foregroundStyle(.white)
+                    #endif
+                }
             }
-            #endif
         }
         .onChange(of: selectedPhotoItem) { _, newItem in
             guard let newItem else { return }

@@ -376,6 +376,7 @@ public final class YouTubeService: @unchecked Sendable {
         let raw = try await fetchBrowseRawJSON(extra: ["browseId": "VL" + cleanId])
         let title = Self.extractPlaylistTitle(fromRawJSON: raw) ?? "YouTube Плейлист"
         let reportedCount = Self.extractReportedVideoCount(fromRawJSON: raw)
+        let customThumb = Self.extractPlaylistThumbnailURL(fromRawJSON: raw)
         var seen = Set<String>()
         let page = Self.extractPlaylistItemsAndToken(
             fromRawText: raw,
@@ -387,7 +388,7 @@ public final class YouTubeService: @unchecked Sendable {
             playlistId: cleanId,
             title: title,
             author: nil,
-            thumbnailURL: page.tracks.first?.remoteArtworkURL,
+            thumbnailURL: customThumb ?? page.tracks.first?.remoteArtworkURL,
             tracks: page.tracks,
             canonicalURL: "https://www.youtube.com/playlist?list=\(cleanId)",
             nextContinuationToken: page.nextToken,
@@ -438,6 +439,31 @@ public final class YouTubeService: @unchecked Sendable {
            let renderer = header["pageHeaderRenderer"] as? [String: Any],
            let title = renderer["pageTitle"] as? String, !title.isEmpty {
             return title
+        }
+        return nil
+    }
+
+    static func extractPlaylistThumbnailURL(fromRawJSON raw: String) -> String? {
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sidebar = json["sidebar"] as? [String: Any],
+              let sidebarRenderer = sidebar["playlistSidebarRenderer"] as? [String: Any],
+              let items = sidebarRenderer["items"] as? [[String: Any]] else {
+            return nil
+        }
+        for item in items {
+            guard let primary = item["playlistSidebarPrimaryInfoRenderer"] as? [String: Any],
+                  let thumbRenderer = primary["thumbnailRenderer"] as? [String: Any] else {
+                continue
+            }
+            for key in ["playlistCustomThumbnailRenderer", "playlistVideoThumbnailRenderer"] {
+                if let sub = thumbRenderer[key] as? [String: Any],
+                   let thumbObj = sub["thumbnail"] as? [String: Any],
+                   let thumbs = thumbObj["thumbnails"] as? [[String: Any]],
+                   let best = thumbs.last?["url"] as? String, !best.isEmpty {
+                    return best
+                }
+            }
         }
         return nil
     }

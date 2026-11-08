@@ -26,7 +26,7 @@ public struct AlbumsGridView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 18) {
                         ForEach(appState.computedAlbums) { album in
-                            NavigationLink(value: album) {
+                            NavigationLink(value: album.id) {
                                 AlbumGridCard(album: album, appState: appState)
                             }
                             .buttonStyle(.plain)
@@ -41,8 +41,10 @@ public struct AlbumsGridView: View {
                 }
             }
             .navigationTitle("Альбомы (\(appState.computedAlbums.count))")
-            .navigationDestination(for: Album.self) { album in
-                AlbumDetailView(album: album, appState: appState)
+            .navigationDestination(for: String.self) { albumId in
+                if let alb = appState.computedAlbums.first(where: { $0.id == albumId }) {
+                    AlbumDetailView(album: alb, appState: appState)
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
