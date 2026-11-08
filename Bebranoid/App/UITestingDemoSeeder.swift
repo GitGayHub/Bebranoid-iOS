@@ -783,20 +783,21 @@ public enum UITestingDemoSeeder {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 // Эмулируем приход нового аудиосообщения через живой обработчик TDLib updateNewMessage -> .telegramNewMessageReceived
                 let rawNewMsg = RawTelegramAudioMessage(
-                    messageId: 5009,
                     chatId: AppConfig.defaultPersonalMainChatId,
+                    chatTitle: AppConfig.defaultPersonalMainChatTitle,
+                    messageId: 5009,
                     messageThreadId: nil,
-                    date: Int(Date().timeIntervalSince1970),
+                    topicTitle: nil,
                     caption: "Chappell Roan - Good Luck, Babe! (Telegram Cloud Sync)\nАльбом: AndroSend Live Update",
                     performer: "Chappell Roan",
-                    title: "Good Luck, Babe! (Новое в Telegram Облаке)",
-                    fileName: "Chappell_Roan_Good_Luck_Babe_Live.flac",
+                    audioTitle: "Good Luck, Babe! (Новое в Telegram Облаке)",
+                    filename: "Chappell_Roan_Good_Luck_Babe_Live.flac",
                     mimeType: "audio/flac",
-                    duration: 218,
                     fileSize: 32_500_000,
-                    fileId: "5009",
+                    durationSeconds: 218,
                     fileUniqueId: "uid_live_5009",
-                    thumbnailFileId: nil
+                    coverFileId: nil,
+                    date: Date()
                 )
                 NotificationCenter.default.post(
                     name: .telegramNewMessageReceived,
