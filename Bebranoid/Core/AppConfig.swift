@@ -16,6 +16,11 @@ public enum AppConfig {
     public static let defaultPersonalArchiveChatId: String = "-1003890744365"
     public static let defaultPersonalArchiveChatTitle: String = "AndroSend Архив"
 
+    /// Персональный YouTube-плейлист владельца по умолчанию (синхронизируется вживую с YouTube при запуске и обновлении)
+    public static let defaultPersonalYouTubePlaylistId: String = "PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP"
+    public static let defaultPersonalYouTubePlaylistURL: String = "https://www.youtube.com/playlist?list=PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP"
+    public static let defaultPersonalYouTubePlaylistTitle: String = "spotify mod free apk"
+
     /// Виртуальные идентификаторы альбомов и плейлистов
     public static let favoritesAlbumName: String = "Любимые"
     public static let recent30PlaylistId: String = "__recent_30__"

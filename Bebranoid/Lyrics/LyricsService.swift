@@ -796,8 +796,11 @@ public final class LyricsService: @unchecked Sendable {
         album: String?,
         targetDuration: Double
     ) async -> ResolvedOnlineLyricsCandidate? {
-        for host in ["10.239.50.145", "10.236.88.145", "192.168.147.145"] {
-            var comps = URLComponents(string: "http://\(host):18473/lyrics")
+        guard let host = await TelegramClientService.shared.resolveReachableLANBridgeHost() else {
+            return nil
+        }
+        for candidateHost in [host] {
+            var comps = URLComponents(string: "http://\(candidateHost):18473/lyrics")
             var items = [
                 URLQueryItem(name: "title", value: title),
                 URLQueryItem(name: "artist", value: artist)

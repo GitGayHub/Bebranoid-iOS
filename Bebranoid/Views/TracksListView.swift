@@ -37,7 +37,7 @@ public struct TracksListView: View {
                             .padding(.horizontal, 16)
                     }
 
-                    if appState.isSyncingTelegramLibrary {
+                    if appState.isSyncingTelegramLibrary || appState.isSyncingYouTubePlaylists {
                         telegramLiveSyncBanner
                             .padding(.horizontal, 16)
                     }
@@ -229,30 +229,28 @@ public struct TracksListView: View {
                     .accessibilityLabel(isSelectionMode ? "Отменить выбор треков" : "Выбрать треки")
                 }
 
-                // 5. Круглая иконка обновления облачной медиатеки (без текста «Обновить TG»)
-                if appState.telegramClient.isAuthorized {
-                    Button {
-                        appState.haptics.lightTap()
-                        Task { await appState.syncTelegramLibrary() }
-                    } label: {
-                        Group {
-                            if appState.isSyncingTelegramLibrary {
-                                ProgressView()
-                                    .tint(appState.accentSwiftUIColor)
-                                    .scaleEffect(0.76)
-                            } else {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(.white.opacity(0.92))
-                            }
+                // 5. Круглая иконка обновления облачной медиатеки и YouTube-плейлистов
+                Button {
+                    appState.haptics.lightTap()
+                    Task { await appState.refreshFullLibraryAndYouTubePlaylists() }
+                } label: {
+                    Group {
+                        if appState.isSyncingTelegramLibrary || appState.isSyncingYouTubePlaylists {
+                            ProgressView()
+                                .tint(appState.accentSwiftUIColor)
+                                .scaleEffect(0.76)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.92))
                         }
-                        .frame(width: 37, height: 37)
-                        .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: false)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(appState.isSyncingTelegramLibrary)
-                    .accessibilityLabel("Обновить медиатеку")
+                    .frame(width: 37, height: 37)
+                    .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: false)
                 }
+                .buttonStyle(.plain)
+                .disabled(appState.isSyncingTelegramLibrary || appState.isSyncingYouTubePlaylists)
+                .accessibilityLabel("Обновить медиатеку")
             }
             .padding(.vertical, 2)
         }
@@ -385,12 +383,18 @@ public struct TracksListView: View {
                 .scaleEffect(0.85)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Синхронизация \(appState.libraryState.selectedTelegramChatTitle)")
+                Text(appState.isSyncingTelegramLibrary
+                     ? "Синхронизация \(appState.libraryState.selectedTelegramChatTitle)"
+                     : "Синхронизация YouTube-плейлистов")
                     .font(.system(size: 12.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
-                Text(appState.telegramScanProgressText.isEmpty
-                     ? "Загрузка аудиосообщений и документов из Telegram..."
-                     : appState.telegramScanProgressText)
+                Text(appState.isSyncingTelegramLibrary
+                     ? (appState.telegramScanProgressText.isEmpty
+                        ? "Загрузка аудиосообщений и документов из Telegram..."
+                        : appState.telegramScanProgressText)
+                     : (appState.youtubeSyncProgressText.isEmpty
+                        ? "Проверка новых песен в плейлистах YouTube..."
+                        : appState.youtubeSyncProgressText))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.white.opacity(0.70))
                     .lineLimit(1)

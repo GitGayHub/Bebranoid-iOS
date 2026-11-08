@@ -297,17 +297,14 @@ public final class YouTubeService: @unchecked Sendable {
         try await fetchBrowseRawJSON(extra: ["continuation": continuationToken])
     }
 
-    /// POST `/youtubei/v1/browse` (WEB-клиент) с cookie `SOCS`, снимающим европейский consent-экран.
+    /// POST `/youtubei/v1/browse` (WEB-клиент) с автоматическим переключением между `youtubei.googleapis.com` (обходит DPI-блокировки `www.youtube.com` без VPN),
+    /// прямым `www.youtube.com` и живым прокси локального моста ПК (`10.239.50.145:18473/youtube-browse`).
     private func fetchBrowseRawJSON(extra: [String: Any]) async throws -> String {
-        guard let browseURL = URL(string: "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false") else {
-            throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
-        }
-
         var payload: [String: Any] = [
             "context": [
                 "client": [
                     "clientName": "WEB",
-                    "clientVersion": "2.20250101.00.00",
+                    "clientVersion": "2.20250201.01.00",
                     "hl": "ru",
                     "gl": "US"
                 ]
@@ -316,27 +313,62 @@ public final class YouTubeService: @unchecked Sendable {
         for (key, value) in extra {
             payload[key] = value
         }
+        let bodyData = try JSONSerialization.data(withJSONObject: payload)
 
-        var request = URLRequest(url: browseURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 20.0
-        request.httpShouldHandleCookies = false
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
-        request.setValue("SOCS=CAI; CONSENT=YES+1", forHTTPHeaderField: "Cookie")
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let directEndpoints = [
+            "https://youtubei.googleapis.com/youtubei/v1/browse?prettyPrint=false",
+            "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
+        ]
 
-        let (data, resp) = try await session.data(for: request)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let raw = String(data: data, encoding: .utf8) else {
-            throw NSError(
-                domain: "YouTubeService",
-                code: 502,
-                userInfo: [NSLocalizedDescriptionKey: "YouTube вернул ошибку при загрузке плейлиста. Проверьте подключение к интернету."]
-            )
+        for endpointStr in directEndpoints {
+            guard let browseURL = URL(string: endpointStr) else { continue }
+            var request = URLRequest(url: browseURL)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 8.0
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            request.httpShouldHandleCookies = false
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("no-cache, no-store, max-age=0", forHTTPHeaderField: "Cache-Control")
+            request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+            request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+            request.setValue("SOCS=CAI; CONSENT=YES+1", forHTTPHeaderField: "Cookie")
+            request.httpBody = bodyData
+
+            if let (data, resp) = try? await session.data(for: request),
+               let http = resp as? HTTPURLResponse,
+               http.statusCode == 200,
+               let raw = String(data: data, encoding: .utf8),
+               raw.count > 200 {
+                return raw
+            }
         }
-        return raw
+
+        // Резервный живой прокси через локальный мост ПК (`/youtube-browse`), который делает запрос к YouTube в реальном времени
+        if let host = await TelegramClientService.shared.resolveReachableLANBridgeHost(),
+           let bridgeURL = URL(string: "http://\(host):18473/youtube-browse") {
+            var request = URLRequest(url: bridgeURL)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 8.0
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            request.httpBody = bodyData
+
+            if let (data, resp) = try? await session.data(for: request),
+               let http = resp as? HTTPURLResponse,
+               http.statusCode == 200,
+               let raw = String(data: data, encoding: .utf8),
+               raw.count > 200 {
+                return raw
+            }
+        }
+
+        throw NSError(
+            domain: "YouTubeService",
+            code: 502,
+            userInfo: [NSLocalizedDescriptionKey: "YouTube вернул ошибку при загрузке плейлиста. Проверьте подключение к интернету."]
+        )
     }
 
     private func fetchPlaylistFirstPageViaBrowse(playlistId: String) async throws -> ImportedYouTubePlaylistResult {
@@ -872,54 +904,54 @@ public final class YouTubeService: @unchecked Sendable {
         preemptionToken: DownloadPreemptionToken,
         onProgress: (@Sendable (Int) -> Void)?
     ) async throws -> URL? {
-        for host in ["10.239.50.145", "10.236.88.145", "192.168.147.145"] {
-            guard let url = URL(string: "http://\(host):18473/youtube-audio?videoId=\(videoId)") else { continue }
-            var req = URLRequest(url: url)
-            req.timeoutInterval = 25.0
-            guard let (asyncBytes, response) = try? await URLSession.shared.bytes(for: req),
-                  let http = response as? HTTPURLResponse,
-                  http.statusCode == 200 else {
-                continue
-            }
-            let expectedBytes = max(http.expectedContentLength, 1_500_000)
-            let fm = FileManager.default
-            try? fm.removeItem(at: partialURL)
-            fm.createFile(atPath: partialURL.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: partialURL)
-            defer { try? handle.close() }
+        guard let host = await TelegramClientService.shared.resolveReachableLANBridgeHost(),
+              let url = URL(string: "http://\(host):18473/youtube-audio?videoId=\(videoId)") else {
+            return nil
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 25.0
+        guard let (asyncBytes, response) = try? await URLSession.shared.bytes(for: req),
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 200 else {
+            return nil
+        }
+        let expectedBytes = max(http.expectedContentLength, 1_500_000)
+        let fm = FileManager.default
+        try? fm.removeItem(at: partialURL)
+        fm.createFile(atPath: partialURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: partialURL)
+        defer { try? handle.close() }
 
-            var buffer = Data()
-            buffer.reserveCapacity(65_536)
-            var written: Int64 = 0
-            var lastPct = 3
-            onProgress?(3)
+        var buffer = Data()
+        buffer.reserveCapacity(65_536)
+        var written: Int64 = 0
+        var lastPct = 3
+        onProgress?(3)
 
-            for try await byte in asyncBytes {
-                try preemptionToken.throwIfPreempted(key: cacheKey, bytesSaved: written)
-                buffer.append(byte)
-                if buffer.count >= 65_536 {
-                    try handle.write(contentsOf: buffer)
-                    written += Int64(buffer.count)
-                    buffer.removeAll(keepingCapacity: true)
-                    let pct = min(98, max(4, Int((Double(written) / Double(expectedBytes)) * 100.0)))
-                    if pct > lastPct {
-                        lastPct = pct
-                        onProgress?(pct)
-                    }
-                }
-            }
-            if !buffer.isEmpty {
+        for try await byte in asyncBytes {
+            try preemptionToken.throwIfPreempted(key: cacheKey, bytesSaved: written)
+            buffer.append(byte)
+            if buffer.count >= 65_536 {
                 try handle.write(contentsOf: buffer)
                 written += Int64(buffer.count)
+                buffer.removeAll(keepingCapacity: true)
+                let pct = min(98, max(4, Int((Double(written) / Double(expectedBytes)) * 100.0)))
+                if pct > lastPct {
+                    lastPct = pct
+                    onProgress?(pct)
+                }
             }
-            try? handle.close()
-            guard written > 8192 else { continue }
-            try? fm.removeItem(at: destinationURL)
-            try fm.moveItem(at: partialURL, to: destinationURL)
-            onProgress?(100)
-            return destinationURL
         }
-        return nil
+        if !buffer.isEmpty {
+            try handle.write(contentsOf: buffer)
+            written += Int64(buffer.count)
+        }
+        try? handle.close()
+        guard written > 8192 else { return nil }
+        try? fm.removeItem(at: destinationURL)
+        try fm.moveItem(at: partialURL, to: destinationURL)
+        onProgress?(100)
+        return destinationURL
     }
 
     private func downloadRawStreamToFile(
@@ -1071,7 +1103,11 @@ public final class YouTubeService: @unchecked Sendable {
     }
 
     public func resolveAudioStreamCandidates(videoId: String) async throws -> [AudioStreamCandidate] {
-        guard let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false") else {
+        let playerEndpoints: [URL] = [
+            URL(string: "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false"),
+            URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+        ].compactMap { $0 }
+        guard !playerEndpoints.isEmpty else {
             throw NSError(domain: "YouTubeService", code: 400, userInfo: nil)
         }
 
@@ -1141,34 +1177,38 @@ public final class YouTubeService: @unchecked Sendable {
                 "context": ["client": clientDict]
             ]
 
-            var request = URLRequest(url: endpoint)
-            request.httpMethod = "POST"
-            request.timeoutInterval = 15.0
-            request.httpShouldHandleCookies = false
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue(profile.userAgent, forHTTPHeaderField: "User-Agent")
-            request.setValue(profile.clientId, forHTTPHeaderField: "X-Youtube-Client-Name")
-            request.setValue(profile.version, forHTTPHeaderField: "X-Youtube-Client-Version")
-            request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
-            if let vd = watchCtx.visitorData, !vd.isEmpty {
-                request.setValue(vd, forHTTPHeaderField: "X-Goog-Visitor-Id")
-            }
-            if let cookies = watchCtx.cookieHeader, !cookies.isEmpty {
-                request.setValue(cookies, forHTTPHeaderField: "Cookie")
-            }
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+            let bodyData = try JSONSerialization.data(withJSONObject: payload)
 
-            do {
-                let (data, _) = try await session.data(for: request)
-                guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    continue
+            for endpoint in playerEndpoints {
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 10.0
+                request.httpShouldHandleCookies = false
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(profile.userAgent, forHTTPHeaderField: "User-Agent")
+                request.setValue(profile.clientId, forHTTPHeaderField: "X-Youtube-Client-Name")
+                request.setValue(profile.version, forHTTPHeaderField: "X-Youtube-Client-Version")
+                request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+                if let vd = watchCtx.visitorData, !vd.isEmpty {
+                    request.setValue(vd, forHTTPHeaderField: "X-Goog-Visitor-Id")
                 }
-                let ranked = try Self.inspectPlayerResponseCandidates(root)
-                if !ranked.isEmpty {
-                    return ranked
+                if let cookies = watchCtx.cookieHeader, !cookies.isEmpty {
+                    request.setValue(cookies, forHTTPHeaderField: "Cookie")
                 }
-            } catch {
-                lastError = error
+                request.httpBody = bodyData
+
+                do {
+                    let (data, _) = try await session.data(for: request)
+                    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        continue
+                    }
+                    let ranked = try Self.inspectPlayerResponseCandidates(root)
+                    if !ranked.isEmpty {
+                        return ranked
+                    }
+                } catch {
+                    lastError = error
+                }
             }
         }
 

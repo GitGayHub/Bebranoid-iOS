@@ -119,6 +119,8 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var pendingDownloadTrack: Track? = nil
     @Published public var pendingDownloadAccentRGB: MeshRGB? = nil
     @Published public var trackDownloadAccents: [String: MeshRGB] = [:]
+    @Published public private(set) var isPlaybackIntendedByUser: Bool = false
+    private var playbackRequestGeneration: UInt64 = 0
     private var pendingPlaybackTask: Task<Void, Never>? = nil
     private var activeTrackStartTask: Task<Void, Never>? = nil
     @Published public var isBatchDownloadingSelected: Bool = false
@@ -156,6 +158,8 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var availableTelegramChats: [TelegramChatSummary] = []
     @Published public var isSyncingTelegramLibrary: Bool = false
     @Published public var telegramScanProgressText: String = ""
+    @Published public var isSyncingYouTubePlaylists: Bool = false
+    @Published public var youtubeSyncProgressText: String = ""
     @Published public var isVerifyingTelegramAccess: Bool = false
     @Published public var lastTelegramAccessReport: TelegramLiveAccessReport? = nil
     #if DEBUG
@@ -191,6 +195,7 @@ public final class BebranoidAppState: ObservableObject {
             return
         }
         #endif
+        ensureDefaultYouTubePlaylistRegistered()
         restorePreviousSession()
         if !availableLibraryTracks.isEmpty {
             artworkService.prefetchArtistCovers(artists: computedArtists)
@@ -200,6 +205,9 @@ public final class BebranoidAppState: ObservableObject {
             )
         }
         guard !TelegramClientService.isRunningUnderXCTest else { return }
+        Task { [weak self] in
+            await self?.refreshAllYouTubePlaylists(allowFastIncrementalStop: true)
+        }
         Task { [weak self] in
             guard let self else { return }
             await self.telegramClient.initializeAndRestoreSession()
@@ -223,6 +231,54 @@ public final class BebranoidAppState: ObservableObject {
             if self.telegramClient.isAuthorized {
                 await self.handleTelegramAuthorized()
             }
+        }
+    }
+
+    public func ensureDefaultYouTubePlaylistRegistered() {
+        let defaultId = AppConfig.defaultPersonalYouTubePlaylistId
+        let defaultURL = AppConfig.defaultPersonalYouTubePlaylistURL
+        let defaultTitle = AppConfig.defaultPersonalYouTubePlaylistTitle
+        var didMutate = false
+
+        for idx in libraryState.playlists.indices {
+            let pl = libraryState.playlists[idx]
+            let parsedSourceId = pl.sourceUrl.flatMap { YouTubeLinkParser.parseInput($0).playlistId }
+            let matchesDefault = pl.youtubePlaylistId == defaultId
+                || parsedSourceId == defaultId
+                || pl.id == "yt_\(defaultId)"
+                || pl.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == defaultTitle.lowercased()
+            if matchesDefault {
+                if libraryState.playlists[idx].kind != .youtube {
+                    libraryState.playlists[idx].kind = .youtube
+                    didMutate = true
+                }
+                if libraryState.playlists[idx].youtubePlaylistId != defaultId {
+                    libraryState.playlists[idx].youtubePlaylistId = defaultId
+                    didMutate = true
+                }
+                if libraryState.playlists[idx].sourceUrl == nil || libraryState.playlists[idx].sourceUrl?.isEmpty == true {
+                    libraryState.playlists[idx].sourceUrl = defaultURL
+                    didMutate = true
+                }
+            }
+        }
+
+        if !libraryState.playlists.contains(where: { $0.isYouTubePlaylist }) && !TelegramClientService.isRunningUnderXCTest {
+            let newPl = Playlist(
+                id: "yt_\(defaultId)",
+                name: defaultTitle,
+                kind: .youtube,
+                sourceUrl: defaultURL,
+                youtubePlaylistId: defaultId
+            )
+            libraryState.playlists.append(newPl)
+            libraryState.playlistShufflePreferences[newPl.id] = PlaylistShufflePreference()
+            didMutate = true
+        }
+
+        if didMutate {
+            invalidateLibraryCaches()
+            saveLibraryState()
         }
     }
 
@@ -296,6 +352,26 @@ public final class BebranoidAppState: ObservableObject {
                 guard let self,
                       let text = note.userInfo?["text"] as? String else { return }
                 self.telegramScanProgressText = text
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .telegramNewMessageReceived)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let self,
+                      let rawMsg = note.userInfo?["rawMessage"] as? RawTelegramAudioMessage,
+                      let chatId = note.userInfo?["chatId"] as? String else { return }
+                let normIncoming = AppConfig.normalizeTelegramChatId(chatId)
+                let normMain = AppConfig.normalizeTelegramChatId(self.libraryState.selectedTelegramChatId)
+                let normArchive = AppConfig.normalizeTelegramChatId(self.libraryState.selectedTelegramArchiveChatId)
+                guard !normIncoming.isEmpty,
+                      (normIncoming == normMain || normIncoming == normArchive) else { return }
+                let isArchive = (!normArchive.isEmpty && normIncoming == normArchive && normIncoming != normMain)
+                var newTrack = TelegramScanner.buildTrack(from: rawMsg, isFromArchive: isArchive)
+                if newTrack.chatId == nil || newTrack.chatId?.isEmpty == true {
+                    newTrack.chatId = isArchive ? self.libraryState.selectedTelegramArchiveChatId : self.libraryState.selectedTelegramChatId
+                }
+                self.mergeIncomingTelegramTracksIntoLibrary([newTrack])
             }
             .store(in: &cancellables)
     }
@@ -423,7 +499,7 @@ public final class BebranoidAppState: ObservableObject {
         }
 
         audioEngine.onTrackNaturallyEnded = { [weak self] in
-            guard let self else { return }
+            guard let self, self.isPlaybackIntendedByUser else { return }
             if self.repeatMode == .one {
                 self.seek(to: 0)
                 self.audioEngine.play()
@@ -439,8 +515,20 @@ public final class BebranoidAppState: ObservableObject {
 
     private func bindRemoteCommands() {
         nowPlaying.configureRemoteCommandsIfNeeded()
-        nowPlaying.onPlayCommand = { [weak self] in self?.audioEngine.play() }
-        nowPlaying.onPauseCommand = { [weak self] in self?.audioEngine.pause() }
+        nowPlaying.onPlayCommand = { [weak self] in
+            guard let self else { return }
+            self.isPlaybackIntendedByUser = true
+            if let cur = self.currentTrack, !self.cacheIndex.isCached(cur) {
+                self.startPlayingCurrentIndex(autoPlay: true, initialSeek: self.currentTime)
+            } else {
+                self.audioEngine.play()
+            }
+        }
+        nowPlaying.onPauseCommand = { [weak self] in
+            guard let self else { return }
+            self.cancelAllPendingPlaybackStarts(clearIntendedPlayback: true)
+            self.audioEngine.pause()
+        }
         nowPlaying.onTogglePlayPauseCommand = { [weak self] in self?.togglePlayPause() }
         nowPlaying.onNextTrackCommand = { [weak self] in self?.skipToNext(isManualUserAction: true) }
         nowPlaying.onPreviousTrackCommand = { [weak self] in self?.skipToPrevious() }
@@ -454,9 +542,15 @@ public final class BebranoidAppState: ObservableObject {
 
     // MARK: - Playback Actions
 
-    public func cancelPendingTrackDownload() {
+    public func cancelAllPendingPlaybackStarts(clearIntendedPlayback: Bool = true) {
+        if clearIntendedPlayback {
+            isPlaybackIntendedByUser = false
+        }
+        playbackRequestGeneration &+= 1
         pendingPlaybackTask?.cancel()
         pendingPlaybackTask = nil
+        activeTrackStartTask?.cancel()
+        activeTrackStartTask = nil
         if let pending = pendingDownloadTrack {
             trackDownloadProgress.removeValue(forKey: pending.cacheKey)
         }
@@ -464,8 +558,13 @@ public final class BebranoidAppState: ObservableObject {
         pendingDownloadAccentRGB = nil
     }
 
+    public func cancelPendingTrackDownload() {
+        cancelAllPendingPlaybackStarts(clearIntendedPlayback: false)
+    }
+
     public func playTrack(_ track: Track, in contextQueue: [Track]? = nil) {
         haptics.lightTap()
+        isPlaybackIntendedByUser = true
         let baseQueue = (contextQueue?.isEmpty == false) ? contextQueue! : (queue.isEmpty ? availableLibraryTracks : queue)
         let targetOriginalSource = baseQueue
         var targetQueue: [Track]
@@ -493,6 +592,10 @@ public final class BebranoidAppState: ObservableObject {
         // и переключаем всё приложение на новый трек и его палитру сразу после скачивания.
         if !cacheIndex.isCached(track), let activeCurrent = currentTrack, activeCurrent.id != track.id {
             pendingPlaybackTask?.cancel()
+            activeTrackStartTask?.cancel()
+            activeTrackStartTask = nil
+            playbackRequestGeneration &+= 1
+            let requestGen = playbackRequestGeneration
             pendingDownloadTrack = track
             resolveDownloadAccent(for: track)
 
@@ -503,7 +606,10 @@ public final class BebranoidAppState: ObservableObject {
                         track: track,
                         priority: .activePlayback
                     )
-                    guard !Task.isCancelled, self.pendingDownloadTrack?.id == track.id else { return }
+                    guard !Task.isCancelled,
+                          self.playbackRequestGeneration == requestGen,
+                          self.isPlaybackIntendedByUser,
+                          self.pendingDownloadTrack?.id == track.id else { return }
                     self.pendingDownloadTrack = nil
                     self.pendingDownloadAccentRGB = nil
                     self.pendingPlaybackTask = nil
@@ -518,7 +624,8 @@ public final class BebranoidAppState: ObservableObject {
                     self.updatePalette(for: track)
                     self.loadLyricsForCurrentTrack()
                     self.persistPlaybackSession()
-                    _ = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: 0, autoPlay: true)
+                    let shouldAutoPlayNow = self.isPlaybackIntendedByUser
+                    _ = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: 0, autoPlay: shouldAutoPlayNow)
                     self.updatePalette(for: track)
                     self.syncNowPlayingInfo()
                     self.prefetchUpcomingTrack()
@@ -543,11 +650,22 @@ public final class BebranoidAppState: ObservableObject {
 
     public func togglePlayPause() {
         haptics.lightTap()
+        if isPlaying || pendingPlaybackTask != nil || (activeTrackStartTask != nil && isPlaybackIntendedByUser) {
+            cancelAllPendingPlaybackStarts(clearIntendedPlayback: true)
+            audioEngine.pause()
+            syncNowPlayingInfo()
+            return
+        }
         if currentTrack == nil, let first = queue.first ?? availableLibraryTracks.first {
             playTrack(first)
             return
         }
-        audioEngine.togglePlayPause()
+        isPlaybackIntendedByUser = true
+        if let cur = currentTrack, !cacheIndex.isCached(cur) {
+            startPlayingCurrentIndex(autoPlay: true, initialSeek: currentTime)
+            return
+        }
+        audioEngine.play()
         syncNowPlayingInfo()
     }
 
@@ -563,8 +681,8 @@ public final class BebranoidAppState: ObservableObject {
         if isManualUserAction {
             haptics.lightTap()
             audioEngine.cancelActiveCrossfade()
-            cancelPendingTrackDownload()
         }
+        cancelPendingTrackDownload()
         guard !queue.isEmpty else { return }
 
         if currentIndex + 1 < queue.count {
@@ -574,6 +692,7 @@ public final class BebranoidAppState: ObservableObject {
             currentIndex = 0
             startPlayingCurrentIndex(autoPlay: true)
         } else {
+            cancelAllPendingPlaybackStarts(clearIntendedPlayback: true)
             audioEngine.pause()
             seek(to: 0)
         }
@@ -638,6 +757,7 @@ public final class BebranoidAppState: ObservableObject {
     /// Шаффл всей медиатеки с учётом исключённых альбомов (`excludedShuffleAlbums`), скрытых альбомов и лимитов YouTube-плейлистов (`playlistPreferences`)
     public func shuffleAllEligibleLibrary() {
         haptics.mediumImpact()
+        cancelPendingTrackDownload()
         var pool: [Track] = []
         var seenKeys = Set<String>()
 
@@ -711,8 +831,15 @@ public final class BebranoidAppState: ObservableObject {
         guard currentIndex >= 0, currentIndex < queue.count else { return }
         let track = queue[currentIndex]
 
+        pendingPlaybackTask?.cancel()
+        pendingPlaybackTask = nil
         activeTrackStartTask?.cancel()
+        activeTrackStartTask = nil
+        playbackRequestGeneration &+= 1
+        let requestGen = playbackRequestGeneration
+
         if autoPlay {
+            isPlaybackIntendedByUser = true
             audioEngine.stopImmediatelyForTrackSwitch()
         }
 
@@ -751,28 +878,36 @@ public final class BebranoidAppState: ObservableObject {
                 if wasAlreadyCached {
                     fileURL = self.storage.cachedAudioFileURL(for: track)
                 } else {
+                    guard autoPlay, self.isPlaybackIntendedByUser else { return }
                     fileURL = try await self.telegramClient.ensureTrackDownloaded(track: track, priority: .activePlayback)
                 }
-                guard !Task.isCancelled, self.currentTrack?.id == track.id else { return }
+                guard !Task.isCancelled,
+                      self.playbackRequestGeneration == requestGen,
+                      self.currentTrack?.id == track.id,
+                      (!autoPlay || self.isPlaybackIntendedByUser) else { return }
                 if self.pendingDownloadTrack?.id == track.id {
                     self.pendingDownloadTrack = nil
                     self.pendingDownloadAccentRGB = nil
                 }
                 self.artworkService.invalidateCachedSyncPath(forTrackId: track.id, cacheKey: track.cacheKey)
                 self.updatePalette(for: track)
-                var played = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
-                if !played && wasAlreadyCached && !Task.isCancelled && self.currentTrack?.id == track.id {
+                let shouldAutoPlayNow = autoPlay && self.isPlaybackIntendedByUser
+                var played = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: shouldAutoPlayNow)
+                if !played && wasAlreadyCached && !Task.isCancelled && self.playbackRequestGeneration == requestGen && self.currentTrack?.id == track.id && shouldAutoPlayNow {
                     try? FileManager.default.removeItem(at: fileURL)
                     self.cacheIndex.rebuildIndex()
                     self.pendingDownloadTrack = track
                     self.resolveDownloadAccent(for: track)
                     fileURL = try await self.telegramClient.ensureTrackDownloaded(track: track, priority: .activePlayback)
-                    guard !Task.isCancelled, self.currentTrack?.id == track.id else { return }
+                    guard !Task.isCancelled,
+                          self.playbackRequestGeneration == requestGen,
+                          self.currentTrack?.id == track.id,
+                          self.isPlaybackIntendedByUser else { return }
                     if self.pendingDownloadTrack?.id == track.id {
                         self.pendingDownloadTrack = nil
                         self.pendingDownloadAccentRGB = nil
                     }
-                    played = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: autoPlay)
+                    played = await self.audioEngine.loadAndPlay(track: track, fileURL: fileURL, startAt: initialSeek, autoPlay: self.isPlaybackIntendedByUser)
                 }
                 self.updatePalette(for: track)
                 self.syncNowPlayingInfo()
@@ -782,7 +917,7 @@ public final class BebranoidAppState: ObservableObject {
                     self.pendingDownloadTrack = nil
                     self.pendingDownloadAccentRGB = nil
                 }
-                if self.currentTrack?.id == track.id {
+                if !Task.isCancelled, self.playbackRequestGeneration == requestGen, self.currentTrack?.id == track.id {
                     self.statusBannerMessage = error.localizedDescription
                 }
             }
@@ -828,7 +963,7 @@ public final class BebranoidAppState: ObservableObject {
                 )
             }
         }
-        guard !cacheIndex.isCached(nextTrack) else { return }
+        guard (isPlaying || isPlaybackIntendedByUser), !cacheIndex.isCached(nextTrack) else { return }
 
         Task.detached { [weak self, telegramClient] in
             if (try? await telegramClient.ensureTrackDownloaded(track: nextTrack, priority: .nextTrackPrefetch)) != nil {
@@ -1497,6 +1632,12 @@ public final class BebranoidAppState: ObservableObject {
         if playlist.isYouTubePlaylist {
             let source = playlist.sourceUrl ?? (playlist.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
             guard !source.isEmpty else { return }
+            isSyncingYouTubePlaylists = true
+            youtubeSyncProgressText = "Обновление \(playlist.name)..."
+            defer {
+                isSyncingYouTubePlaylists = false
+                youtubeSyncProgressText = ""
+            }
             do {
                 try await importYouTubeURL(source, customTitle: playlist.name, allowFastIncrementalStop: true)
             } catch {
@@ -1507,19 +1648,39 @@ public final class BebranoidAppState: ObservableObject {
         }
     }
 
-    /// Полное обновление медиатеки и всех подключённых YouTube-плейлистов жестом свайпа сверху вниз (pull-to-refresh)
+    public func refreshAllYouTubePlaylists(allowFastIncrementalStop: Bool = true) async {
+        ensureDefaultYouTubePlaylistRegistered()
+        let ytPlaylists = libraryState.playlists.filter { $0.isYouTubePlaylist }
+        guard !ytPlaylists.isEmpty else { return }
+        isSyncingYouTubePlaylists = true
+        youtubeSyncProgressText = "Синхронизация YouTube..."
+        defer {
+            isSyncingYouTubePlaylists = false
+            youtubeSyncProgressText = ""
+        }
+        for pl in ytPlaylists {
+            let source = pl.sourceUrl ?? (pl.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
+            guard !source.isEmpty else { continue }
+            do {
+                try await importYouTubeURL(
+                    source,
+                    customTitle: pl.name,
+                    allowFastIncrementalStop: allowFastIncrementalStop
+                )
+            } catch {
+                statusBannerMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Полное обновление медиатеки и всех подключённых YouTube-плейлистов параллельно (pull-to-refresh или кнопка обновления)
     public func refreshFullLibraryAndYouTubePlaylists() async {
         haptics.softSelection()
+        async let ytTask: Void = refreshAllYouTubePlaylists(allowFastIncrementalStop: true)
         if telegramClient.isAuthorized {
             await syncTelegramLibrary()
         }
-        let ytPlaylists = libraryState.playlists.filter { $0.isYouTubePlaylist }
-        for pl in ytPlaylists {
-            let source = pl.sourceUrl ?? (pl.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
-            if !source.isEmpty {
-                try? await importYouTubeURL(source, customTitle: pl.name, allowFastIncrementalStop: true)
-            }
-        }
+        await ytTask
         invalidateLibraryCaches()
         artworkService.prefetchArtistCovers(artists: computedArtists)
     }
@@ -1578,6 +1739,19 @@ public final class BebranoidAppState: ObservableObject {
         }
     }
 
+    private func findMatchingYouTubePlaylistIndex(for playlistId: String) -> Int? {
+        guard !playlistId.isEmpty else { return nil }
+        return libraryState.playlists.firstIndex(where: { pl in
+            if pl.youtubePlaylistId == playlistId || pl.id == "yt_\(playlistId)" {
+                return true
+            }
+            if let src = pl.sourceUrl, YouTubeLinkParser.parseInput(src).playlistId == playlistId {
+                return true
+            }
+            return false
+        })
+    }
+
     public func importYouTubeURL(
         _ input: String,
         customTitle: String = "",
@@ -1587,10 +1761,10 @@ public final class BebranoidAppState: ObservableObject {
         let targetPlaylistId = parsedInput.playlistId
         let existingKnownVideoIds: Set<String> = {
             guard let pid = targetPlaylistId,
-                  let existing = libraryState.playlists.first(where: { $0.youtubePlaylistId == pid }) else {
+                  let idx = findMatchingYouTubePlaylistIndex(for: pid) else {
                 return []
             }
-            return Set(existing.tracksSnapshot.compactMap { $0.youtubeVideoId })
+            return Set(libraryState.playlists[idx].tracksSnapshot.compactMap { $0.youtubeVideoId })
         }()
 
         let result = try await youtubeService.fetchYouTubeImport(
@@ -1600,17 +1774,24 @@ public final class BebranoidAppState: ObservableObject {
             onPartialSnapshot: { [weak self] partial in
                 await MainActor.run {
                     guard let self else { return }
+                    self.youtubeSyncProgressText = "YouTube: \(partial.tracks.count) треков..."
                     let resolvedTitle = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? partial.title : customTitle
-                    if let idx = self.libraryState.playlists.firstIndex(where: { $0.youtubePlaylistId == partial.playlistId }) {
+                    if let idx = self.findMatchingYouTubePlaylistIndex(for: partial.playlistId) {
                         let merged = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
                             existingTracks: self.libraryState.playlists[idx].tracksSnapshot,
                             prefixSnapshots: partial.tracks
                         )
-                        if merged.newlyAddedCount > 0 || merged.tracks.count != self.libraryState.playlists[idx].tracksSnapshot.count {
+                        let currentKeys = self.libraryState.playlists[idx].tracksSnapshot.map(\.cacheKey)
+                        let mergedKeys = merged.tracks.map(\.cacheKey)
+                        if merged.newlyAddedCount > 0 || mergedKeys != currentKeys {
+                            self.libraryState.playlists[idx].kind = .youtube
+                            self.libraryState.playlists[idx].youtubePlaylistId = partial.playlistId
+                            self.libraryState.playlists[idx].sourceUrl = partial.canonicalURL
                             self.libraryState.playlists[idx].tracksSnapshot = merged.tracks
-                            self.libraryState.playlists[idx].trackFilenames = merged.tracks.map { $0.cacheKey }
+                            self.libraryState.playlists[idx].trackFilenames = mergedKeys
                             self.libraryState.playlists[idx].lastSyncedAt = Date()
                             self.invalidateLibraryCaches()
+                            self.saveLibraryState()
                             self.artworkService.prewarmLibraryListThumbnails(
                                 tracks: Array(partial.tracks.prefix(24)),
                                 customAlbumCovers: self.libraryState.customAlbumCovers
@@ -1618,6 +1799,7 @@ public final class BebranoidAppState: ObservableObject {
                         }
                     } else if !partial.tracks.isEmpty {
                         let newPlaylist = Playlist(
+                            id: "yt_\(partial.playlistId)",
                             name: resolvedTitle,
                             kind: .youtube,
                             trackFilenames: partial.tracks.map { $0.cacheKey },
@@ -1630,13 +1812,14 @@ public final class BebranoidAppState: ObservableObject {
                         self.libraryState.playlists.append(newPlaylist)
                         self.libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
                         self.invalidateLibraryCaches()
+                        self.saveLibraryState()
                     }
                 }
             }
         )
         let title = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result.title : customTitle
 
-        if let existingIdx = libraryState.playlists.firstIndex(where: { $0.youtubePlaylistId == result.playlistId }) {
+        if let existingIdx = findMatchingYouTubePlaylistIndex(for: result.playlistId) {
             // Полный `reconcilePlaylist` выполняем ТОЛЬКО если догружены все страницы до конца (`isCompleteSnapshot == true`),
             // иначе используем `mergeProgressivePlaylistPrefix`, чтобы никогда не обрезать плейлист на 300 или 500 треках при сбое сети!
             let updatedTracks: [Track]
@@ -1651,11 +1834,15 @@ public final class BebranoidAppState: ObservableObject {
                     prefixSnapshots: result.tracks
                 ).tracks
             }
+            libraryState.playlists[existingIdx].kind = .youtube
+            libraryState.playlists[existingIdx].youtubePlaylistId = result.playlistId
+            libraryState.playlists[existingIdx].sourceUrl = result.canonicalURL
             libraryState.playlists[existingIdx].tracksSnapshot = updatedTracks
             libraryState.playlists[existingIdx].trackFilenames = updatedTracks.map { $0.cacheKey }
             libraryState.playlists[existingIdx].lastSyncedAt = Date()
         } else {
             let newPlaylist = Playlist(
+                id: "yt_\(result.playlistId)",
                 name: title,
                 kind: .youtube,
                 trackFilenames: result.tracks.map { $0.cacheKey },
@@ -1711,8 +1898,8 @@ public final class BebranoidAppState: ObservableObject {
         try? await Task.sleep(nanoseconds: 350_000_000)
         await telegramClient.refreshAuthorizedUserProfile()
 
-        let hasExistingTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
-        await refreshTelegramChats(autoSyncIfNeeded: !hasExistingTelegramTracks)
+        // Всегда синхронизируем Telegram при запуске/авторизации, чтобы мгновенно видеть все новые песни!
+        await refreshTelegramChats(autoSyncIfNeeded: true)
 
         // Если сразу после входа TDLib ещё подгружал диалоги с сервера и треков пока 0 — автоматически повторяем синхронизацию до 2 раз
         for _ in 0..<2 {
@@ -1728,12 +1915,6 @@ public final class BebranoidAppState: ObservableObject {
         await verifyTelegramAccessLive(autoTriggerSyncIfEmpty: true)
 
         invalidateLibraryCaches()
-        if let pendingTrack = currentTrack,
-           pendingTrack.sourceKind == .telegram,
-           !isPlaying,
-           trackDownloadProgress[pendingTrack.cacheKey] == nil {
-            startPlayingCurrentIndex(autoPlay: false)
-        }
     }
 
     /// Интерактивная проверка реального доступа к Telegram на сервере и подсчёт песен в основном чате («галочка»)
@@ -1892,6 +2073,55 @@ public final class BebranoidAppState: ObservableObject {
         }
     }
 
+    public func mergeIncomingTelegramTracksIntoLibrary(_ incoming: [Track]) {
+        guard !incoming.isEmpty else { return }
+        let existingTelegram = libraryState.tracks.filter { $0.sourceKind == .telegram }
+        let localAndYouTube = libraryState.tracks.filter { $0.sourceKind != .telegram }
+
+        var byId: [String: Track] = [:]
+        var byCacheKey: [String: String] = [:]
+        for track in existingTelegram {
+            byId[track.id] = track
+            byCacheKey[track.cacheKey] = track.id
+        }
+
+        var didChange = false
+        for track in incoming {
+            let matchingId = byId[track.id] != nil ? track.id : byCacheKey[track.cacheKey]
+            if let existingId = matchingId, let old = byId[existingId] {
+                if old != track {
+                    byId[existingId] = track
+                    didChange = true
+                }
+            } else {
+                byId[track.id] = track
+                byCacheKey[track.cacheKey] = track.id
+                didChange = true
+            }
+        }
+
+        var mergedTelegram = Array(byId.values)
+        mergedTelegram.sort { a, b in
+            let dateA = a.addedAt?.timeIntervalSince1970 ?? 0
+            let dateB = b.addedAt?.timeIntervalSince1970 ?? 0
+            if abs(dateA - dateB) > 0.5 {
+                return dateA > dateB
+            }
+            let msgA = Int64(a.messageId ?? "") ?? 0
+            let msgB = Int64(b.messageId ?? "") ?? 0
+            if msgA != msgB {
+                return msgA > msgB
+            }
+            return a.id > b.id
+        }
+
+        if didChange || mergedTelegram.map(\.id) != existingTelegram.map(\.id) {
+            libraryState.tracks = mergedTelegram + localAndYouTube
+            invalidateLibraryCaches()
+            saveLibraryState()
+        }
+    }
+
     public func syncTelegramLibrary() async {
         guard !isSyncingTelegramLibrary else { return }
         isSyncingTelegramLibrary = true
@@ -1902,16 +2132,26 @@ public final class BebranoidAppState: ObservableObject {
                 mainChatId: libraryState.selectedTelegramChatId,
                 mainChatTitle: libraryState.selectedTelegramChatTitle,
                 archiveChatId: libraryState.selectedTelegramArchiveChatId,
-                archiveChatTitle: libraryState.selectedTelegramArchiveChatTitle
+                archiveChatTitle: libraryState.selectedTelegramArchiveChatTitle,
+                onFirstPageTracks: { [weak self] firstPageTracks in
+                    await MainActor.run {
+                        self?.mergeIncomingTelegramTracksIntoLibrary(firstPageTracks)
+                    }
+                }
             )
             let existingTelegram = libraryState.tracks.filter { $0.sourceKind == .telegram }
             if scannedTracks.isEmpty && !existingTelegram.isEmpty {
                 return
             }
-            let localAndYouTube = libraryState.tracks.filter { $0.sourceKind != .telegram }
-            libraryState.tracks = scannedTracks + localAndYouTube
+            if scannedTracks.count >= existingTelegram.count {
+                let localAndYouTube = libraryState.tracks.filter { $0.sourceKind != .telegram }
+                libraryState.tracks = scannedTracks + localAndYouTube
+                invalidateLibraryCaches()
+                saveLibraryState()
+            } else {
+                mergeIncomingTelegramTracksIntoLibrary(scannedTracks)
+            }
             statusBannerMessage = nil
-            saveLibraryState()
             artworkService.prefetchArtistCovers(artists: computedArtists)
             artworkService.prewarmLibraryListThumbnails(
                 tracks: availableLibraryTracks,

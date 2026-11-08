@@ -116,6 +116,7 @@ public extension Notification.Name {
     static let telegramConnectionStateDidChange = Notification.Name("Bebranoid.telegramConnectionStateDidChange")
     static let trackDownloadProgressDidChange = Notification.Name("Bebranoid.trackDownloadProgressDidChange")
     static let telegramScanProgressDidChange = Notification.Name("Bebranoid.telegramScanProgressDidChange")
+    static let telegramNewMessageReceived = Notification.Name("Bebranoid.telegramNewMessageReceived")
 }
 
 /// Низкоуровневый мост к нативному `TDLibFramework` (`td_create_client_id`, `td_send`, `td_receive`, `td_execute`).
@@ -593,6 +594,27 @@ public final class TelegramClientService: @unchecked Sendable {
             }
             withLock {
                 discoveredChatFolderIds.formUnion(fids)
+            }
+        } else if type == "updateNewMessage",
+                  let msgDict = update["message"] as? [String: Any],
+                  let cid = Self.extractInt64(from: msgDict["chat_id"]),
+                  cid < 0,
+                  let content = msgDict["content"] as? [String: Any],
+                  let contentType = content["@type"] as? String,
+                  (contentType == "messageAudio" || contentType == "messageDocument") {
+            let chatTitle = withLock { discoveredChatsById[cid]?.title } ?? ""
+            if let parsed = Self.parseTDLibMessage(
+                msgDict,
+                chatId: String(cid),
+                chatTitle: chatTitle,
+                forumTopics: [:]
+            ) {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .telegramNewMessageReceived,
+                        object: parsed
+                    )
+                }
             }
         }
     }
@@ -1639,7 +1661,12 @@ public final class TelegramClientService: @unchecked Sendable {
 
     /// Загружает список топиков форума (`getForumTopics`) для супергруппы с пагинацией и поддержкой всех полей ID TDLib 1.8.68
     public func fetchForumTopics(chatId: Int64) async -> [Int: String] {
+        await fetchForumTopicsAndLastMessages(chatId: chatId).topicsMap
+    }
+
+    private func fetchForumTopicsAndLastMessages(chatId: Int64) async -> (topicsMap: [Int: String], lastMessages: [[String: Any]]) {
         var map: [Int: String] = [:]
+        var lastMessages: [[String: Any]] = []
         var offsetDate: Int = 0
         var offsetMessageId: Int64 = 0
         var offsetThreadId: Int64 = 0
@@ -1664,6 +1691,9 @@ public final class TelegramClientService: @unchecked Sendable {
                 let info = (topic["info"] as? [String: Any]) ?? topic
                 let rawName = (info["name"] as? String) ?? (info["title"] as? String) ?? ""
                 let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let lastMsg = topic["last_message"] as? [String: Any] {
+                    lastMessages.append(lastMsg)
+                }
                 guard !name.isEmpty else { continue }
 
                 if let threadId = Self.extractInt(from: info["message_thread_id"]), threadId != 0 {
@@ -1698,7 +1728,45 @@ public final class TelegramClientService: @unchecked Sendable {
             offsetMessageId = nextMsgId
             offsetThreadId = nextThreadId
         }
-        return map
+        return (map, lastMessages)
+    }
+
+    /// Подтягивает самые свежие сообщения напрямую с сервера через `getChatHistory(only_local: false)`,
+    /// чтобы новые загруженные песни обнаруживались мгновенно даже до обновления серверного поискового индекса `searchChatMessages`.
+    private func fetchRecentServerChatHistory(chatId: Int64, maxPages: Int = 3) async -> [[String: Any]] {
+        var collected: [[String: Any]] = []
+        var seenIds = Set<Int64>()
+        var fromMsgId: Int64 = 0
+
+        for page in 0..<maxPages {
+            let offsetVal = (page == 0 && fromMsgId == 0) ? -10 : 0
+            guard let resp = try? await bridge.sendAsync([
+                "@type": "getChatHistory",
+                "chat_id": chatId,
+                "from_message_id": fromMsgId,
+                "offset": offsetVal,
+                "limit": 100,
+                "only_local": false
+            ], timeoutSeconds: 6.0),
+                  let messages = resp["messages"] as? [[String: Any]],
+                  !messages.isEmpty else {
+                break
+            }
+            var oldestId: Int64 = 0
+            for msg in messages {
+                if let mid = Self.extractInt64(from: msg["id"]) {
+                    oldestId = mid
+                    if seenIds.insert(mid).inserted {
+                        collected.append(msg)
+                    }
+                }
+            }
+            if oldestId == 0 || oldestId == fromMsgId {
+                break
+            }
+            fromMsgId = oldestId
+        }
+        return collected
     }
 
     // MARK: - Live Access & Server Track Count Verification (Checkmark Action)
@@ -1887,7 +1955,8 @@ public final class TelegramClientService: @unchecked Sendable {
         chatTitle: String,
         isArchiveChat: Bool,
         ignoredChatTitles: Set<String> = [],
-        maxTracks: Int = 10000
+        maxTracks: Int = 10000,
+        onFirstPageTracks: (@Sendable ([Track]) async -> Void)? = nil
     ) async throws -> [Track] {
         guard let initialChatId = Int64(chatId.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             throw NSError(
@@ -1940,21 +2009,41 @@ public final class TelegramClientService: @unchecked Sendable {
             bridge.sendFireAndForget(["@type": "closeChat", "chat_id": numericChatId])
         }
 
-        // Прогреваем историю супергруппы на сервере, чтобы на свежей сессии `searchChatMessages` сразу видел все сообщения
-        _ = try? await bridge.sendAsync([
-            "@type": "getChatHistory",
-            "chat_id": numericChatId,
-            "from_message_id": 0,
-            "offset": 0,
-            "limit": 20,
-            "only_local": false
-        ], timeoutSeconds: 8.0)
-
         updateScanProgress("Загрузка альбомов-топиков \(resolvedTitle)...")
-        let forumTopics = await fetchForumTopics(chatId: numericChatId)
+        let topicsBundle = await fetchForumTopicsAndLastMessages(chatId: numericChatId)
+        let forumTopics = topicsBundle.topicsMap
+        let recentHistoryMsgs = await fetchRecentServerChatHistory(chatId: numericChatId, maxPages: 3)
+
+        var updatedIgnored = ignoredChatTitles
+        updatedIgnored.insert(resolvedTitle)
 
         var rawMessages: [RawTelegramAudioMessage] = []
         var seenMessageIds = Set<Int>()
+
+        for msgDict in (topicsBundle.lastMessages + recentHistoryMsgs) {
+            if let parsed = Self.parseTDLibMessage(
+                msgDict,
+                chatId: String(numericChatId),
+                chatTitle: resolvedTitle,
+                forumTopics: forumTopics
+            ), !seenMessageIds.contains(parsed.messageId) {
+                seenMessageIds.insert(parsed.messageId)
+                rawMessages.append(parsed)
+            }
+        }
+
+        if !rawMessages.isEmpty, let onFirstPageTracks {
+            let initialBuilt = rawMessages.map {
+                TelegramScanner.buildTrack(
+                    from: $0,
+                    isFromArchive: isArchiveChat,
+                    ignoredChatTitles: updatedIgnored
+                )
+            }
+            await onFirstPageTracks(initialBuilt)
+        }
+
+        let initialRawSnapshot = rawMessages
 
         // 1. Сканируем нативные аудиосообщения (`searchMessagesFilterAudio`) с жёсткой защитой от зацикливания пагинации
         let audioScan = try await searchMessagesWithFilter(
@@ -1963,7 +2052,23 @@ public final class TelegramClientService: @unchecked Sendable {
             filterType: "searchMessagesFilterAudio",
             forumTopics: forumTopics,
             maxMessages: maxTracks,
-            maxPages: 60
+            maxPages: 60,
+            onFirstPageParsed: { firstPageAudio in
+                guard let onFirstPageTracks else { return }
+                var combined = initialRawSnapshot
+                var localSeen = Set(combined.map(\.messageId))
+                for m in firstPageAudio where localSeen.insert(m.messageId).inserted {
+                    combined.append(m)
+                }
+                let builtPage = combined.map {
+                    TelegramScanner.buildTrack(
+                        from: $0,
+                        isFromArchive: isArchiveChat,
+                        ignoredChatTitles: updatedIgnored
+                    )
+                }
+                await onFirstPageTracks(builtPage)
+            }
         )
         for msg in audioScan.messages where !seenMessageIds.contains(msg.messageId) {
             seenMessageIds.insert(msg.messageId)
@@ -1987,8 +2092,7 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
 
-        var updatedIgnored = ignoredChatTitles
-        updatedIgnored.insert(resolvedTitle)
+        rawMessages.sort { $0.messageId > $1.messageId }
         let built = rawMessages.map {
             TelegramScanner.buildTrack(
                 from: $0,
@@ -2005,7 +2109,8 @@ public final class TelegramClientService: @unchecked Sendable {
         mainChatId: String,
         mainChatTitle: String,
         archiveChatId: String,
-        archiveChatTitle: String
+        archiveChatTitle: String,
+        onFirstPageTracks: (@Sendable ([Track]) async -> Void)? = nil
     ) async throws -> [Track] {
         var ignoredTitles: Set<String> = [
             AppConfig.defaultMainChatPlaceholderTitle,
@@ -2018,7 +2123,8 @@ public final class TelegramClientService: @unchecked Sendable {
             chatId: mainChatId,
             chatTitle: mainChatTitle,
             isArchiveChat: false,
-            ignoredChatTitles: ignoredTitles
+            ignoredChatTitles: ignoredTitles,
+            onFirstPageTracks: onFirstPageTracks
         )
 
         let cleanArchiveId = archiveChatId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2045,7 +2151,8 @@ public final class TelegramClientService: @unchecked Sendable {
         filterType: String,
         forumTopics: [Int: String],
         maxMessages: Int,
-        maxPages: Int = 60
+        maxPages: Int = 60,
+        onFirstPageParsed: (@Sendable ([RawTelegramAudioMessage]) async -> Void)? = nil
     ) async throws -> (messages: [RawTelegramAudioMessage], totalFetched: Int, totalCount: Int) {
         var results: [RawTelegramAudioMessage] = []
         var fromMessageId: Int64 = 0
@@ -2116,6 +2223,10 @@ public final class TelegramClientService: @unchecked Sendable {
                 ) {
                     results.append(parsed)
                 }
+            }
+
+            if pageIndex == 1 && !results.isEmpty, let onFirstPageParsed {
+                await onFirstPageParsed(results)
             }
 
             if newUniqueInPage == 0 || lastMsgId == 0 || lastMsgId == fromMessageId {
@@ -2677,7 +2788,7 @@ public final class TelegramClientService: @unchecked Sendable {
             return cachedHost
         }
 
-        for candidateHost in ["10.239.50.145", "10.236.88.145", "192.168.147.145"] {
+        for candidateHost in ["10.41.79.145", "10.239.50.145", "10.236.88.145", "192.168.147.145"] {
             guard let pingURL = URL(string: "http://\(candidateHost):18473/health") else { continue }
             var req = URLRequest(url: pingURL)
             req.httpMethod = "HEAD"

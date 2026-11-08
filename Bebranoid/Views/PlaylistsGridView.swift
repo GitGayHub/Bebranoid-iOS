@@ -54,9 +54,46 @@ public struct PlaylistsGridView: View {
                             .buttonStyle(.plain)
 
                             Spacer()
+
+                            Button {
+                                appState.haptics.lightTap()
+                                Task { await appState.refreshFullLibraryAndYouTubePlaylists() }
+                            } label: {
+                                Group {
+                                    if appState.isSyncingYouTubePlaylists || appState.isSyncingTelegramLibrary {
+                                        ProgressView()
+                                            .tint(appState.accentSwiftUIColor)
+                                            .scaleEffect(0.76)
+                                    } else {
+                                        Image(systemName: "arrow.clockwise")
+                                            .font(.system(size: 15, weight: .bold))
+                                            .foregroundStyle(.white.opacity(0.92))
+                                    }
+                                }
+                                .frame(width: 37, height: 37)
+                                .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: false)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(appState.isSyncingYouTubePlaylists || appState.isSyncingTelegramLibrary)
+                            .accessibilityLabel("Обновить плейлисты")
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
+
+                        if appState.isSyncingYouTubePlaylists {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                    .tint(appState.accentSwiftUIColor)
+                                    .scaleEffect(0.85)
+                                Text(appState.youtubeSyncProgressText.isEmpty ? "Обновление плейлистов YouTube..." : appState.youtubeSyncProgressText)
+                                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.90))
+                                Spacer()
+                            }
+                            .padding(11)
+                            .liquidGlassCard(cornerRadius: 16, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                            .padding(.horizontal, 16)
+                        }
 
                         LazyVGrid(columns: columns, spacing: 18) {
                             ForEach(appState.allPlaylistsWithRecent30) { playlist in
@@ -430,16 +467,16 @@ public struct PlaylistDetailView: View {
 
                 Spacer()
 
-                if let sourceUrl = livePlaylist.sourceUrl {
+                if livePlaylist.isYouTubePlaylist {
                     Button {
                         Task {
                             isSyncingYouTube = true
-                            try? await appState.importYouTubeURL(sourceUrl, customTitle: livePlaylist.name)
+                            await appState.refreshPlaylist(livePlaylist)
                             isSyncingYouTube = false
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            if isSyncingYouTube {
+                            if isSyncingYouTube || appState.isSyncingYouTubePlaylists {
                                 ProgressView().scaleEffect(0.7).tint(.white)
                             } else {
                                 Image(systemName: "arrow.triangle.2.circlepath")
@@ -452,6 +489,7 @@ public struct PlaylistDetailView: View {
                         .background(Color.white.opacity(0.14), in: Capsule())
                         .foregroundStyle(.white)
                     }
+                    .disabled(isSyncingYouTube || appState.isSyncingYouTubePlaylists)
                 }
             }
 

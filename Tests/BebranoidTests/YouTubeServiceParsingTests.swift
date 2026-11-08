@@ -243,4 +243,55 @@ final class YouTubeServiceParsingTests: XCTestCase {
         let rawJSON = String(data: rawData, encoding: .utf8)!
         XCTAssertEqual(YouTubeService.extractReportedVideoCount(fromRawJSON: rawJSON), 2500)
     }
+
+    @MainActor
+    func testAudioInterruptionNeverStartsPlaybackWhenIdleOrPaused() {
+        let engine = DualStreamAudioEngine()
+        XCTAssertFalse(engine.isPlaying)
+        // Симулируем системное прерывание AVAudioSession (звонок / уведомление / Siri), когда плеер стоит на паузе
+        engine.handleAudioSessionInterruption(began: true, shouldResume: false)
+        XCTAssertFalse(engine.isPlaying)
+        // Даже если iOS присылает .ended + .shouldResume, плеер НЕ должен сам включать музыку!
+        engine.handleAudioSessionInterruption(began: false, shouldResume: true)
+        XCTAssertFalse(engine.isPlaying)
+    }
+
+    func testProgressiveMergePrependsNewlyAddedYouTubeTracksAndFixesOrder() {
+        let old1 = Track(id: "yt_COX6kiuRvFc", filename: "youtube-COX6kiuRvFc.m4a", title: "Ты моя...", artist: "Artist", album: "PL", duration: 180, sourceKind: .youtube, youtubeVideoId: "COX6kiuRvFc", playlistIndex: 1)
+        let old2 = Track(id: "yt_fbrz9lifcPI", filename: "youtube-fbrz9lifcPI.m4a", title: "Hafanana", artist: "Afric Simone", album: "PL", duration: 200, sourceKind: .youtube, youtubeVideoId: "fbrz9lifcPI", playlistIndex: 2)
+        let old3 = Track(id: "yt_4Jmz-OWycyk", filename: "youtube-4Jmz-OWycyk.m4a", title: "#Сумасшедшая", artist: "Алексей Воробьёв", album: "PL", duration: 195, sourceKind: .youtube, youtubeVideoId: "4Jmz-OWycyk", playlistIndex: 3)
+
+        // Пользователь добавил 2 новые песни в плейлист YouTube («Рыбка» и «Good Luck, Babe!»)
+        let new1 = Track(id: "yt_4wYcbNqgwYA", filename: "youtube-4wYcbNqgwYA.m4a", title: "Рыбка", artist: "Artist", album: "PL", duration: 170, sourceKind: .youtube, youtubeVideoId: "4wYcbNqgwYA", playlistIndex: 1)
+        let new2 = Track(id: "yt_VZ-oGLluGAc", filename: "youtube-VZ-oGLluGAc.m4a", title: "Good Luck, Babe!", artist: "Chappell Roan", album: "PL", duration: 218, sourceKind: .youtube, youtubeVideoId: "VZ-oGLluGAc", playlistIndex: 2)
+
+        let merged = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
+            existingTracks: [old2, old1, old3], // даже если раньше порядок был сбит
+            prefixSnapshots: [new1, new2, old1, old2]
+        )
+        XCTAssertEqual(merged.newlyAddedCount, 2)
+        XCTAssertEqual(merged.tracks.map(\.youtubeVideoId), [
+            "4wYcbNqgwYA",
+            "VZ-oGLluGAc",
+            "COX6kiuRvFc",
+            "fbrz9lifcPI",
+            "4Jmz-OWycyk"
+        ])
+    }
+
+    func testLiveYouTubePlaylistSyncFetchesLatestTracksFromUserPlaylist() async throws {
+        let playlistURL = "https://youtube.com/playlist?list=PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP"
+        // Передаём известные старые ID, чтобы протестировать быстрый инкрементальный синк 1-й страницы в реальном времени
+        let knownIds: Set<String> = ["COX6kiuRvFc", "fbrz9lifcPI", "4Jmz-OWycyk", "wT0SRBm0SpU"]
+        let result = try await YouTubeService.shared.fetchYouTubeImport(
+            input: playlistURL,
+            existingKnownVideoIds: knownIds,
+            allowFastIncrementalStop: true
+        )
+        XCTAssertEqual(result.playlistId, "PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP")
+        XCTAssertGreaterThanOrEqual(result.tracks.count, 50, "Плейлист пользователя должен возвращать актуальные треки с YouTube")
+        let videoIds = Set(result.tracks.compactMap(\.youtubeVideoId))
+        XCTAssertTrue(videoIds.contains("4wYcbNqgwYA"), "Должна присутствовать новая песня 'Рыбка' (4wYcbNqgwYA)")
+        XCTAssertTrue(videoIds.contains("VZ-oGLluGAc"), "Должна присутствовать новая песня 'Good Luck, Babe!' (VZ-oGLluGAc)")
+    }
 }

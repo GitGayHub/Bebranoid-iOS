@@ -62,6 +62,7 @@ public final class DualStreamAudioEngine: ObservableObject {
     private var scheduleGeneration: UInt64 = 0
     private var seekAnchorUptime: TimeInterval = 0
     private var seekGraceUntilUptime: TimeInterval = 0
+    private var wasPlayingBeforeInterruption: Bool = false
 
     public let smoothClock = SmoothClock()
 
@@ -234,12 +235,28 @@ public final class DualStreamAudioEngine: ObservableObject {
             primaryDeck.resetDSPState()
             primaryDeck.preparePlayerConnection(for: audioFile, in: engine)
 
-            let engineReady = ensureEngineRunning()
-
             let clampedStart = max(0.0, min(timeSec, max(0.0, duration - 0.05)))
             let startFrame = AVAudioFramePosition(clampedStart * sr)
             primaryStartTimeOffset = clampedStart
             let remainingFrames = AVAudioFrameCount(max(0, totalFrames - startFrame))
+
+            let postNow = ProcessInfo.processInfo.systemUptime
+            seekAnchorUptime = postNow
+            seekGraceUntilUptime = postNow + 0.28
+            smoothClock.forceSetTime(clampedStart)
+            currentTime = clampedStart
+
+            // При восстановлении сессии на старте (`autoPlay == false`) НЕ активируем `AVAudioSession` и НЕ запускаем `AVAudioEngine`,
+            // чтобы системные уведомления или прерывания iOS никогда не включали музыку сами по себе!
+            guard autoPlay else {
+                wasPlayingBeforeInterruption = false
+                needsGraphReconnect = true
+                isPlaying = false
+                smoothClock.stop()
+                return true
+            }
+
+            let engineReady = ensureEngineRunning()
 
             if remainingFrames > 0 && engineReady {
                 primaryDeck.playerNode.scheduleSegment(
@@ -268,13 +285,8 @@ public final class DualStreamAudioEngine: ObservableObject {
 
             applyFXToBothDecks()
             updateDeckVolumes()
-            let postNow = ProcessInfo.processInfo.systemUptime
-            seekAnchorUptime = postNow
-            seekGraceUntilUptime = postNow + 0.28
-            smoothClock.forceSetTime(clampedStart)
-            currentTime = clampedStart
 
-            if autoPlay && engineReady && remainingFrames > 0 {
+            if engineReady && remainingFrames > 0 {
                 primaryDeck.playerNode.play()
                 isPlaying = true
                 smoothClock.start(highFrequencyForCrossfade: false)
@@ -316,6 +328,7 @@ public final class DualStreamAudioEngine: ObservableObject {
 
     /// Пауза. Мгновенно глушит микшер и сбрасывает буферы реверберации (`resetDSPState`), чтобы в `Slowed + Reverb` не звучало эхо после паузы.
     public func pause() {
+        wasPlayingBeforeInterruption = false
         if isCrossfading {
             cancelActiveCrossfade()
         }
@@ -329,6 +342,24 @@ public final class DualStreamAudioEngine: ObservableObject {
         secondaryDeck.resetDSPState()
         isPlaying = false
         smoothClock.stop()
+    }
+
+    /// Обрабатывает системное прерывание `AVAudioSession` (звонок, будильник, уведомление, Siri):
+    /// возобновляет воспроизведение при `.ended` ТОЛЬКО если трек реально играл непосредственно перед началом прерывания!
+    public func handleAudioSessionInterruption(began: Bool, shouldResume: Bool) {
+        if began {
+            let wasActive = isPlaying
+            if isPlaying {
+                pause()
+            }
+            wasPlayingBeforeInterruption = wasActive
+        } else {
+            let shouldActuallyPlay = wasPlayingBeforeInterruption && shouldResume
+            wasPlayingBeforeInterruption = false
+            if shouldActuallyPlay {
+                play()
+            }
+        }
     }
 
     public func togglePlayPause() {
@@ -622,14 +653,14 @@ public final class DualStreamAudioEngine: ObservableObject {
                 guard let self else { return }
                 switch type {
                 case .began:
-                    self.pause()
+                    self.handleAudioSessionInterruption(began: true, shouldResume: false)
                 case .ended:
+                    var shouldResume = false
                     if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
                         let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-                        if options.contains(.shouldResume) {
-                            self.play()
-                        }
+                        shouldResume = options.contains(.shouldResume)
                     }
+                    self.handleAudioSessionInterruption(began: false, shouldResume: shouldResume)
                 @unknown default:
                     break
                 }
