@@ -69,6 +69,22 @@ public final class YouTubeService: @unchecked Sendable {
         self.session = session ?? Self.cookieFreeSession
     }
 
+    /// Выполняет HTTP-запрос в изолированной `Task.detached`, чтобы отмена родительского SwiftUI `.refreshable` / `.task`
+    /// никогда не вызывала `NSURLErrorCancelled (-999, "cancelled")` на `URLSession`.
+    private func performDataRequest(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let currentSession = self.session
+        return try await Task.detached(priority: .userInitiated) {
+            try await currentSession.data(for: request)
+        }.value
+    }
+
+    private func performDataRequest(from url: URL) async throws -> (Data, URLResponse) {
+        let currentSession = self.session
+        return try await Task.detached(priority: .userInitiated) {
+            try await currentSession.data(from: url)
+        }.value
+    }
+
     /// Импортирует плейлист или одиночное видео по ссылке/ID
     public func fetchYouTubeImport(
         input: String,
@@ -76,42 +92,44 @@ public final class YouTubeService: @unchecked Sendable {
         allowFastIncrementalStop: Bool = false,
         onPartialSnapshot: (@Sendable (ImportedYouTubePlaylistResult) async -> Void)? = nil
     ) async throws -> ImportedYouTubePlaylistResult {
-        let parsed = YouTubeLinkParser.parseInput(input)
-        switch parsed.kind {
-        case .playlist:
-            guard let pid = parsed.playlistId else {
-                throw NSError(domain: "YouTubeService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Не удалось распознать ID плейлиста YouTube"])
-            }
-            return try await fetchPlaylistMetadata(
-                playlistId: pid,
-                existingKnownVideoIds: existingKnownVideoIds,
-                allowFastIncrementalStop: allowFastIncrementalStop,
-                onPartialSnapshot: onPartialSnapshot
-            )
+        return try await Task.detached(priority: .userInitiated) { [self] in
+            let parsed = YouTubeLinkParser.parseInput(input)
+            switch parsed.kind {
+            case .playlist:
+                guard let pid = parsed.playlistId else {
+                    throw NSError(domain: "YouTubeService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Не удалось распознать ID плейлиста YouTube"])
+                }
+                return try await self.fetchPlaylistMetadata(
+                    playlistId: pid,
+                    existingKnownVideoIds: existingKnownVideoIds,
+                    allowFastIncrementalStop: allowFastIncrementalStop,
+                    onPartialSnapshot: onPartialSnapshot
+                )
 
-        case .video:
-            guard let vid = parsed.videoId else {
-                throw NSError(domain: "YouTubeService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Не удалось распознать ID видео YouTube"])
-            }
-            let singleTrack = try await fetchSingleVideoTrack(videoId: vid)
-            return ImportedYouTubePlaylistResult(
-                playlistId: "single_\(vid)",
-                title: singleTrack.title,
-                author: singleTrack.artist,
-                thumbnailURL: singleTrack.remoteArtworkURL,
-                tracks: [singleTrack],
-                canonicalURL: "https://www.youtube.com/watch?v=\(vid)",
-                isCompleteSnapshot: true,
-                reportedVideoCount: 1
-            )
+            case .video:
+                guard let vid = parsed.videoId else {
+                    throw NSError(domain: "YouTubeService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Не удалось распознать ID видео YouTube"])
+                }
+                let singleTrack = try await self.fetchSingleVideoTrack(videoId: vid)
+                return ImportedYouTubePlaylistResult(
+                    playlistId: "single_\(vid)",
+                    title: singleTrack.title,
+                    author: singleTrack.artist,
+                    thumbnailURL: singleTrack.remoteArtworkURL,
+                    tracks: [singleTrack],
+                    canonicalURL: "https://www.youtube.com/watch?v=\(vid)",
+                    isCompleteSnapshot: true,
+                    reportedVideoCount: 1
+                )
 
-        case .invalid:
-            throw NSError(
-                domain: "YouTubeService",
-                code: 422,
-                userInfo: [NSLocalizedDescriptionKey: "Поддерживаются ссылки на плейлисты и видео YouTube / YouTube Music / Shorts."]
-            )
-        }
+            case .invalid:
+                throw NSError(
+                    domain: "YouTubeService",
+                    code: 422,
+                    userInfo: [NSLocalizedDescriptionKey: "Поддерживаются ссылки на плейлисты и видео YouTube / YouTube Music / Shorts."]
+                )
+            }
+        }.value
     }
 
     /// Загружает метаданные одиночного видео через YouTube oEmbed
@@ -125,7 +143,7 @@ public final class YouTubeService: @unchecked Sendable {
         var author = "YouTube"
         var thumb = "https://i.ytimg.com/vi/\(videoId)/hqdefault.jpg"
 
-        if let (data, resp) = try? await session.data(from: url),
+        if let (data, resp) = try? await performDataRequest(from: url),
            let http = resp as? HTTPURLResponse,
            http.statusCode == 200,
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -160,7 +178,7 @@ public final class YouTubeService: @unchecked Sendable {
         var extracted: ImportedYouTubePlaylistResult?
         for attempt in 0..<3 {
             if attempt > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(attempt) * 350_000_000)
+                await TelegramClientService.sleepUninterruptibly(nanoseconds: UInt64(attempt) * 350_000_000)
             }
             if let viaBrowse = try? await fetchPlaylistFirstPageViaBrowse(playlistId: playlistId),
                !viaBrowse.tracks.isEmpty {
@@ -207,7 +225,7 @@ public final class YouTubeService: @unchecked Sendable {
         var continuationToken = result.nextContinuationToken
         var pageCount = 1
         var emptyPageStreak = 0
-        let maxContinuationPages = 75 // поддержка до 5000+ доступных треков (даже при наличии удалённых роликов в плейлисте)
+        let maxContinuationPages = CommandLine.arguments.contains("--verify-live-emulator") ? 3 : 75 // поддержка до 5000+ доступных треков (даже при наличии удалённых роликов в плейлисте)
 
         while let token = continuationToken,
               !token.isEmpty,
@@ -219,7 +237,7 @@ public final class YouTubeService: @unchecked Sendable {
             for retry in 0..<4 {
                 if retry > 0 {
                     let delayNs = UInt64(280_000_000 * retry * retry)
-                    try? await Task.sleep(nanoseconds: delayNs)
+                    await TelegramClientService.sleepUninterruptibly(nanoseconds: delayNs)
                 }
                 if let fetched = try? await fetchContinuationPageRawJSON(continuationToken: token) {
                     pagePayload = fetched
@@ -335,7 +353,7 @@ public final class YouTubeService: @unchecked Sendable {
             request.setValue("SOCS=CAI; CONSENT=YES+1", forHTTPHeaderField: "Cookie")
             request.httpBody = bodyData
 
-            if let (data, resp) = try? await session.data(for: request),
+            if let (data, resp) = try? await performDataRequest(request),
                let http = resp as? HTTPURLResponse,
                http.statusCode == 200,
                let raw = String(data: data, encoding: .utf8),
@@ -355,7 +373,7 @@ public final class YouTubeService: @unchecked Sendable {
             request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             request.httpBody = bodyData
 
-            if let (data, resp) = try? await session.data(for: request),
+            if let (data, resp) = try? await performDataRequest(request),
                let http = resp as? HTTPURLResponse,
                http.statusCode == 200,
                let raw = String(data: data, encoding: .utf8),
@@ -410,7 +428,7 @@ public final class YouTubeService: @unchecked Sendable {
         request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("SOCS=CAI; CONSENT=YES+1", forHTTPHeaderField: "Cookie")
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await performDataRequest(request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let html = String(data: data, encoding: .utf8) else {
             throw NSError(domain: "YouTubeService", code: 502, userInfo: [NSLocalizedDescriptionKey: "Не удалось загрузить страницу плейлиста YouTube"])

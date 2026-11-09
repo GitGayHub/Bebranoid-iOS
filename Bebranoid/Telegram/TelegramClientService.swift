@@ -494,6 +494,17 @@ public final class TelegramClientService: @unchecked Sendable {
             || env["XCTestBundlePath"] != nil
     }
 
+    /// Ожидание без выброса `Swift.CancellationError` и без мгновенного пропуска при отмене родительского SwiftUI `.refreshable` / `.task`.
+    public static func sleepUninterruptibly(nanoseconds: UInt64) async {
+        guard nanoseconds > 0 else { return }
+        let clampedNs = Int(min(nanoseconds, UInt64(Int.max)))
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .nanoseconds(clampedNs)) {
+                continuation.resume()
+            }
+        }
+    }
+
     /// Инициализирует TDLib при запуске приложения, открывает существующую локальную базу TDLib,
     /// дожидается ответа `updateAuthorizationState` от TDLib и только после `authorizationStateReady` активирует авторизованное состояние.
     @discardableResult
@@ -524,7 +535,7 @@ public final class TelegramClientService: @unchecked Sendable {
                     break
                 }
             }
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            await Self.sleepUninterruptibly(nanoseconds: 150_000_000)
         }
 
         if isAuthorized {
@@ -711,7 +722,7 @@ public final class TelegramClientService: @unchecked Sendable {
             bridge.resetClient(sendCloseFirst: false)
             // НЕ вызываем advanceTDLibSessionEpoch() при закрытии клиента, чтобы сохранённая сессия Telegram не удалялась!
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 450_000_000)
+                await Self.sleepUninterruptibly(nanoseconds: 450_000_000)
                 await self?.initializeAndRestoreSession()
             }
 
@@ -823,7 +834,7 @@ public final class TelegramClientService: @unchecked Sendable {
             if msgLower.contains("locked") || msgLower.contains("failed to open") || msgLower.contains("closed") {
                 // Если БД временно заблокирована старым дескриптором TDLib — закрываем старый клиент и ждём освобождения SQLite lock БЕЗ удаления папки сессии!
                 bridge.resetClient(sendCloseFirst: true)
-                try? await Task.sleep(nanoseconds: 450_000_000)
+                await Self.sleepUninterruptibly(nanoseconds: 450_000_000)
                 _ = bridge.ensureClientCreated()
                 _ = try await bridge.sendAsync(request, timeoutSeconds: 15.0)
                 withLock { tdlibParametersConfigured = true }
@@ -901,7 +912,7 @@ public final class TelegramClientService: @unchecked Sendable {
                             break
                         }
                     }
-                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    await Self.sleepUninterruptibly(nanoseconds: 120_000_000)
                 }
             }
         }
@@ -929,7 +940,7 @@ public final class TelegramClientService: @unchecked Sendable {
             if errLower.contains("unexpected") || errLower.contains("closed") || errLower.contains("locked") || errLower.contains("перезапущена") {
                 bridge.resetClient(sendCloseFirst: true)
                 advanceTDLibSessionEpoch()
-                try? await Task.sleep(nanoseconds: 150_000_000)
+                await Self.sleepUninterruptibly(nanoseconds: 150_000_000)
                 withLock { tdlibParametersConfigured = false }
                 try await ensureTdlibInitialized(apiId: effectiveApiId, apiHash: effectiveApiHash)
                 for _ in 0..<15 {
@@ -937,7 +948,7 @@ public final class TelegramClientService: @unchecked Sendable {
                        (st["@type"] as? String) == "authorizationStateWaitPhoneNumber" {
                         break
                     }
-                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    await Self.sleepUninterruptibly(nanoseconds: 120_000_000)
                 }
                 do {
                     _ = try await bridge.sendAsync(request, timeoutSeconds: 20.0)
@@ -1024,7 +1035,7 @@ public final class TelegramClientService: @unchecked Sendable {
             if authStep == .authorized {
                 break
             }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            await Self.sleepUninterruptibly(nanoseconds: 200_000_000)
         }
 
         return authStep
@@ -1139,6 +1150,13 @@ public final class TelegramClientService: @unchecked Sendable {
 
     public static func translateTDLibError(_ rawMessage: String) -> String {
         let upper = rawMessage.uppercased()
+        if upper.contains("CANCELLATIONERROR")
+            || upper.contains("NSURLERRORDOMAIN") && upper.contains("-999")
+            || upper == "CANCELLED"
+            || upper == "CANCELED"
+            || upper == "ОТМЕНЕНО" {
+            return "Превышено время ожидания ответа от сервера или соединение было прервано. Проверьте интернет и повторите попытку."
+        }
         if upper.contains("PHONE_CODE_INVALID") {
             return "Неверный код подтверждения Telegram. Проверьте введённые цифры и попробуйте снова."
         }
@@ -1258,7 +1276,7 @@ public final class TelegramClientService: @unchecked Sendable {
             let conn = connectionState
             if conn == .ready { break }
             if conn == .updating && tick >= 24 { break }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            await Self.sleepUninterruptibly(nanoseconds: 250_000_000)
         }
 
         func loadAllPages(chatList: [String: Any], maxPages: Int, timeout: Double) async {
@@ -1274,7 +1292,7 @@ public final class TelegramClientService: @unchecked Sendable {
                         break
                     }
                     if page == 0 {
-                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        await Self.sleepUninterruptibly(nanoseconds: 500_000_000)
                         continue
                     }
                     break
@@ -1514,7 +1532,7 @@ public final class TelegramClientService: @unchecked Sendable {
             }
 
             if attempt == 0 {
-                try? await Task.sleep(nanoseconds: 900_000_000)
+                await Self.sleepUninterruptibly(nanoseconds: 900_000_000)
             }
         }
 
@@ -2046,38 +2064,47 @@ public final class TelegramClientService: @unchecked Sendable {
         let initialRawSnapshot = rawMessages
 
         // 1. Сканируем нативные аудиосообщения (`searchMessagesFilterAudio`) с жёсткой защитой от зацикливания пагинации
-        let audioScan = try await searchMessagesWithFilter(
-            chatId: numericChatId,
-            chatTitle: resolvedTitle,
-            filterType: "searchMessagesFilterAudio",
-            forumTopics: forumTopics,
-            maxMessages: maxTracks,
-            maxPages: 60,
-            onFirstPageParsed: { firstPageAudio in
-                guard let onFirstPageTracks else { return }
-                var combined = initialRawSnapshot
-                var localSeen = Set(combined.map(\.messageId))
-                for m in firstPageAudio where localSeen.insert(m.messageId).inserted {
-                    combined.append(m)
+        var audioMessagesCount = 0
+        do {
+            let audioScan = try await searchMessagesWithFilter(
+                chatId: numericChatId,
+                chatTitle: resolvedTitle,
+                filterType: "searchMessagesFilterAudio",
+                forumTopics: forumTopics,
+                maxMessages: maxTracks,
+                maxPages: 60,
+                onFirstPageParsed: { firstPageAudio in
+                    guard let onFirstPageTracks else { return }
+                    var combined = initialRawSnapshot
+                    var localSeen = Set(combined.map(\.messageId))
+                    for m in firstPageAudio where localSeen.insert(m.messageId).inserted {
+                        combined.append(m)
+                    }
+                    let builtPage = combined.map {
+                        TelegramScanner.buildTrack(
+                            from: $0,
+                            isFromArchive: isArchiveChat,
+                            ignoredChatTitles: updatedIgnored
+                        )
+                    }
+                    await onFirstPageTracks(builtPage)
                 }
-                let builtPage = combined.map {
-                    TelegramScanner.buildTrack(
-                        from: $0,
-                        isFromArchive: isArchiveChat,
-                        ignoredChatTitles: updatedIgnored
-                    )
-                }
-                await onFirstPageTracks(builtPage)
+            )
+            audioMessagesCount = audioScan.messages.count
+            for msg in audioScan.messages where !seenMessageIds.contains(msg.messageId) {
+                seenMessageIds.insert(msg.messageId)
+                rawMessages.append(msg)
             }
-        )
-        for msg in audioScan.messages where !seenMessageIds.contains(msg.messageId) {
-            seenMessageIds.insert(msg.messageId)
-            rawMessages.append(msg)
+        } catch {
+            // Если свежие сообщения из `getChatHistory` / `getForumTopics` уже получены, не сбрасываем их из-за тайм-аута индекса `searchChatMessages`
+            if rawMessages.isEmpty {
+                throw error
+            }
         }
 
         // 2. Компактный проход по документам (FLAC/WAV без аудио-тега): строго ограничен по страницам (`maxPages: 8`),
         // чтобы не сканировать бесконечно тысячи не-аудио файлов при `total_count == -1`!
-        let docMaxPages = audioScan.messages.isEmpty ? 20 : 6
+        let docMaxPages = (audioMessagesCount == 0 && rawMessages.isEmpty) ? 20 : 6
         if let docScan = try? await searchMessagesWithFilter(
             chatId: numericChatId,
             chatTitle: resolvedTitle,
@@ -2104,7 +2131,8 @@ public final class TelegramClientService: @unchecked Sendable {
         return built
     }
 
-    /// Полная синхронизация основного и (опционально) архивного read-only чата с 3-уровневой дедупликацией
+    /// Полная синхронизация основного и (опционально) архивного read-only чата с 3-уровневой дедупликацией.
+    /// Выполняется в изолированной `Task.detached`, чтобы отмена родительского SwiftUI `.refreshable` / `.task` никогда не прерывала TDLib!
     public func syncMainAndArchiveChats(
         mainChatId: String,
         mainChatTitle: String,
@@ -2112,37 +2140,39 @@ public final class TelegramClientService: @unchecked Sendable {
         archiveChatTitle: String,
         onFirstPageTracks: (@Sendable ([Track]) async -> Void)? = nil
     ) async throws -> [Track] {
-        var ignoredTitles: Set<String> = [
-            AppConfig.defaultMainChatPlaceholderTitle,
-            AppConfig.defaultArchiveChatPlaceholderTitle
-        ]
-        if !mainChatTitle.isEmpty { ignoredTitles.insert(mainChatTitle) }
-        if !archiveChatTitle.isEmpty { ignoredTitles.insert(archiveChatTitle) }
+        return try await Task.detached(priority: .userInitiated) { [self] in
+            var ignoredTitles: Set<String> = [
+                AppConfig.defaultMainChatPlaceholderTitle,
+                AppConfig.defaultArchiveChatPlaceholderTitle
+            ]
+            if !mainChatTitle.isEmpty { ignoredTitles.insert(mainChatTitle) }
+            if !archiveChatTitle.isEmpty { ignoredTitles.insert(archiveChatTitle) }
 
-        let mainTracks = try await scanChatAudioTracks(
-            chatId: mainChatId,
-            chatTitle: mainChatTitle,
-            isArchiveChat: false,
-            ignoredChatTitles: ignoredTitles,
-            onFirstPageTracks: onFirstPageTracks
-        )
+            let mainTracks = try await self.scanChatAudioTracks(
+                chatId: mainChatId,
+                chatTitle: mainChatTitle,
+                isArchiveChat: false,
+                ignoredChatTitles: ignoredTitles,
+                onFirstPageTracks: onFirstPageTracks
+            )
 
-        let cleanArchiveId = archiveChatId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanArchiveId.isEmpty, Int64(cleanArchiveId) != nil else {
-            return mainTracks
-        }
+            let cleanArchiveId = archiveChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanArchiveId.isEmpty, Int64(cleanArchiveId) != nil else {
+                return mainTracks
+            }
 
-        let archiveTracks = (try? await scanChatAudioTracks(
-            chatId: cleanArchiveId,
-            chatTitle: archiveChatTitle,
-            isArchiveChat: true,
-            ignoredChatTitles: ignoredTitles
-        )) ?? []
+            let archiveTracks = (try? await self.scanChatAudioTracks(
+                chatId: cleanArchiveId,
+                chatTitle: archiveChatTitle,
+                isArchiveChat: true,
+                ignoredChatTitles: ignoredTitles
+            )) ?? []
 
-        return TelegramScanner.mergeMainAndArchiveTracks(
-            mainTracks: mainTracks,
-            archiveTracks: archiveTracks
-        )
+            return TelegramScanner.mergeMainAndArchiveTracks(
+                mainTracks: mainTracks,
+                archiveTracks: archiveTracks
+            )
+        }.value
     }
 
     private func searchMessagesWithFilter(
@@ -2162,7 +2192,6 @@ public final class TelegramClientService: @unchecked Sendable {
         var pageIndex = 0
 
         while results.count < maxMessages && pageIndex < maxPages {
-            try Task.checkCancellation()
             pageIndex += 1
 
             let nowUptime = ProcessInfo.processInfo.systemUptime
@@ -2180,22 +2209,29 @@ public final class TelegramClientService: @unchecked Sendable {
                 updateScanProgress(progressLabel)
             }
 
+            let requestPayload: [String: Any] = [
+                "@type": "searchChatMessages",
+                "chat_id": chatId,
+                "query": "",
+                "from_message_id": fromMessageId,
+                "offset": 0,
+                "limit": 100,
+                "filter": ["@type": filterType]
+            ]
+
             let resp: [String: Any]
             do {
-                resp = try await bridge.sendAsync([
-                    "@type": "searchChatMessages",
-                    "chat_id": chatId,
-                    "query": "",
-                    "from_message_id": fromMessageId,
-                    "offset": 0,
-                    "limit": 100,
-                    "filter": ["@type": filterType]
-                ], timeoutSeconds: 8.0)
+                resp = try await bridge.sendAsync(requestPayload, timeoutSeconds: 8.0)
             } catch {
                 if pageIndex > 1 {
                     break
                 }
-                throw error
+                await Self.sleepUninterruptibly(nanoseconds: 400_000_000)
+                do {
+                    resp = try await bridge.sendAsync(requestPayload, timeoutSeconds: 8.0)
+                } catch let retryError {
+                    throw retryError
+                }
             }
 
             if let srvTotal = Self.extractInt(from: resp["total_count"]), srvTotal > 0 {
@@ -2425,7 +2461,7 @@ public final class TelegramClientService: @unchecked Sendable {
 
         let start = Date()
         while Date().timeIntervalSince(start) < 5.0 {
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            await Self.sleepUninterruptibly(nanoseconds: 180_000_000)
             if let fileResp = try? await bridge.sendAsync(["@type": "getFile", "file_id": fileId], timeoutSeconds: 4.0),
                let completedPath = Self.completedLocalPath(from: fileResp) {
                 try? FileManager.default.removeItem(at: targetURL)
@@ -2509,7 +2545,7 @@ public final class TelegramClientService: @unchecked Sendable {
             }
         }
         if waitSec > 0 {
-            try? await Task.sleep(nanoseconds: UInt64(waitSec * 1_000_000_000))
+            await Self.sleepUninterruptibly(nanoseconds: UInt64(waitSec * 1_000_000_000))
         }
 
         let isAudioBusy = withLock { activeAudioDownloadsCount > 0 }
@@ -2746,7 +2782,7 @@ public final class TelegramClientService: @unchecked Sendable {
                         break
                     }
 
-                    try await Task.sleep(nanoseconds: 250_000_000)
+                    await Self.sleepUninterruptibly(nanoseconds: 250_000_000)
                 }
 
                 throw NSError(

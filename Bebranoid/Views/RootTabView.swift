@@ -51,16 +51,25 @@ public struct RootTabView: View {
             }
 
             if let banner = appState.statusBannerMessage, !banner.isEmpty, !isScreenOverridden {
+                let lowerBanner = banner.lowercased()
+                let isSuccess = appState.statusBannerIsSuccess
+                    || lowerBanner.hasPrefix("обновлено успешно")
+                    || lowerBanner.contains("обновлено:")
+                    || lowerBanner.contains("стабильна")
+                let bannerTint = isSuccess
+                    ? Color(red: 0.22, green: 0.92, blue: 0.54)
+                    : appState.accentSwiftUIColor
                 VStack {
                     HStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.yellow)
+                        Image(systemName: isSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(isSuccess ? Color(red: 0.22, green: 0.92, blue: 0.54) : .yellow)
                         Text(banner)
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
                             .foregroundStyle(.white)
                             .lineLimit(3)
                         Spacer(minLength: 4)
-                        if !appState.telegramClient.isAuthorized {
+                        if !isSuccess && !appState.telegramClient.isAuthorized && lowerBanner.contains("telegram") {
                             Button("Войти") {
                                 appState.statusBannerMessage = nil
                                 appState.openTelegramAuthSheet()
@@ -81,7 +90,7 @@ public struct RootTabView: View {
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .liquidGlassCard(cornerRadius: 18, tint: appState.accentSwiftUIColor, tintOpacity: 0.08)
+                    .liquidGlassCard(cornerRadius: 18, tint: bannerTint, tintOpacity: isSuccess ? 0.14 : 0.08)
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
                     Spacer()

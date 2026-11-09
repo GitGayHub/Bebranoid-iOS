@@ -766,7 +766,7 @@ public enum UITestingDemoSeeder {
             appState.navigationPlaylistPath = [playlistKey]
             Task { @MainActor in
                 if let pl = appState.libraryState.playlists.first(where: { $0.id == playlistKey }) {
-                    await appState.refreshPlaylist(pl)
+                    await appState.refreshPlaylist(pl, showResultBanner: true)
                 }
             }
 
@@ -774,13 +774,16 @@ public enum UITestingDemoSeeder {
             appState.selectedTab = 3
             appState.navigationPlaylistPath = []
             Task { @MainActor in
-                await appState.refreshAllYouTubePlaylists(allowFastIncrementalStop: true)
+                _ = await appState.refreshAllYouTubePlaylists(
+                    allowFastIncrementalStop: true,
+                    showResultBanner: true
+                )
             }
 
         case "telegram-dynamic":
             appState.selectedTab = 0
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 400_000_000)
+                await TelegramClientService.sleepUninterruptibly(nanoseconds: 400_000_000)
                 // Эмулируем приход нового аудиосообщения через живой обработчик TDLib updateNewMessage -> .telegramNewMessageReceived
                 let rawNewMsg = RawTelegramAudioMessage(
                     chatId: AppConfig.defaultPersonalMainChatId,
@@ -811,7 +814,10 @@ public enum UITestingDemoSeeder {
                     seedPlayableAudioCacheFile(for: added, frequencyHz: 440.0, storage: storage)
                     appState.invalidateLibraryCaches()
                 }
-                appState.statusBannerMessage = "Telegram Облако обновлено: +1 новый трек сверху"
+                appState.showStatusBanner(
+                    "Обновлено успешно: Telegram (\(appState.libraryState.tracks.count) треков, +1 новых)",
+                    isSuccess: true
+                )
             }
 
         case "idle-no-random-play":
@@ -841,8 +847,11 @@ public enum UITestingDemoSeeder {
                 // 3. Посылаем системное прерывание AVAudioSession (.began -> .ended + shouldResume)
                 appState.audioEngine.handleAudioSessionInterruption(began: true, shouldResume: false)
                 appState.audioEngine.handleAudioSessionInterruption(began: false, shouldResume: true)
-                try? await Task.sleep(nanoseconds: 800_000_000)
-                appState.statusBannerMessage = "Пауза стабильна: isPlaying=\(appState.isPlaying), автооткрытие заблокировано"
+                await TelegramClientService.sleepUninterruptibly(nanoseconds: 800_000_000)
+                appState.showStatusBanner(
+                    "Пауза стабильна: isPlaying=\(appState.isPlaying), автооткрытие заблокировано",
+                    isSuccess: true
+                )
             }
 
         default:

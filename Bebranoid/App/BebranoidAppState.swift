@@ -156,6 +156,8 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var isTelegramAuthPresented: Bool = false
     @Published public var inspectedTrackForInfo: Track? = nil
     @Published public var statusBannerMessage: String? = nil
+    @Published public var statusBannerIsSuccess: Bool = false
+    private var statusBannerGeneration: UInt64 = 0
     @Published public var availableTelegramChats: [TelegramChatSummary] = []
     @Published public var isSyncingTelegramLibrary: Bool = false
     @Published public var telegramScanProgressText: String = ""
@@ -164,10 +166,126 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var isVerifyingTelegramAccess: Bool = false
     @Published public var lastTelegramAccessReport: TelegramLiveAccessReport? = nil
     private var lastForegroundAutoSyncTime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var activeTelegramSyncTask: Task<TelegramSyncOutcome, Never>? = nil
+    private var activeYouTubeSyncTask: Task<YouTubeSyncOutcome, Never>? = nil
     #if DEBUG
     @Published public var demoDirectScreenOverride: String? = nil
     @Published public var demoFixedMeshTime: Double? = nil
     #endif
+
+    public struct TelegramSyncOutcome: Sendable {
+        public var succeeded: Bool
+        public var totalTelegramTracks: Int
+        public var newlyAddedCount: Int
+        public var errorMessage: String?
+
+        public init(succeeded: Bool, totalTelegramTracks: Int, newlyAddedCount: Int, errorMessage: String? = nil) {
+            self.succeeded = succeeded
+            self.totalTelegramTracks = totalTelegramTracks
+            self.newlyAddedCount = newlyAddedCount
+            self.errorMessage = errorMessage
+        }
+    }
+
+    public struct YouTubeSyncOutcome: Sendable {
+        public var succeededCount: Int
+        public var totalPlaylists: Int
+        public var totalTracks: Int
+        public var newlyAddedCount: Int
+        public var lastErrorMessage: String?
+
+        public init(
+            succeededCount: Int,
+            totalPlaylists: Int,
+            totalTracks: Int,
+            newlyAddedCount: Int,
+            lastErrorMessage: String? = nil
+        ) {
+            self.succeededCount = succeededCount
+            self.totalPlaylists = totalPlaylists
+            self.totalTracks = totalTracks
+            self.newlyAddedCount = newlyAddedCount
+            self.lastErrorMessage = lastErrorMessage
+        }
+    }
+
+    public func showStatusBanner(_ message: String, isSuccess: Bool, autoDismissSeconds: Double? = nil) {
+        statusBannerGeneration &+= 1
+        let currentGen = statusBannerGeneration
+        statusBannerIsSuccess = isSuccess
+        statusBannerMessage = message
+
+        let effectiveDismiss: Double? = {
+            if let explicit = autoDismissSeconds {
+                return explicit > 0 ? explicit : nil
+            }
+            if CommandLine.arguments.contains("--verify-live-emulator") {
+                return nil
+            }
+            return isSuccess ? 4.5 : nil
+        }()
+
+        if let dismissSec = effectiveDismiss {
+            Task { @MainActor [weak self] in
+                await TelegramClientService.sleepUninterruptibly(nanoseconds: UInt64(dismissSec * 1_000_000_000))
+                guard let self, self.statusBannerGeneration == currentGen else { return }
+                if self.statusBannerMessage == message {
+                    self.statusBannerMessage = nil
+                }
+            }
+        }
+    }
+
+    public static func isCancellationOrPreemptionError(_ error: Error) -> Bool {
+        if error is CancellationError || error is DownloadPreemptedError {
+            return true
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return true
+        }
+        if nsError.domain.contains("CancellationError") {
+            return true
+        }
+        let descLower = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if descLower == "cancelled"
+            || descLower == "canceled"
+            || descLower == "отменено"
+            || descLower.contains("swift.cancellationerror")
+            || descLower.contains("operation was cancelled")
+            || descLower.contains("загрузка вытеснена") {
+            return true
+        }
+        return false
+    }
+
+    public static func humanReadableSyncError(_ error: Error, sourceName: String) -> String {
+        if isCancellationOrPreemptionError(error) {
+            return "Не удалось завершить запрос к \(sourceName) (превышено время ожидания сети). Проверьте интернет и повторите попытку."
+        }
+        let raw = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let translated = TelegramClientService.translateTDLibError(raw)
+        if translated != raw {
+            return translated
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost, NSURLErrorDataNotAllowed:
+                return "Нет подключения к интернету для обновления \(sourceName)."
+            case NSURLErrorTimedOut:
+                return "Превышено время ожидания ответа от \(sourceName)."
+            case NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed:
+                return "Не удалось подключиться к серверу \(sourceName)."
+            default:
+                break
+            }
+        }
+        if raw.isEmpty {
+            return "Не удалось обновить \(sourceName)."
+        }
+        return raw
+    }
 
     // MARK: - Services
     public let audioEngine = DualStreamAudioEngine()
@@ -213,7 +331,7 @@ public final class BebranoidAppState: ObservableObject {
         }
         guard !TelegramClientService.isRunningUnderXCTest else { return }
         Task { [weak self] in
-            await self?.refreshAllYouTubePlaylists(allowFastIncrementalStop: true)
+            _ = await self?.refreshAllYouTubePlaylists(allowFastIncrementalStop: true, showResultBanner: false)
         }
         Task { [weak self] in
             guard let self else { return }
@@ -401,7 +519,7 @@ public final class BebranoidAppState: ObservableObject {
                 let now = ProcessInfo.processInfo.systemUptime
                 guard now - self.lastForegroundAutoSyncTime > 15.0 else { return }
                 self.lastForegroundAutoSyncTime = now
-                Task { await self.refreshFullLibraryAndYouTubePlaylists() }
+                Task { await self.refreshFullLibraryAndYouTubePlaylists(showResultBanner: false) }
             }
             .store(in: &cancellables)
         #endif
@@ -665,7 +783,10 @@ public final class BebranoidAppState: ObservableObject {
                         self.pendingDownloadTrack = nil
                         self.pendingDownloadAccentRGB = nil
                         self.pendingPlaybackTask = nil
-                        self.statusBannerMessage = error.localizedDescription
+                        if !Self.isCancellationOrPreemptionError(error) {
+                            let src = track.sourceKind == .youtube ? "YouTube" : "Telegram"
+                            self.showStatusBanner(Self.humanReadableSyncError(error, sourceName: src), isSuccess: false)
+                        }
                     }
                 }
             }
@@ -948,8 +1069,12 @@ public final class BebranoidAppState: ObservableObject {
                     self.pendingDownloadTrack = nil
                     self.pendingDownloadAccentRGB = nil
                 }
-                if !Task.isCancelled, self.playbackRequestGeneration == requestGen, self.currentTrack?.id == track.id {
-                    self.statusBannerMessage = error.localizedDescription
+                if !Task.isCancelled,
+                   self.playbackRequestGeneration == requestGen,
+                   self.currentTrack?.id == track.id,
+                   !Self.isCancellationOrPreemptionError(error) {
+                    let src = track.sourceKind == .youtube ? "YouTube" : "Telegram"
+                    self.showStatusBanner(Self.humanReadableSyncError(error, sourceName: src), isSuccess: false)
                 }
             }
         }
@@ -960,15 +1085,15 @@ public final class BebranoidAppState: ObservableObject {
         if isFullScreenPlayerPresented {
             isFullScreenPlayerPresented = false
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 320_000_000)
+                await TelegramClientService.sleepUninterruptibly(nanoseconds: 320_000_000)
                 isTelegramAuthPresented = false
-                try? await Task.sleep(nanoseconds: 40_000_000)
+                await TelegramClientService.sleepUninterruptibly(nanoseconds: 40_000_000)
                 isTelegramAuthPresented = true
             }
         } else {
             isTelegramAuthPresented = false
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 25_000_000)
+                await TelegramClientService.sleepUninterruptibly(nanoseconds: 25_000_000)
                 isTelegramAuthPresented = true
             }
         }
@@ -1659,62 +1784,232 @@ public final class BebranoidAppState: ObservableObject {
 
     /// Обновление конкретного плейлиста (pull-to-refresh внутри YouTube-плейлиста или «Последние 30»):
     /// начинает с самых последних добавленных треков (1-я страница мгновенно), а при неполном плейлисте догружает все 2500+ треков целиком.
-    public func refreshPlaylist(_ playlist: Playlist) async {
-        if playlist.isYouTubePlaylist {
-            guard !isSyncingYouTubePlaylists else { return }
-            let source = playlist.sourceUrl ?? (playlist.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
-            guard !source.isEmpty else { return }
-            isSyncingYouTubePlaylists = true
-            youtubeSyncProgressText = "Обновление \(playlist.name)..."
-            defer {
-                isSyncingYouTubePlaylists = false
-                youtubeSyncProgressText = ""
-            }
-            do {
-                try await importYouTubeURL(source, customTitle: playlist.name, allowFastIncrementalStop: true)
-            } catch {
-                statusBannerMessage = error.localizedDescription
-            }
-        } else if telegramClient.isAuthorized {
-            await syncTelegramLibrary()
-        }
-    }
-
-    public func refreshAllYouTubePlaylists(allowFastIncrementalStop: Bool = true) async {
-        ensureDefaultYouTubePlaylistRegistered()
-        let ytPlaylists = libraryState.playlists.filter { $0.isYouTubePlaylist }
-        guard !ytPlaylists.isEmpty else { return }
-        isSyncingYouTubePlaylists = true
-        youtubeSyncProgressText = "Синхронизация YouTube..."
-        defer {
-            isSyncingYouTubePlaylists = false
-            youtubeSyncProgressText = ""
-        }
-        for pl in ytPlaylists {
-            let source = pl.sourceUrl ?? (pl.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
-            guard !source.isEmpty else { continue }
-            do {
-                try await importYouTubeURL(
-                    source,
-                    customTitle: pl.name,
-                    allowFastIncrementalStop: allowFastIncrementalStop
+    /// Выполняется в неструктурированной `Task`, чтобы отмена жеста SwiftUI `.refreshable` никогда не обрывала обновление с `Cancelled`.
+    public func refreshPlaylist(_ playlist: Playlist, showResultBanner: Bool = true) async {
+        await Task { @MainActor [weak self] in
+            guard let self else { return }
+            if playlist.isYouTubePlaylist {
+                if self.isSyncingYouTubePlaylists {
+                    if let activeTask = self.activeYouTubeSyncTask {
+                        _ = await activeTask.value
+                    } else {
+                        while self.isSyncingYouTubePlaylists {
+                            await TelegramClientService.sleepUninterruptibly(nanoseconds: 100_000_000)
+                        }
+                    }
+                    if showResultBanner, (self.statusBannerMessage == nil || !self.statusBannerIsSuccess) {
+                        if let updated = self.libraryState.playlists.first(where: {
+                            $0.id == playlist.id || ($0.youtubePlaylistId != nil && $0.youtubePlaylistId == playlist.youtubePlaylistId)
+                        }) {
+                            self.showStatusBanner(
+                                "Обновлено успешно: «\(updated.name)» (\(updated.tracksSnapshot.count) треков)",
+                                isSuccess: true
+                            )
+                        }
+                    }
+                    return
+                }
+                let source = playlist.sourceUrl ?? (playlist.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
+                guard !source.isEmpty else { return }
+                self.isSyncingYouTubePlaylists = true
+                self.youtubeSyncProgressText = "Обновление \(playlist.name)..."
+                defer {
+                    self.isSyncingYouTubePlaylists = false
+                    self.youtubeSyncProgressText = ""
+                }
+                do {
+                    let res = try await self.importYouTubeURL(
+                        source,
+                        customTitle: playlist.name,
+                        allowFastIncrementalStop: true
+                    )
+                    if showResultBanner {
+                        let deltaText = res.newlyAddedCount > 0 ? "+\(res.newlyAddedCount) новых" : "новых песен нет"
+                        self.showStatusBanner(
+                            "Обновлено успешно: «\(res.playlistTitle)» (\(res.totalTracks) треков, \(deltaText))",
+                            isSuccess: true
+                        )
+                    }
+                } catch {
+                    let friendly = Self.humanReadableSyncError(error, sourceName: "YouTube")
+                    self.showStatusBanner("Ошибка обновления «\(playlist.name)»: \(friendly)", isSuccess: false)
+                }
+            } else if self.telegramClient.isAuthorized {
+                _ = await self.syncTelegramLibrary(showResultBanner: showResultBanner)
+            } else if showResultBanner {
+                self.showStatusBanner(
+                    "Обновлено успешно: медиатека (\(self.availableLibraryTracks.count) треков)",
+                    isSuccess: true
                 )
-            } catch {
-                statusBannerMessage = error.localizedDescription
             }
+        }.value
+    }
+
+    @discardableResult
+    public func refreshAllYouTubePlaylists(
+        allowFastIncrementalStop: Bool = true,
+        showResultBanner: Bool = false
+    ) async -> YouTubeSyncOutcome {
+        if let active = activeYouTubeSyncTask {
+            let outcome = await active.value
+            if showResultBanner {
+                applyYouTubeSyncBanner(from: outcome)
+            }
+            return outcome
+        }
+
+        let task = Task<YouTubeSyncOutcome, Never> { @MainActor [weak self] in
+            guard let self else {
+                return YouTubeSyncOutcome(succeededCount: 0, totalPlaylists: 0, totalTracks: 0, newlyAddedCount: 0)
+            }
+            self.ensureDefaultYouTubePlaylistRegistered()
+            let ytPlaylists = self.libraryState.playlists.filter { $0.isYouTubePlaylist }
+            guard !ytPlaylists.isEmpty else {
+                return YouTubeSyncOutcome(succeededCount: 0, totalPlaylists: 0, totalTracks: 0, newlyAddedCount: 0)
+            }
+            self.isSyncingYouTubePlaylists = true
+            self.youtubeSyncProgressText = "Синхронизация YouTube..."
+            defer {
+                self.isSyncingYouTubePlaylists = false
+                self.youtubeSyncProgressText = ""
+            }
+
+            var succeededCount = 0
+            var totalTracks = 0
+            var newlyAddedCount = 0
+            var lastErrorMessage: String? = nil
+
+            for pl in ytPlaylists {
+                let source = pl.sourceUrl ?? (pl.youtubePlaylistId.map { "https://www.youtube.com/playlist?list=\($0)" } ?? "")
+                guard !source.isEmpty else { continue }
+                do {
+                    let res = try await self.importYouTubeURL(
+                        source,
+                        customTitle: pl.name,
+                        allowFastIncrementalStop: allowFastIncrementalStop
+                    )
+                    succeededCount += 1
+                    totalTracks += res.totalTracks
+                    newlyAddedCount += res.newlyAddedCount
+                } catch {
+                    lastErrorMessage = Self.humanReadableSyncError(error, sourceName: "YouTube")
+                }
+            }
+
+            return YouTubeSyncOutcome(
+                succeededCount: succeededCount,
+                totalPlaylists: ytPlaylists.count,
+                totalTracks: totalTracks,
+                newlyAddedCount: newlyAddedCount,
+                lastErrorMessage: lastErrorMessage
+            )
+        }
+
+        activeYouTubeSyncTask = task
+        let outcome = await task.value
+        activeYouTubeSyncTask = nil
+
+        if showResultBanner {
+            applyYouTubeSyncBanner(from: outcome)
+        } else if outcome.succeededCount == 0, let err = outcome.lastErrorMessage {
+            showStatusBanner("Ошибка обновления YouTube: \(err)", isSuccess: false)
+        }
+        return outcome
+    }
+
+    private func applyYouTubeSyncBanner(from outcome: YouTubeSyncOutcome) {
+        if outcome.succeededCount > 0 {
+            let deltaText = outcome.newlyAddedCount > 0 ? "+\(outcome.newlyAddedCount) новых" : "новых песен нет"
+            showStatusBanner(
+                "Обновлено успешно: YouTube (\(outcome.totalTracks) треков, \(deltaText))",
+                isSuccess: true
+            )
+        } else if let err = outcome.lastErrorMessage {
+            showStatusBanner("Ошибка обновления YouTube: \(err)", isSuccess: false)
         }
     }
 
-    /// Полное обновление медиатеки и всех подключённых YouTube-плейлистов параллельно (pull-to-refresh или кнопка обновления)
-    public func refreshFullLibraryAndYouTubePlaylists() async {
+    /// Полное обновление медиатеки и всех подключённых YouTube-плейлистов параллельно (pull-to-refresh или кнопка обновления).
+    /// Запускается в неструктурированных `Task` (без `async let`), чтобы отмена жеста SwiftUI `.refreshable` никогда не вызывала `CancellationError`.
+    public func refreshFullLibraryAndYouTubePlaylists(showResultBanner: Bool = true) async {
         haptics.softSelection()
-        async let ytTask: Void = refreshAllYouTubePlaylists(allowFastIncrementalStop: true)
-        if telegramClient.isAuthorized {
-            await syncTelegramLibrary()
-        }
-        await ytTask
-        invalidateLibraryCaches()
-        artworkService.prefetchArtistCovers(artists: computedArtists)
+        await Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ytJob = Task { @MainActor [weak self] () -> YouTubeSyncOutcome in
+                guard let self else {
+                    return YouTubeSyncOutcome(succeededCount: 0, totalPlaylists: 0, totalTracks: 0, newlyAddedCount: 0)
+                }
+                return await self.refreshAllYouTubePlaylists(
+                    allowFastIncrementalStop: true,
+                    showResultBanner: false
+                )
+            }
+
+            var tgOutcome: TelegramSyncOutcome? = nil
+            if self.telegramClient.isAuthorized {
+                let tgJob = Task { @MainActor [weak self] () -> TelegramSyncOutcome in
+                    guard let self else {
+                        return TelegramSyncOutcome(succeeded: false, totalTelegramTracks: 0, newlyAddedCount: 0)
+                    }
+                    return await self.syncTelegramLibrary(showResultBanner: false)
+                }
+                tgOutcome = await tgJob.value
+            }
+
+            let ytOutcome = await ytJob.value
+            self.invalidateLibraryCaches()
+            self.artworkService.prefetchArtistCovers(artists: self.computedArtists)
+
+            guard showResultBanner else { return }
+
+            if let tg = tgOutcome {
+                if tg.succeeded && ytOutcome.succeededCount > 0 {
+                    let totalNew = tg.newlyAddedCount + ytOutcome.newlyAddedCount
+                    let deltaText = totalNew > 0 ? "+\(totalNew) новых" : "новых песен нет"
+                    self.showStatusBanner(
+                        "Обновлено успешно: Telegram (\(tg.totalTelegramTracks)) и YouTube (\(ytOutcome.totalTracks) треков, \(deltaText))",
+                        isSuccess: true
+                    )
+                } else if tg.succeeded {
+                    if ytOutcome.totalPlaylists > 0, ytOutcome.succeededCount == 0, let ytErr = ytOutcome.lastErrorMessage {
+                        self.showStatusBanner(
+                            "Telegram обновлён (\(tg.totalTelegramTracks) треков), но ошибка YouTube: \(ytErr)",
+                            isSuccess: false
+                        )
+                    } else {
+                        let deltaText = tg.newlyAddedCount > 0 ? "+\(tg.newlyAddedCount) новых" : "новых песен нет"
+                        self.showStatusBanner(
+                            "Обновлено успешно: Telegram (\(tg.totalTelegramTracks) треков, \(deltaText))",
+                            isSuccess: true
+                        )
+                    }
+                } else if ytOutcome.succeededCount > 0 {
+                    let errText = tg.errorMessage ?? "не удалось синхронизировать чат"
+                    self.showStatusBanner(
+                        "YouTube обновлён (\(ytOutcome.totalTracks) треков), но ошибка Telegram: \(errText)",
+                        isSuccess: false
+                    )
+                } else {
+                    let errText = tg.errorMessage ?? ytOutcome.lastErrorMessage ?? "Проверьте подключение к интернету"
+                    self.showStatusBanner("Ошибка обновления: \(errText)", isSuccess: false)
+                }
+            } else {
+                if ytOutcome.succeededCount > 0 {
+                    let deltaText = ytOutcome.newlyAddedCount > 0 ? "+\(ytOutcome.newlyAddedCount) новых" : "новых песен нет"
+                    self.showStatusBanner(
+                        "Обновлено успешно: YouTube (\(ytOutcome.totalTracks) треков, \(deltaText))",
+                        isSuccess: true
+                    )
+                } else if let ytErr = ytOutcome.lastErrorMessage {
+                    self.showStatusBanner("Ошибка обновления YouTube: \(ytErr)", isSuccess: false)
+                } else {
+                    self.showStatusBanner(
+                        "Обновлено успешно: медиатека (\(self.availableLibraryTracks.count) треков)",
+                        isSuccess: true
+                    )
+                }
+            }
+        }.value
     }
 
     public func toggleAlbumHidden(_ albumName: String) {
@@ -1784,121 +2079,134 @@ public final class BebranoidAppState: ObservableObject {
         })
     }
 
+    @discardableResult
     public func importYouTubeURL(
         _ input: String,
         customTitle: String = "",
         allowFastIncrementalStop: Bool = false
-    ) async throws {
-        let parsedInput = YouTubeLinkParser.parseInput(input)
-        let targetPlaylistId = parsedInput.playlistId
-        let existingKnownVideoIds: Set<String> = {
-            guard let pid = targetPlaylistId,
-                  let idx = findMatchingYouTubePlaylistIndex(for: pid) else {
-                return []
-            }
-            return Set(libraryState.playlists[idx].tracksSnapshot.compactMap { $0.youtubeVideoId })
-        }()
+    ) async throws -> (totalTracks: Int, newlyAddedCount: Int, playlistTitle: String) {
+        return try await Task { @MainActor [self] in
+            let parsedInput = YouTubeLinkParser.parseInput(input)
+            let targetPlaylistId = parsedInput.playlistId
+            let initialExistingIdx = targetPlaylistId.flatMap { self.findMatchingYouTubePlaylistIndex(for: $0) }
+            let previousTrackKeys: Set<String> = {
+                guard let idx = initialExistingIdx else { return [] }
+                return Set(self.libraryState.playlists[idx].tracksSnapshot.map(\.cacheKey))
+            }()
+            let existingKnownVideoIds: Set<String> = {
+                guard let idx = initialExistingIdx else { return [] }
+                return Set(self.libraryState.playlists[idx].tracksSnapshot.compactMap { $0.youtubeVideoId })
+            }()
 
-        let result = try await youtubeService.fetchYouTubeImport(
-            input: input,
-            existingKnownVideoIds: existingKnownVideoIds,
-            allowFastIncrementalStop: allowFastIncrementalStop,
-            onPartialSnapshot: { [weak self] partial in
-                await MainActor.run {
-                    guard let self else { return }
-                    self.youtubeSyncProgressText = "YouTube: \(partial.tracks.count) треков..."
-                    let resolvedTitle = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? partial.title : customTitle
-                    if let idx = self.findMatchingYouTubePlaylistIndex(for: partial.playlistId) {
-                        let merged = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
-                            existingTracks: self.libraryState.playlists[idx].tracksSnapshot,
-                            prefixSnapshots: partial.tracks
-                        )
-                        let currentKeys = self.libraryState.playlists[idx].tracksSnapshot.map(\.cacheKey)
-                        let mergedKeys = merged.tracks.map(\.cacheKey)
-                        if merged.newlyAddedCount > 0 || mergedKeys != currentKeys {
-                            self.libraryState.playlists[idx].kind = .youtube
-                            self.libraryState.playlists[idx].youtubePlaylistId = partial.playlistId
-                            self.libraryState.playlists[idx].sourceUrl = partial.canonicalURL
-                            if let thumb = partial.thumbnailURL, !thumb.isEmpty {
-                                self.libraryState.playlists[idx].remoteArtworkURL = thumb
+            let result = try await self.youtubeService.fetchYouTubeImport(
+                input: input,
+                existingKnownVideoIds: existingKnownVideoIds,
+                allowFastIncrementalStop: allowFastIncrementalStop,
+                onPartialSnapshot: { [weak self] partial in
+                    await MainActor.run {
+                        guard let self else { return }
+                        self.youtubeSyncProgressText = "YouTube: \(partial.tracks.count) треков..."
+                        let resolvedTitle = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? partial.title : customTitle
+                        if let idx = self.findMatchingYouTubePlaylistIndex(for: partial.playlistId) {
+                            let merged = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
+                                existingTracks: self.libraryState.playlists[idx].tracksSnapshot,
+                                prefixSnapshots: partial.tracks
+                            )
+                            let currentKeys = self.libraryState.playlists[idx].tracksSnapshot.map(\.cacheKey)
+                            let mergedKeys = merged.tracks.map(\.cacheKey)
+                            if merged.newlyAddedCount > 0 || mergedKeys != currentKeys {
+                                self.libraryState.playlists[idx].kind = .youtube
+                                self.libraryState.playlists[idx].youtubePlaylistId = partial.playlistId
+                                self.libraryState.playlists[idx].sourceUrl = partial.canonicalURL
+                                if let thumb = partial.thumbnailURL, !thumb.isEmpty {
+                                    self.libraryState.playlists[idx].remoteArtworkURL = thumb
+                                }
+                                self.libraryState.playlists[idx].tracksSnapshot = merged.tracks
+                                self.libraryState.playlists[idx].trackFilenames = mergedKeys
+                                self.libraryState.playlists[idx].lastSyncedAt = Date()
+                                self.invalidateLibraryCaches()
+                                self.saveLibraryState()
+                                self.artworkService.prewarmLibraryListThumbnails(
+                                    tracks: Array(partial.tracks.prefix(24)),
+                                    customAlbumCovers: self.libraryState.customAlbumCovers
+                                )
                             }
-                            self.libraryState.playlists[idx].tracksSnapshot = merged.tracks
-                            self.libraryState.playlists[idx].trackFilenames = mergedKeys
-                            self.libraryState.playlists[idx].lastSyncedAt = Date()
+                        } else if !partial.tracks.isEmpty {
+                            let newPlaylist = Playlist(
+                                id: "yt_\(partial.playlistId)",
+                                name: resolvedTitle,
+                                kind: .youtube,
+                                trackFilenames: partial.tracks.map { $0.cacheKey },
+                                tracksSnapshot: partial.tracks,
+                                sourceUrl: partial.canonicalURL,
+                                youtubePlaylistId: partial.playlistId,
+                                remoteArtworkURL: partial.thumbnailURL,
+                                lastSyncedAt: Date()
+                            )
+                            self.libraryState.playlists.append(newPlaylist)
+                            self.libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
                             self.invalidateLibraryCaches()
                             self.saveLibraryState()
-                            self.artworkService.prewarmLibraryListThumbnails(
-                                tracks: Array(partial.tracks.prefix(24)),
-                                customAlbumCovers: self.libraryState.customAlbumCovers
-                            )
                         }
-                    } else if !partial.tracks.isEmpty {
-                        let newPlaylist = Playlist(
-                            id: "yt_\(partial.playlistId)",
-                            name: resolvedTitle,
-                            kind: .youtube,
-                            trackFilenames: partial.tracks.map { $0.cacheKey },
-                            tracksSnapshot: partial.tracks,
-                            sourceUrl: partial.canonicalURL,
-                            youtubePlaylistId: partial.playlistId,
-                            remoteArtworkURL: partial.thumbnailURL,
-                            lastSyncedAt: Date()
-                        )
-                        self.libraryState.playlists.append(newPlaylist)
-                        self.libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
-                        self.invalidateLibraryCaches()
-                        self.saveLibraryState()
                     }
                 }
-            }
-        )
-        let title = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result.title : customTitle
-
-        if let existingIdx = findMatchingYouTubePlaylistIndex(for: result.playlistId) {
-            // Полный `reconcilePlaylist` выполняем ТОЛЬКО если догружены все страницы до конца (`isCompleteSnapshot == true`),
-            // иначе используем `mergeProgressivePlaylistPrefix`, чтобы никогда не обрезать плейлист на 300 или 500 треках при сбое сети!
-            let updatedTracks: [Track]
-            if result.isCompleteSnapshot {
-                updatedTracks = PlaylistPreferencesEngine.reconcilePlaylist(
-                    existingTracks: libraryState.playlists[existingIdx].tracksSnapshot,
-                    remoteSnapshots: result.tracks
-                )
-            } else {
-                updatedTracks = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
-                    existingTracks: libraryState.playlists[existingIdx].tracksSnapshot,
-                    prefixSnapshots: result.tracks
-                ).tracks
-            }
-            libraryState.playlists[existingIdx].kind = .youtube
-            libraryState.playlists[existingIdx].youtubePlaylistId = result.playlistId
-            libraryState.playlists[existingIdx].sourceUrl = result.canonicalURL
-            if let thumb = result.thumbnailURL, !thumb.isEmpty {
-                libraryState.playlists[existingIdx].remoteArtworkURL = thumb
-            }
-            libraryState.playlists[existingIdx].tracksSnapshot = updatedTracks
-            libraryState.playlists[existingIdx].trackFilenames = updatedTracks.map { $0.cacheKey }
-            libraryState.playlists[existingIdx].lastSyncedAt = Date()
-        } else {
-            let newPlaylist = Playlist(
-                id: "yt_\(result.playlistId)",
-                name: title,
-                kind: .youtube,
-                trackFilenames: result.tracks.map { $0.cacheKey },
-                tracksSnapshot: result.tracks,
-                sourceUrl: result.canonicalURL,
-                youtubePlaylistId: result.playlistId,
-                remoteArtworkURL: result.thumbnailURL,
-                lastSyncedAt: Date()
             )
-            libraryState.playlists.append(newPlaylist)
-            libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
-        }
-        invalidateLibraryCaches()
-        saveLibraryState()
-        artworkService.prewarmLibraryListThumbnails(
-            tracks: Array(result.tracks.prefix(60)),
-            customAlbumCovers: libraryState.customAlbumCovers
-        )
+            let title = customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result.title : customTitle
+            let finalTracks: [Track]
+
+            if let existingIdx = self.findMatchingYouTubePlaylistIndex(for: result.playlistId) {
+                // Полный `reconcilePlaylist` выполняем ТОЛЬКО если догружены все страницы до конца (`isCompleteSnapshot == true`),
+                // иначе используем `mergeProgressivePlaylistPrefix`, чтобы никогда не обрезать плейлист на 300 или 500 треках при сбое сети!
+                let updatedTracks: [Track]
+                if result.isCompleteSnapshot {
+                    updatedTracks = PlaylistPreferencesEngine.reconcilePlaylist(
+                        existingTracks: self.libraryState.playlists[existingIdx].tracksSnapshot,
+                        remoteSnapshots: result.tracks
+                    )
+                } else {
+                    updatedTracks = PlaylistPreferencesEngine.mergeProgressivePlaylistPrefix(
+                        existingTracks: self.libraryState.playlists[existingIdx].tracksSnapshot,
+                        prefixSnapshots: result.tracks
+                    ).tracks
+                }
+                self.libraryState.playlists[existingIdx].kind = .youtube
+                self.libraryState.playlists[existingIdx].youtubePlaylistId = result.playlistId
+                self.libraryState.playlists[existingIdx].sourceUrl = result.canonicalURL
+                if let thumb = result.thumbnailURL, !thumb.isEmpty {
+                    self.libraryState.playlists[existingIdx].remoteArtworkURL = thumb
+                }
+                self.libraryState.playlists[existingIdx].tracksSnapshot = updatedTracks
+                self.libraryState.playlists[existingIdx].trackFilenames = updatedTracks.map { $0.cacheKey }
+                self.libraryState.playlists[existingIdx].lastSyncedAt = Date()
+                finalTracks = updatedTracks
+            } else {
+                let newPlaylist = Playlist(
+                    id: "yt_\(result.playlistId)",
+                    name: title,
+                    kind: .youtube,
+                    trackFilenames: result.tracks.map { $0.cacheKey },
+                    tracksSnapshot: result.tracks,
+                    sourceUrl: result.canonicalURL,
+                    youtubePlaylistId: result.playlistId,
+                    remoteArtworkURL: result.thumbnailURL,
+                    lastSyncedAt: Date()
+                )
+                self.libraryState.playlists.append(newPlaylist)
+                self.libraryState.playlistShufflePreferences[newPlaylist.id] = PlaylistShufflePreference()
+                finalTracks = result.tracks
+            }
+            self.invalidateLibraryCaches()
+            self.saveLibraryState()
+            self.artworkService.prewarmLibraryListThumbnails(
+                tracks: Array(result.tracks.prefix(60)),
+                customAlbumCovers: self.libraryState.customAlbumCovers
+            )
+
+            let newlyAddedCount = previousTrackKeys.isEmpty
+                ? finalTracks.count
+                : finalTracks.filter { !previousTrackKeys.contains($0.cacheKey) }.count
+            return (totalTracks: finalTracks.count, newlyAddedCount: newlyAddedCount, playlistTitle: title)
+        }.value
     }
 
     // MARK: - Persistence & Restoration
@@ -1933,7 +2241,7 @@ public final class BebranoidAppState: ObservableObject {
         if currentTrack == nil {
             restorePreviousSession()
         }
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        await TelegramClientService.sleepUninterruptibly(nanoseconds: 350_000_000)
         await telegramClient.refreshAuthorizedUserProfile()
 
         // Всегда синхронизируем Telegram при запуске/авторизации, чтобы мгновенно видеть все новые песни!
@@ -1946,8 +2254,8 @@ public final class BebranoidAppState: ObservableObject {
                 statusBannerMessage = nil
                 break
             }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await syncTelegramLibrary()
+            await TelegramClientService.sleepUninterruptibly(nanoseconds: 2_000_000_000)
+            _ = await syncTelegramLibrary(showResultBanner: false)
         }
 
         await verifyTelegramAccessLive(autoTriggerSyncIfEmpty: true)
@@ -1999,7 +2307,7 @@ public final class BebranoidAppState: ObservableObject {
             && (report.serverMainAudioCount > 0 || report.serverMainDocumentCount > 0)
             && report.syncedMainTracksCount == 0
             && !isSyncingTelegramLibrary {
-            await syncTelegramLibrary()
+            _ = await syncTelegramLibrary(showResultBanner: false)
             let updatedCachedCount = libraryState.tracks.filter { cacheIndex.isCached($0) }.count
             report = await telegramClient.verifyLiveAccessAndChatTrackCounts(
                 mainChatId: libraryState.selectedTelegramChatId,
@@ -2081,10 +2389,12 @@ public final class BebranoidAppState: ObservableObject {
             let hasTelegramTracks = libraryState.tracks.contains(where: { $0.sourceKind == .telegram })
             if (autoSyncIfNeeded || !hasTelegramTracks),
                !libraryState.selectedTelegramChatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                await syncTelegramLibrary()
+                _ = await syncTelegramLibrary(showResultBanner: false)
             }
         } catch {
-            statusBannerMessage = error.localizedDescription
+            if !Self.isCancellationOrPreemptionError(error) {
+                showStatusBanner(Self.humanReadableSyncError(error, sourceName: "Telegram"), isSuccess: false)
+            }
         }
     }
 
@@ -2093,7 +2403,7 @@ public final class BebranoidAppState: ObservableObject {
         libraryState.selectedTelegramChatTitle = chat.title
         saveLibraryState()
         if telegramClient.isAuthorized {
-            Task { await syncTelegramLibrary() }
+            Task { _ = await syncTelegramLibrary(showResultBanner: true) }
         }
     }
 
@@ -2107,7 +2417,7 @@ public final class BebranoidAppState: ObservableObject {
         }
         saveLibraryState()
         if telegramClient.isAuthorized, !libraryState.selectedTelegramChatId.isEmpty {
-            Task { await syncTelegramLibrary() }
+            Task { _ = await syncTelegramLibrary(showResultBanner: true) }
         }
     }
 
@@ -2160,55 +2470,127 @@ public final class BebranoidAppState: ObservableObject {
         }
     }
 
-    public func syncTelegramLibrary() async {
-        guard !isSyncingTelegramLibrary else { return }
-        isSyncingTelegramLibrary = true
-        defer { isSyncingTelegramLibrary = false }
+    /// Синхронизирует облачные чаты Telegram в неструктурированной `Task`, чтобы отмена родительского SwiftUI `.refreshable` / `.task`
+    /// никогда не вызывала `Swift.CancellationError error 1`.
+    @discardableResult
+    public func syncTelegramLibrary(showResultBanner: Bool = true) async -> TelegramSyncOutcome {
+        if let active = activeTelegramSyncTask {
+            let outcome = await active.value
+            if showResultBanner {
+                applyTelegramSyncBanner(from: outcome)
+            }
+            return outcome
+        }
 
-        do {
-            let scannedTracks = try await telegramClient.syncMainAndArchiveChats(
-                mainChatId: libraryState.selectedTelegramChatId,
-                mainChatTitle: libraryState.selectedTelegramChatTitle,
-                archiveChatId: libraryState.selectedTelegramArchiveChatId,
-                archiveChatTitle: libraryState.selectedTelegramArchiveChatTitle,
-                onFirstPageTracks: { [weak self] firstPageTracks in
-                    await MainActor.run {
-                        self?.mergeIncomingTelegramTracksIntoLibrary(firstPageTracks)
+        let task = Task<TelegramSyncOutcome, Never> { @MainActor [weak self] in
+            guard let self else {
+                return TelegramSyncOutcome(succeeded: false, totalTelegramTracks: 0, newlyAddedCount: 0)
+            }
+            self.isSyncingTelegramLibrary = true
+            defer { self.isSyncingTelegramLibrary = false }
+
+            let previousTelegramKeys = Set(self.libraryState.tracks.filter { $0.sourceKind == .telegram }.map(\.cacheKey))
+
+            do {
+                let scannedTracks = try await self.telegramClient.syncMainAndArchiveChats(
+                    mainChatId: self.libraryState.selectedTelegramChatId,
+                    mainChatTitle: self.libraryState.selectedTelegramChatTitle,
+                    archiveChatId: self.libraryState.selectedTelegramArchiveChatId,
+                    archiveChatTitle: self.libraryState.selectedTelegramArchiveChatTitle,
+                    onFirstPageTracks: { [weak self] firstPageTracks in
+                        await MainActor.run {
+                            self?.mergeIncomingTelegramTracksIntoLibrary(firstPageTracks)
+                        }
+                    }
+                )
+                let existingTelegram = self.libraryState.tracks.filter { $0.sourceKind == .telegram }
+                if !scannedTracks.isEmpty {
+                    if scannedTracks.count >= existingTelegram.count {
+                        let localAndYouTube = self.libraryState.tracks.filter { $0.sourceKind != .telegram }
+                        self.libraryState.tracks = scannedTracks + localAndYouTube
+                        self.invalidateLibraryCaches()
+                        self.saveLibraryState()
+                    } else {
+                        self.mergeIncomingTelegramTracksIntoLibrary(scannedTracks)
                     }
                 }
-            )
-            let existingTelegram = libraryState.tracks.filter { $0.sourceKind == .telegram }
-            if scannedTracks.isEmpty && !existingTelegram.isEmpty {
-                return
-            }
-            if scannedTracks.count >= existingTelegram.count {
-                let localAndYouTube = libraryState.tracks.filter { $0.sourceKind != .telegram }
-                libraryState.tracks = scannedTracks + localAndYouTube
-                invalidateLibraryCaches()
-                saveLibraryState()
-            } else {
-                mergeIncomingTelegramTracksIntoLibrary(scannedTracks)
-            }
-            statusBannerMessage = nil
-            artworkService.prefetchArtistCovers(artists: computedArtists)
-            artworkService.prewarmLibraryListThumbnails(
-                tracks: availableLibraryTracks,
-                customAlbumCovers: libraryState.customAlbumCovers
-            )
+                self.artworkService.prefetchArtistCovers(artists: self.computedArtists)
+                self.artworkService.prewarmLibraryListThumbnails(
+                    tracks: self.availableLibraryTracks,
+                    customAlbumCovers: self.libraryState.customAlbumCovers
+                )
 
-            if var currentReport = lastTelegramAccessReport {
-                let normMain = AppConfig.normalizeTelegramChatId(libraryState.selectedTelegramChatId)
-                let syncedTg = libraryState.tracks.filter { $0.sourceKind == .telegram }
-                let syncedMain = syncedTg.filter {
-                    !$0.isFromArchive && (normMain.isEmpty || AppConfig.normalizeTelegramChatId($0.chatId ?? "") == normMain)
+                let finalTelegramTracks = self.libraryState.tracks.filter { $0.sourceKind == .telegram }
+                let newlyAddedCount = previousTelegramKeys.isEmpty
+                    ? finalTelegramTracks.count
+                    : finalTelegramTracks.filter { !previousTelegramKeys.contains($0.cacheKey) }.count
+
+                if var currentReport = self.lastTelegramAccessReport {
+                    let normMain = AppConfig.normalizeTelegramChatId(self.libraryState.selectedTelegramChatId)
+                    let syncedMain = finalTelegramTracks.filter {
+                        !$0.isFromArchive && (normMain.isEmpty || AppConfig.normalizeTelegramChatId($0.chatId ?? "") == normMain)
+                    }
+                    currentReport.syncedMainTracksCount = syncedMain.count
+                    currentReport.totalSyncedTelegramTracksCount = finalTelegramTracks.count
+                    currentReport.cachedTracksCount = self.libraryState.tracks.filter { self.cacheIndex.isCached($0) }.count
+                    self.lastTelegramAccessReport = currentReport
                 }
-                currentReport.syncedMainTracksCount = syncedMain.count
-                currentReport.totalSyncedTelegramTracksCount = syncedTg.count
-                currentReport.cachedTracksCount = libraryState.tracks.filter { cacheIndex.isCached($0) }.count
-                lastTelegramAccessReport = currentReport
+
+                return TelegramSyncOutcome(
+                    succeeded: true,
+                    totalTelegramTracks: finalTelegramTracks.count,
+                    newlyAddedCount: newlyAddedCount,
+                    errorMessage: nil
+                )
+            } catch {
+                let finalTelegramTracks = self.libraryState.tracks.filter { $0.sourceKind == .telegram }
+                let newlyAddedCount = previousTelegramKeys.isEmpty
+                    ? finalTelegramTracks.count
+                    : finalTelegramTracks.filter { !previousTelegramKeys.contains($0.cacheKey) }.count
+
+                if Self.isCancellationOrPreemptionError(error), !finalTelegramTracks.isEmpty {
+                    return TelegramSyncOutcome(
+                        succeeded: true,
+                        totalTelegramTracks: finalTelegramTracks.count,
+                        newlyAddedCount: newlyAddedCount,
+                        errorMessage: nil
+                    )
+                }
+
+                let friendly = Self.humanReadableSyncError(error, sourceName: "Telegram")
+                return TelegramSyncOutcome(
+                    succeeded: false,
+                    totalTelegramTracks: finalTelegramTracks.count,
+                    newlyAddedCount: newlyAddedCount,
+                    errorMessage: friendly
+                )
             }
-        } catch {
-            statusBannerMessage = error.localizedDescription
+        }
+
+        activeTelegramSyncTask = task
+        let outcome = await task.value
+        activeTelegramSyncTask = nil
+
+        if showResultBanner {
+            applyTelegramSyncBanner(from: outcome)
+        } else if !outcome.succeeded, let err = outcome.errorMessage {
+            showStatusBanner("Ошибка обновления Telegram: \(err)", isSuccess: false)
+        } else if outcome.succeeded, statusBannerMessage != nil, !statusBannerIsSuccess {
+            statusBannerMessage = nil
+        }
+
+        return outcome
+    }
+
+    private func applyTelegramSyncBanner(from outcome: TelegramSyncOutcome) {
+        if outcome.succeeded {
+            let deltaText = outcome.newlyAddedCount > 0 ? "+\(outcome.newlyAddedCount) новых" : "новых песен нет"
+            showStatusBanner(
+                "Обновлено успешно: Telegram (\(outcome.totalTelegramTracks) треков, \(deltaText))",
+                isSuccess: true
+            )
+        } else if let err = outcome.errorMessage {
+            showStatusBanner("Ошибка обновления Telegram: \(err)", isSuccess: false)
         }
     }
 

@@ -124,10 +124,15 @@ public struct YouTubeImportSheet: View {
         defer { isImporting = false }
 
         do {
-            try await appState.importYouTubeURL(urlInput, customTitle: customTitleInput)
+            let res = try await appState.importYouTubeURL(urlInput, customTitle: customTitleInput)
+            let deltaText = res.newlyAddedCount > 0 ? "+\(res.newlyAddedCount) новых" : "новых песен нет"
+            appState.showStatusBanner(
+                "Обновлено успешно: «\(res.playlistTitle)» (\(res.totalTracks) треков, \(deltaText))",
+                isSuccess: true
+            )
             dismiss()
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = BebranoidAppState.humanReadableSyncError(error, sourceName: "YouTube")
         }
     }
 }

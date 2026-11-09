@@ -28,32 +28,46 @@ public struct PlaylistsGridView: View {
 
                 ScrollView {
                     VStack(spacing: 16) {
-                        HStack(spacing: 12) {
+                        HStack(spacing: 8) {
                             Button {
                                 isNewPlaylistAlertPresented = true
                             } label: {
-                                Label("Новый плейлист", systemImage: "plus.circle.fill")
-                                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 10)
-                                    .liquidGlassCapsule(tint: .white, isProminent: false)
+                                HStack(spacing: 6) {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.system(size: 13, weight: .bold))
+                                    Text("Новый плейлист")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.85)
+                                }
+                                .fixedSize(horizontal: true, vertical: false)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .liquidGlassCapsule(tint: .white, isProminent: false)
                             }
                             .buttonStyle(.plain)
 
                             Button {
                                 isYouTubeImportPresented = true
                             } label: {
-                                Label("Импорт YouTube", systemImage: "play.rectangle.fill")
-                                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                                    .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 10)
-                                    .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
+                                HStack(spacing: 6) {
+                                    Image(systemName: "play.rectangle.fill")
+                                        .font(.system(size: 13, weight: .bold))
+                                    Text("Импорт YouTube")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.85)
+                                }
+                                .fixedSize(horizontal: true, vertical: false)
+                                .foregroundStyle(Color(red: 0.08, green: 0.06, blue: 0.14))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .liquidGlassCapsule(tint: appState.accentSwiftUIColor, isProminent: true)
                             }
                             .buttonStyle(.plain)
 
-                            Spacer()
+                            Spacer(minLength: 4)
 
                             Button {
                                 appState.haptics.lightTap()
@@ -70,7 +84,7 @@ public struct PlaylistsGridView: View {
                                             .foregroundStyle(.white.opacity(0.92))
                                     }
                                 }
-                                .frame(width: 37, height: 37)
+                                .frame(width: 36, height: 36)
                                 .liquidGlassCircle(tint: appState.accentSwiftUIColor, isHighlighted: false)
                             }
                             .buttonStyle(.plain)
