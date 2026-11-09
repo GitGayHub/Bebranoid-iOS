@@ -163,7 +163,7 @@ public final class BebranoidAppState: ObservableObject {
     @Published public var youtubeSyncProgressText: String = ""
     @Published public var isVerifyingTelegramAccess: Bool = false
     @Published public var lastTelegramAccessReport: TelegramLiveAccessReport? = nil
-    private var lastForegroundAutoSyncTime: TimeInterval = 0
+    private var lastForegroundAutoSyncTime: TimeInterval = ProcessInfo.processInfo.systemUptime
     #if DEBUG
     @Published public var demoDirectScreenOverride: String? = nil
     @Published public var demoFixedMeshTime: Double? = nil
@@ -363,22 +363,28 @@ public final class BebranoidAppState: ObservableObject {
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .telegramNewMessageReceived)
-            .receive(on: RunLoop.main)
             .sink { [weak self] note in
-                guard let self,
-                      let rawMsg = note.userInfo?["rawMessage"] as? RawTelegramAudioMessage,
+                guard let rawMsg = note.userInfo?["rawMessage"] as? RawTelegramAudioMessage,
                       let chatId = note.userInfo?["chatId"] as? String else { return }
-                let normIncoming = AppConfig.normalizeTelegramChatId(chatId)
-                let normMain = AppConfig.normalizeTelegramChatId(self.libraryState.selectedTelegramChatId)
-                let normArchive = AppConfig.normalizeTelegramChatId(self.libraryState.selectedTelegramArchiveChatId)
-                guard !normIncoming.isEmpty,
-                      (normIncoming == normMain || normIncoming == normArchive) else { return }
-                let isArchive = (!normArchive.isEmpty && normIncoming == normArchive && normIncoming != normMain)
-                var newTrack = TelegramScanner.buildTrack(from: rawMsg, isFromArchive: isArchive)
-                if newTrack.chatId == nil || newTrack.chatId?.isEmpty == true {
-                    newTrack.chatId = isArchive ? self.libraryState.selectedTelegramArchiveChatId : self.libraryState.selectedTelegramChatId
+                let handleOnMain = { @MainActor [weak self] in
+                    guard let self else { return }
+                    let normIncoming = AppConfig.normalizeTelegramChatId(chatId)
+                    let normMain = AppConfig.normalizeTelegramChatId(self.libraryState.selectedTelegramChatId)
+                    let normArchive = AppConfig.normalizeTelegramChatId(self.libraryState.selectedTelegramArchiveChatId)
+                    guard !normIncoming.isEmpty,
+                          (normIncoming == normMain || normIncoming == normArchive) else { return }
+                    let isArchive = (!normArchive.isEmpty && normIncoming == normArchive && normIncoming != normMain)
+                    var newTrack = TelegramScanner.buildTrack(from: rawMsg, isFromArchive: isArchive)
+                    if newTrack.chatId == nil || newTrack.chatId?.isEmpty == true {
+                        newTrack.chatId = isArchive ? self.libraryState.selectedTelegramArchiveChatId : self.libraryState.selectedTelegramChatId
+                    }
+                    self.mergeIncomingTelegramTracksIntoLibrary([newTrack])
                 }
-                self.mergeIncomingTelegramTracksIntoLibrary([newTrack])
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { handleOnMain() }
+                } else {
+                    Task { @MainActor in handleOnMain() }
+                }
             }
             .store(in: &cancellables)
 
@@ -387,6 +393,11 @@ public final class BebranoidAppState: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self else { return }
+                #if DEBUG
+                if UITestingDemoSeeder.isDemoModeActive || UITestingDemoSeeder.isLiveEmulatorVerifyModeActive {
+                    return
+                }
+                #endif
                 let now = ProcessInfo.processInfo.systemUptime
                 guard now - self.lastForegroundAutoSyncTime > 15.0 else { return }
                 self.lastForegroundAutoSyncTime = now
@@ -1361,11 +1372,11 @@ public final class BebranoidAppState: ObservableObject {
     /// до входа в Telegram скрывает облачные незакешированные треки, чтобы не показывать невоспроизводимую «фейковую» медиатеку.
     public var availableLibraryTracks: [Track] {
         #if DEBUG
-        if UITestingDemoSeeder.isDemoModeActive {
+        if UITestingDemoSeeder.isDemoModeActive || UITestingDemoSeeder.isLiveEmulatorVerifyModeActive {
             return libraryState.tracks
         }
         #endif
-        if telegramClient.isAuthorized {
+        if telegramClient.isAuthorized || !libraryState.selectedTelegramChatId.isEmpty {
             return libraryState.tracks
         }
         return libraryState.tracks.filter { $0.sourceKind != .telegram || cacheIndex.isCached($0) }
