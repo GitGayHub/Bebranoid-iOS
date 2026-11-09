@@ -108,12 +108,12 @@ jobs:
             local WAIT_SEC="$2"
             local OUT_FILE="$3"
             echo "Launching Bebranoid live emulator verification for step=$STEP_NAME (wait ${WAIT_SEC}s) -> $OUT_FILE"
-            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-            sleep 0.3
+            killall -9 Bebranoid >/dev/null 2>&1 || true
+            sleep 0.2
             xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --verify-live-emulator "--live-step=$STEP_NAME" >/dev/null 2>&1
             sleep "$WAIT_SEC"
             xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
-            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+            killall -9 Bebranoid >/dev/null 2>&1 || true
           }
 
           capture_live_verify "youtube-before"      3.5 "build/preview/live-verification/01-youtube-before-refresh.png"
@@ -127,7 +127,7 @@ jobs:
             local OUT_FILE="$2"
             shift 2
             echo "Launching Bebranoid for screen=$SCREEN_ARG $* -> $OUT_FILE"
-            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+            killall -9 Bebranoid >/dev/null 2>&1 || true
             sleep 0.2
             xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo "--screen=$SCREEN_ARG" "$@" >/dev/null 2>&1
             sleep 1.5
@@ -139,14 +139,14 @@ jobs:
               xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
               FSIZE=$(stat -f%z "$OUT_FILE" 2>/dev/null || echo 0)
               if [ "$FSIZE" -lt 150000 ]; then
-                xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-                sleep 0.5
+                killall -9 Bebranoid >/dev/null 2>&1 || true
+                sleep 0.4
                 xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo "--screen=$SCREEN_ARG" "$@" >/dev/null 2>&1
                 sleep 2.2
                 xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
               fi
             fi
-            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+            killall -9 Bebranoid >/dev/null 2>&1 || true
           }
 
           capture_screen "library"     "build/preview/screenshots/01-library.png"
