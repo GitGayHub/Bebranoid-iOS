@@ -101,27 +101,48 @@ jobs:
 
           xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
 
+          # Capture 5 Live Emulator Verification scenarios FIRST (real YouTube playlist PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP, Telegram dynamic update, idle/paused stability)
+          mkdir -p build/preview/live-verification
+          capture_live_verify() {
+            local STEP_NAME="$1"
+            local WAIT_SEC="$2"
+            local OUT_FILE="$3"
+            echo "Launching Bebranoid live emulator verification for step=$STEP_NAME (wait ${WAIT_SEC}s) -> $OUT_FILE"
+            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+            sleep 0.3
+            xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --verify-live-emulator "--live-step=$STEP_NAME" >/dev/null 2>&1
+            sleep "$WAIT_SEC"
+            xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
+            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
+          }
+
+          capture_live_verify "youtube-before"      3.5 "build/preview/live-verification/01-youtube-before-refresh.png"
+          capture_live_verify "youtube-after"       8.0 "build/preview/live-verification/02-youtube-after-live-refresh.png"
+          capture_live_verify "playlists-grid"      7.0 "build/preview/live-verification/03-playlists-grid-live.png"
+          capture_live_verify "telegram-dynamic"    3.5 "build/preview/live-verification/04-telegram-dynamic-update.png"
+          capture_live_verify "idle-no-random-play" 3.5 "build/preview/live-verification/05-idle-paused-no-random-play.png"
+
           capture_screen() {
             local SCREEN_ARG="$1"
             local OUT_FILE="$2"
             shift 2
             echo "Launching Bebranoid for screen=$SCREEN_ARG $* -> $OUT_FILE"
             xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-            sleep 0.5
+            sleep 0.2
             xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo "--screen=$SCREEN_ARG" "$@" >/dev/null 2>&1
-            sleep 2.6
+            sleep 1.5
             xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
             local FSIZE=$(stat -f%z "$OUT_FILE" 2>/dev/null || echo 0)
             if [ "$FSIZE" -lt 150000 ]; then
               echo "Screenshot $OUT_FILE was small ($FSIZE bytes), waiting for frame render and retrying..."
-              sleep 2.5
+              sleep 1.8
               xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
               FSIZE=$(stat -f%z "$OUT_FILE" 2>/dev/null || echo 0)
               if [ "$FSIZE" -lt 150000 ]; then
                 xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-                sleep 0.8
+                sleep 0.5
                 xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --ui-testing-demo "--screen=$SCREEN_ARG" "$@" >/dev/null 2>&1
-                sleep 3.2
+                sleep 2.2
                 xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
               fi
             fi
@@ -152,28 +173,6 @@ jobs:
           capture_screen "player" "build/preview/mesh/mesh-03-dark-red.png" "--mesh-fixture=dark-red"
           capture_screen "player" "build/preview/mesh/mesh-04-bw.png"       "--mesh-fixture=bw"
 
-          # Capture 5 Live Emulator Verification scenarios (real YouTube playlist PL7nl9DQFBc4Ewp94w06FjUdCJdIluoxFP, Telegram dynamic update, idle/paused stability)
-          mkdir -p build/preview/live-verification
-          capture_live_verify() {
-            local STEP_NAME="$1"
-            local WAIT_SEC="$2"
-            local OUT_FILE="$3"
-            echo "Launching Bebranoid live emulator verification for step=$STEP_NAME (wait ${WAIT_SEC}s) -> $OUT_FILE"
-            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-            sleep 0.5
-            xcrun simctl launch "$DEVICE_UDID" com.bebranoid.ios --verify-live-emulator "--live-step=$STEP_NAME" >/dev/null 2>&1
-            sleep "$WAIT_SEC"
-            xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_FILE"
-            xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-          }
-
-          capture_live_verify "youtube-before"      4.0 "build/preview/live-verification/01-youtube-before-refresh.png"
-          capture_live_verify "youtube-after"       9.0 "build/preview/live-verification/02-youtube-after-live-refresh.png"
-          capture_live_verify "playlists-grid"      8.0 "build/preview/live-verification/03-playlists-grid-live.png"
-          capture_live_verify "telegram-dynamic"    4.0 "build/preview/live-verification/04-telegram-dynamic-update.png"
-          capture_live_verify "idle-no-random-play" 4.0 "build/preview/live-verification/05-idle-paused-no-random-play.png"
-          xcrun simctl terminate "$DEVICE_UDID" com.bebranoid.ios >/dev/null 2>&1 || true
-
           # Encode real H.264 MP4 video from live captured Simulator screen sequence & Mesh animation frames (never copy a PNG!)
           echo "Encoding real H.264 MP4 video from captured Simulator screen sequence & Mesh animation frames..."
           mkdir -p build/preview/video-seq
@@ -200,6 +199,7 @@ jobs:
 
           # Package Simulator .app bundle
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/Bebranoid-iOS-Simulator-App.zip
+          xcrun simctl shutdown all >/dev/null 2>&1 || true
 
       - name: Verify Unique Screenshot Hashes & Valid H.264 MP4 Stream
         run: |
